@@ -1,0 +1,15 @@
+---
+- hosts: all
+  gather_facts: no
+  become: yes
+  vars:
+    target_username: "{{ username }}"
+    target_password_hash: "{{ password_hash }}"
+  tasks:
+    - name: Set password
+      shell: echo '{{ target_username }}:{{ target_password_hash }}' | sudo chpasswd -e
+      register: passwd_result
+
+    - name: Register results
+      set_fact:
+        task_output: "{{ passwd_result.stdout + passwd_result.stderr }}"

@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+*.log
+
+# Virtual environment
+.venv/
+venv/
+
+# Environment
+.env
+!.env.example
+
+# Node
+node_modules/
+frontend/dist/
+.vite/
+
+# Testing
+.pytest_cache/
+coverage/
+htmlcov/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# OS
+Thumbs.db
+
+# Claude Code
+.claude/settings.local.json
+.claude/worktrees/
+
+# Database
+*.db
+*.sqlite3

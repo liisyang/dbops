@@ -1,0 +1,35 @@
+---
+- hosts: all
+  gather_facts: no
+  become: yes
+  vars:
+    target_username: "{{ username }}"
+    target_password_hash: "{{ password_hash }}"
+    user_group: "{{ group | default('dba') }}"
+    user_home_prefix: "{{ home_prefix | default('/home') }}"
+    user_shell: "{{ shell | default('/bin/ksh') }}"
+    profile_path: "{{ profile }}"
+  tasks:
+    - name: Check if user exists
+      shell: id {{ target_username }}
+      register: user_check
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Create user if not exists
+      shell: |
+        sudo useradd -g {{ user_group }} -s {{ user_shell }} \
+          -d {{ user_home_prefix }}/{{ target_username }} {{ target_username }} && \
+        sudo ln -sf {{ profile_path }} {{ user_home_prefix }}/{{ target_username }}/.profile && \
+        echo '{{ target_username }}:{{ target_password_hash }}' | sudo chpasswd -e
+      when: user_check.rc != 0
+      register: create_result
+
+    - name: Set password for existing user
+      shell: echo '{{ target_username }}:{{ target_password_hash }}' | sudo chpasswd -e
+      when: user_check.rc == 0
+      register: passwd_result
+
+    - name: Register results
+      set_fact:
+        task_output: "{{ create_result.stdout + create_result.stderr if create_result is defined else (passwd_result.stdout + passwd_result.stderr if passwd_result is defined else '') }}"

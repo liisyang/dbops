@@ -1,0 +1,23 @@
+# 核心依赖
+werkzeug==2.3.7
+paramiko==3.3.1
+openpyxl==3.1.2
+celery==5.5.3
+redis==5.0.0
+ansible-runner==2.3.6
+passlib[bcrypt]==1.7.4
+psycopg2-binary==2.9.9
+python-dotenv==1.0.0
+
+# FastAPI
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+python-jose[cryptography]==3.3.0
+pydantic-settings==2.1.0
+python-multipart==0.0.6
+
+# SQLAlchemy (PostgreSQL)
+sqlalchemy==2.0.25
+
+# 测试
+pytest==7.4.0
