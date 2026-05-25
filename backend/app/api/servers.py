@@ -211,7 +211,7 @@ async def batch_delete_servers(
     deleted = 0
     for sid in ids:
         try:
-            ServerService.delete_server(db=db, server_id=sid)
+            DbopsAssetService.delete_server(db=db, server_id=int(sid))
             deleted += 1
         except Exception:
             pass
@@ -624,7 +624,7 @@ async def preview_import(
     db: Session = Depends(get_db),
 ):
     """预览导入"""
-    if not file.filename.endswith(".xlsx"):
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式")
     try:
         content = await file.read()
@@ -643,7 +643,7 @@ async def execute_import(
     db: Session = Depends(get_db),
 ):
     """执行导入"""
-    if not file.filename.endswith(".xlsx"):
+    if not file.filename or not file.filename.lower().endswith(".xlsx"):
         raise HTTPException(status_code=400, detail="仅支持 .xlsx 格式")
     try:
         content = await file.read()

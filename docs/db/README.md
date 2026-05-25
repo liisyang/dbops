@@ -1,8 +1,8 @@
 # DB 附录
 
-> 文档状态：AI 自动维护  
-> 最近校准：待校准  
-> 依据来源：真实代码 / DDL baseline / 测试库元数据 SQL
+> 文档状态：AI 自动维护
+> 最近校准：2026-05-22
+> 依据来源：真实代码 / DDL baseline / ORM Model / Service 查询 / 实时数据库元数据扫描（PostgreSQL 17.9）
 
 ## 1. 维护定位
 
@@ -20,10 +20,10 @@
 
 | 项目 | 内容 |
 |---|---|
-| 数据库类型 | 需现场确认 |
-| 当前连接环境 | 测试库 / 开发库，需现场确认 |
+| 数据库类型 | PostgreSQL 17.9 |
+| 当前连接环境 | 测试库 / 开发库（已连接扫描，结构已与 DDL 文件校准） |
 | 权限边界 | 由数据库账号控制 |
-| 结构来源 | AI 生成只读元数据 SQL 查询 |
+| 结构来源 | `backend/db/dbops_phase1_25_tables.sql` + ORM 模型 + Service 查询 + 实时元数据扫描 |
 | 文档维护方式 | AI 自动维护 |
 
 ## 3. DB 连接安全边界
@@ -40,27 +40,72 @@
 
 | Schema | 用途 | 依据 | 备注 |
 |---|---|---|---|
+| dbops | DBOps 平台主 schema，含全部 26 张业务表 + 4 视图 + 17 触发器 + 25 序列 | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/app/database.py:18` + 实时元数据扫描 | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
+| public | PostgreSQL 默认 schema | — | plpgsql 扩展所在 |
 
 ## 5. 核心表摘要
 
 | 模块 | Table | 用途 | 关键字段 | 依据 |
 |---|---|---|---|---|
+| 认证 | users | 平台登录用户 | username, password_hash, role | `backend/app/models/user.py:13` |
+| 业务 | system_group | 业务大类（8 类固定） | group_code, name | `backend/app/services/dbops_stats_service.py:82-88` |
+| 业务 | business_system | 业务系统主数据 | system_name, status, biz_level | `backend/app/services/dbops_asset_service.py:80-129` |
+| 联系人 | contact | 联系人主数据 | employee_no, contact_name, email | `backend/app/services/dbops_contact_service.py:18-35` |
+| 联系人 | business_system_contact | 业务-联系人角色关系 | role_code (6 种角色) | `backend/app/services/dbops_asset_service.py:176-201` |
+| 资产 | site | 站点/机房 | country, deploy_type, provider, factory_area | `backend/app/services/dbops_import_service.py:744-765` |
+| 资产 | server | 服务器/虚拟机 | ip_address (INET), site_id, status | `backend/app/services/dbops_asset_service.py:390-503` |
+| 资产 | cluster | 数据库集群 | cluster_code, cluster_type, ha_enabled | `backend/app/services/dbops_asset_service.py:295-325` |
+| 资产 | cluster_vip | 集群 VIP | vip_address, vip_type | `backend/app/services/dbops_asset_service.py:302-303` |
+| 资产 | db_instance | 数据库实例 | instance_name, node_role, cluster_id | `backend/app/services/dbops_asset_service.py:341-380` |
+| 资产 | topology_relation | 实例拓扑关系 | relation_type, sync_mode | `backend/app/services/dbops_import_service.py:1030-1062` |
+| 资产 | asset_event_history | 资产事件历史 | asset_type, event_type, changed_fields | `backend/app/services/asset_event_history_service.py` |
+| 字典 | os_version | OS 版本字典+生命周期 | os_name, version_name, lifecycle_status | ORM 模型 |
+| 字典 | db_type | DB 类型字典 | type_code, category, license_type | `backend/app/services/dbops_asset_service.py:506-508` |
+| 字典 | db_version | DB 版本字典+生命周期 | version_code, patch_version | ORM 模型 |
+| 标签 | tag | 标签字典 | tag_type, tag_name | ORM 模型 |
+| 标签 | resource_tag | 资源标签关系（多态） | resource_type, resource_id, tag_id | ORM 模型 |
+| 备份 | backup_policy | 备份策略 | policy_code, backup_type, retention_days | ORM 模型 |
+| 备份 | instance_backup_policy | 实例-策略关系 | instance_id, policy_id | ORM 模型 |
+| 巡检 | inspection_item | 巡检项定义 | item_code, category, severity | ORM 模型 |
+| 巡检 | inspection_task | 巡检任务 | task_code, scope_type, status | ORM 模型 |
+| 巡检 | inspection_result | 巡检结果 | target_type, result_status | ORM 模型 |
+| 评分 | biz_score_rule | 评分规则 | rule_code, deduct_score | ORM 模型 |
+| 评分 | biz_score_result | 评分结果 | final_score, score_batch | ORM 模型 |
+| 评分 | biz_score_result_detail | 评分明细 | evidence (JSONB) | ORM 模型 |
+| 导入 | staging_excel_import | Excel 导入暂存 | import_batch_id, raw_payload | `backend/app/services/dbops_import_service.py:1065-1101` |
 
 ## 6. 关键索引摘要
 
-| Table | Index | 用途 | 风险 | 依据 |
-|---|---|---|---|---|
+| Table | Index | 用途 | 依据 |
+|---|---|---|---|
+| users | ix_dbops_users_username | 用户名登录查询 | phase1 L49 |
+| business_system | idx_business_system_status | 按状态筛选 | phase1 L206 |
+| contact | idx_contact_name_phone | 姓名+电话联合查重 | phase1 L240 |
+| server | idx_server_site / idx_server_status | 按站点/状态筛选 | phase1 L537-539 |
+| cluster | idx_cluster_system / idx_cluster_db_type / idx_cluster_type | 集群多维查询 | phase1 L572-574 |
+| db_instance | idx_instance_cluster / idx_instance_server / idx_instance_status | 实例核心查询 | phase1 L659-662 |
+| staging_excel_import | idx_staging_batch | 按批次查询导入记录 | phase1 L1054 |
+| biz_score_result | idx_score_result_system_time | 业务评分历史趋势 | phase1 L939 |
+| asset_event_history | idx_asset_event_history_asset | 资产事件时间线 | phase1 L302-303 |
 
 ## 7. DDL 与测试库差异摘要
 
 | 类型 | 对象 | 差异 | 影响 | 建议 |
 |---|---|---|---|---|
+| pgcrypto 安装位置 | pgcrypto 扩展 | DDL 未指定 schema，实际安装在 dbops schema | 无功能影响 | 不影响 pgcrypto 函数调用 |
+| 一致 | 26 表 + 4 视图 + 98 索引 + 约束 + 序列 + 触发器 | DDL 文件与实际数据库结构完全一致 | — | 无需变更 |
 
 ## 8. 结构风险
 
 | 风险 | 影响范围 | 验证方式 | 建议 |
 |---|---|---|---|
+| staging_excel_import 存明文密码 | db_password_raw / os_password_raw 字段 | `SELECT count(*) FROM dbops.staging_excel_import WHERE db_password_raw IS NOT NULL;` | 定期清理暂存表或脱敏处理 |
+| resource_tag 无外键约束 | resource_id 可能指向不存在的资源 | 应用层校验 | 后续可加触发器或定期清理孤记录 |
+| backup_policy / inspection_item 等表无 API | 表结构已存在但无后端 API | 确认前端模块排期 | 10-module-map 已标注为"规划中" |
 
 ## 9. 需现场确认
 
--
+- 历史迁移脚本（migrate_v4_4_cmdb_lite / migrate_asset_fields / migrate_drop_cluster_id）原始 .py 源码位置（仅在 `__pycache__` 中存在 .pyc 缓存）
+- backup_policy / inspection / biz_score 等表的 API 开发排期
+
+> 2026-05-22：已连接测试库完成实时元数据扫描，DDL 文件与实际库结构一致。

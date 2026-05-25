@@ -99,13 +99,9 @@ export const assetsApi = {
   ) => request.post(`/v1/servers/business-services/${id}/lifecycle`, data),
 
   previewImport: (data: FormData): Promise<ImportPreviewResult> =>
-    request.post('/v1/servers/imports/preview', data, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    }),
+    request.post('/v1/servers/imports/preview', data),
   executeImport: (data: FormData): Promise<ImportExecuteResult> =>
-    request.post('/v1/servers/imports/execute', data, {
-      headers: { 'Content-Type': 'multipart/form-data' }
-    }),
+    request.post('/v1/servers/imports/execute', data),
   getImportBatches: (): Promise<ImportBatchRow[]> =>
     request.get('/v1/servers/imports/batches'),
 }

@@ -7,11 +7,11 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 class Settings(BaseSettings):
-    SECRET_KEY: str = "dev-secret-key-change-in-production"
+    SECRET_KEY: str = ""
     POSTGRES_HOST: str = "10.134.185.85"
     POSTGRES_PORT: int = 5432
     POSTGRES_USER: str = "dbops"
-    POSTGRES_PASSWORD: str = "root123"
+    POSTGRES_PASSWORD: str = ""
     POSTGRES_DB: str = "dbops"
     SQLALCHEMY_DATABASE_URI: str = ""
 
@@ -48,6 +48,16 @@ class Settings(BaseSettings):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
+        missing = []
+        if not self.SECRET_KEY:
+            missing.append("SECRET_KEY")
+        if not self.POSTGRES_PASSWORD:
+            missing.append("POSTGRES_PASSWORD")
+        if missing:
+            raise ValueError(
+                f"缺少关键配置: {', '.join(missing)}。"
+                f"请在 {os.path.join(BASE_DIR, '.env')} 文件中设置这些环境变量。"
+            )
         if not self.SQLALCHEMY_DATABASE_URI:
             self.SQLALCHEMY_DATABASE_URI = (
                 f"postgresql://{self.POSTGRES_USER}:{self.POSTGRES_PASSWORD}"

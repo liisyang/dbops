@@ -370,6 +370,7 @@ class DbopsAssetService:
                 "server_id": instance.server_id,
                 "server_ip": server.ip_address if server else None,
                 "hostname": server.hostname if server else None,
+                "port": instance.port,
                 "country": site.country if site else None,
                 "factory_area": site.factory_area if site else None,
                 "room_location": site.room_location if site else None,
@@ -406,7 +407,7 @@ class DbopsAssetService:
                 "server_code": server.server_code,
                 "ip_address": server.ip_address,
                 "hostname": server.hostname,
-                "dns_name": server.dns_name,
+
                 "server_type": server.server_type,
                 "cpu_cores": server.cpu_cores,
                 "memory_gb": server.memory_gb,

@@ -246,6 +246,16 @@ CLUSTER_TYPE_CATALOG = {
         "db_types": {"MONGODB"},
         "ha_enabled": True,
     },
+    "AG": {
+        "name": "SQL Server Always On Availability Group",
+        "db_types": {"SQLSERVER"},
+        "ha_enabled": True,
+    },
+    "MIRROR": {
+        "name": "SQL Server Database Mirroring",
+        "db_types": {"SQLSERVER"},
+        "ha_enabled": True,
+    },
 }
 
 CLUSTER_TYPE_ALIASES = {
@@ -267,9 +277,58 @@ CLUSTER_TYPE_ALIASES = {
     _normalize_cluster_type_key("REDIS_CLUSTER"): "REDIS_CLUSTER",
     _normalize_cluster_type_key("MONGODB_RS"): "MONGODB_RS",
     _normalize_cluster_type_key("MONGODB_SHARD"): "MONGODB_SHARD",
+    _normalize_cluster_type_key("AG"): "AG",
+    _normalize_cluster_type_key("Always On"): "AG",
+    _normalize_cluster_type_key("Availability Group"): "AG",
+    _normalize_cluster_type_key("MIRROR"): "MIRROR",
+    _normalize_cluster_type_key("Mirror"): "MIRROR",
+    _normalize_cluster_type_key("Database Mirroring"): "MIRROR",
 }
 
 SUPPORTED_CLUSTER_TYPES = set(CLUSTER_TYPE_CATALOG)
+
+DEPLOY_TYPE_ALIASES = {
+    "地端": "地端",
+    "私有雲": "私有雲",
+    "公有雲": "公有雲",
+    "虎躍雲": "私有雲",
+    "龍華雲": "私有雲",
+    "印度雲": "私有雲",
+    "GCP": "公有雲",
+    "云": "公有雲",
+    "雲": "公有雲",
+    "云端": "公有雲",
+}
+
+FACTORY_AREA_TO_DEPLOY_TYPE = {
+    "虎躍雲": "私有雲",
+    "龍華雲": "私有雲",
+    "印度雲": "私有雲",
+    "GCP": "公有雲",
+}
+
+
+def normalize_deploy_type(raw: str) -> str:
+    key = _normalize_text(raw)
+    if not key or key not in DEPLOY_TYPE_ALIASES:
+        raise ValueError(f"Unsupported deploy type: {raw}")
+    return DEPLOY_TYPE_ALIASES[key]
+
+
+def maybe_normalize_deploy_type(raw: str) -> Optional[str]:
+    key = _normalize_text(raw)
+    if not key:
+        return None
+    return DEPLOY_TYPE_ALIASES.get(key)
+
+
+def infer_deploy_type(factory_area: str) -> str:
+    """从厂区推断部署类型，无匹配时默认地端。"""
+    key = _normalize_text(factory_area)
+    if key and key in FACTORY_AREA_TO_DEPLOY_TYPE:
+        return FACTORY_AREA_TO_DEPLOY_TYPE[key]
+    return "地端"
+
 
 REQUIRED_HEADERS = [
     "CLUSTER_TYPE",
@@ -280,7 +339,6 @@ REQUIRED_HEADERS = [
     "PORT",
     "DB類型",
     "國家",
-    "部署類型",
     "資源提供方",
     "廠區",
     "機房位置",
@@ -436,9 +494,11 @@ class DbopsImportService:
         "業務負責人": "app_owner",
         "業務負責人聯繫方式": "app_owner_contact",
         "業務主管(必填)": "business_manager",
+        "業務主管": "business_manager",
         "業務主管聯繫方式": "business_manager_contact",
         "業務歸屬主管(必填)": "business_belong_manager",
         "DBA負責人(必填)": "dba_owner",
+        "DBA負責人": "dba_owner",
         "業務單位": "business_unit",
         "部門": "department",
         "操作系統": "os_name",
@@ -637,8 +697,44 @@ class DbopsImportService:
             errors.append(f"行{row_num}: CPU(Cores) 必须是数字 ({cpu_cores})")
         return errors
 
+    @classmethod
+    def _load_existing_lookups(cls, db: Session, rows: list[dict[str, Any]]) -> dict[str, Any]:
+        mapped = []
+        for row in rows:
+            try:
+                mapped.append(cls.map_excel_row_to_fields(row))
+            except Exception:
+                continue
+        ips = {_normalize_text(f.get("ip")) for f in mapped if _normalize_text(f.get("ip"))}
+        system_names = {_normalize_text(f.get("system_name")) for f in mapped if _normalize_text(f.get("system_name"))}
+        cluster_codes = {_normalize_text(f.get("cluster_code")) for f in mapped if _normalize_text(f.get("cluster_code"))}
+
+        existing_ips = {s.ip_address for s in db.query(Server.ip_address).filter(Server.ip_address.in_(ips)).all()} if ips else set()
+        existing_systems = {s.system_name for s in db.query(BusinessSystem.system_name).filter(BusinessSystem.system_name.in_(system_names)).all()} if system_names else set()
+        existing_clusters = {c.cluster_code: c.id for c in db.query(Cluster.cluster_code, Cluster.id).filter(Cluster.cluster_code.in_(cluster_codes)).all()} if cluster_codes else {}
+        existing_servers = {s.ip_address: s.id for s in db.query(Server.ip_address, Server.id).filter(Server.ip_address.in_(ips)).all()} if ips else {}
+
+        existing_instances = set()
+        if cluster_codes and ips:
+            cluster_ids = list(existing_clusters.values())
+            server_ids = list(existing_servers.values())
+            if cluster_ids and server_ids:
+                rows = db.query(DbInstance.cluster_id, DbInstance.server_id, DbInstance.instance_name, DbInstance.port).filter(
+                    DbInstance.cluster_id.in_(cluster_ids),
+                    DbInstance.server_id.in_(server_ids),
+                ).all()
+                existing_instances = {(r.cluster_id, r.server_id, r.instance_name, r.port) for r in rows}
+
+        return {
+            "ips": existing_ips,
+            "systems": existing_systems,
+            "clusters": existing_clusters,
+            "servers": existing_servers,
+            "instances": existing_instances,
+        }
+
     @staticmethod
-    def _existing_record_messages(db: Optional[Session], fields: dict[str, Any]) -> list[str]:
+    def _existing_record_messages(db: Optional[Session], fields: dict[str, Any], lookups: Optional[dict[str, Any]] = None) -> list[str]:
         if db is None:
             return []
         messages: list[str] = []
@@ -647,6 +743,22 @@ class DbopsImportService:
         cluster_code = _normalize_text(fields.get("cluster_code"))
         instance_name = _normalize_text(fields.get("instance_name"))
         port = _normalize_text(fields.get("port"))
+
+        if lookups:
+            if ip and ip in lookups["ips"]:
+                messages.append(f"覆盖风险: 主机 IP {ip} 已存在，导入会更新现有主机记录")
+            if system_name and system_name in lookups["systems"]:
+                messages.append(f"覆盖风险: 系统名称 {system_name} 已存在，导入会更新现有业务系统")
+            if cluster_code and cluster_code in lookups["clusters"]:
+                messages.append(f"覆盖风险: 集群 {cluster_code} 已存在，导入会更新现有集群扩展字段")
+            if cluster_code and instance_name:
+                cid = lookups["clusters"].get(cluster_code)
+                sid = lookups["servers"].get(ip) if ip else None
+                ipp = int(port) if port.isdigit() else None
+                if cid and sid and (cid, sid, instance_name, ipp) in lookups["instances"]:
+                    messages.append(f"覆盖风险: 实例 {instance_name} / {port or '-'} 已存在，导入会更新现有实例")
+            return messages
+
         if ip and db.query(Server).filter_by(ip_address=ip).first():
             messages.append(f"覆盖风险: 主机 IP {ip} 已存在，导入会更新现有主机记录")
         if system_name and db.query(BusinessSystem).filter_by(system_name=system_name).first():
@@ -694,12 +806,18 @@ class DbopsImportService:
         errors: list[str] = []
         warnings: list[str] = []
         success_count = 0
+        lookups = None
+        if db is not None:
+            try:
+                lookups = cls._load_existing_lookups(db, rows)
+            except Exception:
+                lookups = None
         for row_num, row in enumerate(rows, start=2):
             try:
                 fields = cls.map_excel_row_to_fields(row)
                 row_errors = cls.validate_row(row_num, fields)
-                row_warnings = cls._existing_record_messages(db, fields)
-            except ValueError as exc:
+                row_warnings = cls._existing_record_messages(db, fields, lookups)
+            except Exception as exc:
                 row_errors = [f"行{row_num}: {exc}"]
                 fields = {}
                 row_warnings = []
@@ -742,11 +860,21 @@ class DbopsImportService:
 
     @staticmethod
     def upsert_site(db: Session, fields: dict[str, Any]) -> Site:
+        raw_deploy = _normalize_text(fields.get("deploy_type"))
+        factory_area = _normalize_text(fields.get("factory_area"))
+        # 厂区有明确映射时优先使用，否则使用显式部署类型，兜底为地端
+        inferred = infer_deploy_type(factory_area) if factory_area else None
+        if inferred and factory_area in FACTORY_AREA_TO_DEPLOY_TYPE:
+            deploy_type = inferred
+        elif raw_deploy:
+            deploy_type = normalize_deploy_type(raw_deploy)
+        else:
+            deploy_type = "地端"
         site_code_seed = "|".join([
             _normalize_text(fields.get("country")),
-            _normalize_text(fields.get("deploy_type")),
+            deploy_type,
             _normalize_text(fields.get("provider")),
-            _normalize_text(fields.get("factory_area")),
+            factory_area,
             _normalize_text(fields.get("room_location")),
         ])
         site_code = _make_code("SITE", site_code_seed)
@@ -755,13 +883,15 @@ class DbopsImportService:
             site = Site(
                 site_code=site_code,
                 country=_normalize_text(fields.get("country")),
-                deploy_type=_normalize_text(fields.get("deploy_type")),
+                deploy_type=deploy_type,
                 provider=_normalize_text(fields.get("provider")),
-                factory_area=_normalize_text(fields.get("factory_area")),
+                factory_area=factory_area,
                 room_location=_normalize_text(fields.get("room_location")),
             )
             db.add(site)
             db.flush()
+        else:
+            site.deploy_type = deploy_type
         return site
 
     @staticmethod
@@ -1098,6 +1228,9 @@ class DbopsImportService:
             )
             staging_payload["import_batch_id"] = import_batch_id
             staging_payload["raw_payload"]["uploaded_by"] = uploaded_by
+            staging_payload["db_password_raw"] = None
+            staging_payload["os_password_raw"] = None
+            staging_payload["os_oracle_password_raw"] = None
             db.add(StagingExcelImport(**staging_payload))
 
             if item["status"] == "error":
