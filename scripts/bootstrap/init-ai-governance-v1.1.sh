@@ -16,6 +16,7 @@ Usage:
 This script creates:
   - CLAUDE.md
   - AGENTS.md
+  - .github/copilot-instructions.md
   - .claude/settings.json
   - .claude/skills/*
   - .claude/agents/*
@@ -355,6 +356,16 @@ Bug / 排障任务额外读：
 - `git reset --hard`
 - `kubectl delete`
 - `docker rm -f`
+EOT
+
+write_file .github/copilot-instructions.md <<'EOT'
+# Copilot Instructions
+
+This repository uses `AGENTS.md` and `CLAUDE.md` as the canonical shared instructions.
+
+- Follow `AGENTS.md` first for repository-wide rules.
+- Follow `CLAUDE.md` for Claude-specific governance details that also apply here.
+- Do not duplicate or fork repo rules in additional instruction files unless the tool requires it.
 EOT
 
 write_file docs/00-project-brief.md <<'EOT'
