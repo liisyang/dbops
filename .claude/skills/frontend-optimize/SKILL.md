@@ -1,3 +1,4 @@
+---
 name: frontend-optimize
 description: 基于现有前端风格优化页面、组件、表格、表单、状态展示和交互一致性。
 ---

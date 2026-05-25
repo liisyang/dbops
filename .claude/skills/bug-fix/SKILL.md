@@ -1,3 +1,4 @@
+---
 name: bug-fix
 description: 基于真实代码定位并修复 bug。用于 /bug-fix。
 ---

@@ -1,3 +1,4 @@
+---
 name: feature-dev
 description: 基于真实代码开发新功能。用于 /feature-dev。
 ---

@@ -1,3 +1,4 @@
+---
 name: refactor
 description: 基于真实代码进行小步重构。用于 /refactor。
 ---

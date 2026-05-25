@@ -1,3 +1,4 @@
+---
 name: docs-bootstrap
 description: 初始化或大校准核心 docs。新项目只初始化最小事实，开发中项目首次接入可执行 all 补齐核心三件套。
 ---
