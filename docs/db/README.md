@@ -40,7 +40,7 @@
 
 | Schema | 用途 | 依据 | 备注 |
 |---|---|---|---|
-| dbops | DBOps 平台主 schema，含全部 26 张业务表 + 4 视图 + 17 触发器 + 25 序列 | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/app/database.py:18` + 实时元数据扫描 | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
+| dbops | DBOps 平台主 schema，当前 baseline 为 26 张业务表；2026-06-04 增量新增 collector_run / collector_run_result（执行后共 28 表） | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/db/dbops_awx_collector_phase1.sql` + `backend/app/database.py:18` | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
 | public | PostgreSQL 默认 schema | — | plpgsql 扩展所在 |
 
 ## 5. 核心表摘要
@@ -57,6 +57,8 @@
 | 资产 | cluster | 数据库集群 | cluster_code, cluster_type, ha_enabled | `backend/app/services/dbops_asset_service.py:295-325` |
 | 资产 | cluster_vip | 集群 VIP | vip_address, vip_type | `backend/app/services/dbops_asset_service.py:302-303` |
 | 资产 | db_instance | 数据库实例 | instance_name, node_role, cluster_id | `backend/app/services/dbops_asset_service.py:341-380` |
+| 自动化校验 | collector_run | AWX 校验任务主记录 | run_id, db_instance_id, status, awx_job_id | `backend/app/models/dbops_assets.py` |
+| 自动化校验 | collector_run_result | AWX 校验结果明细 | run_id, check_type, status, port_reachable | `backend/app/models/dbops_assets.py` |
 | 资产 | topology_relation | 实例拓扑关系 | relation_type, sync_mode | `backend/app/services/dbops_import_service.py:1030-1062` |
 | 资产 | asset_event_history | 资产事件历史 | asset_type, event_type, changed_fields | `backend/app/services/asset_event_history_service.py` |
 | 字典 | os_version | OS 版本字典+生命周期 | os_name, version_name, lifecycle_status | ORM 模型 |
@@ -84,6 +86,9 @@
 | server | idx_server_site / idx_server_status | 按站点/状态筛选 | phase1 L537-539 |
 | cluster | idx_cluster_system / idx_cluster_db_type / idx_cluster_type | 集群多维查询 | phase1 L572-574 |
 | db_instance | idx_instance_cluster / idx_instance_server / idx_instance_status | 实例核心查询 | phase1 L659-662 |
+| db_instance | idx_db_instance_trust_status / idx_db_instance_reachability_status / idx_db_instance_last_verify_at | 资产校验状态查询 | `backend/db/dbops_awx_collector_phase1.sql` |
+| collector_run | idx_collector_run_instance_time / idx_collector_run_status / idx_collector_run_awx_job | 按实例、状态、AWX job 查询校验任务 | `backend/db/dbops_awx_collector_phase1.sql` |
+| collector_run_result | idx_collector_run_result_instance_time | 按实例回看历史校验结果 | `backend/db/dbops_awx_collector_phase1.sql` |
 | staging_excel_import | idx_staging_batch | 按批次查询导入记录 | phase1 L1054 |
 | biz_score_result | idx_score_result_system_time | 业务评分历史趋势 | phase1 L939 |
 | asset_event_history | idx_asset_event_history_asset | 资产事件时间线 | phase1 L302-303 |
@@ -102,10 +107,12 @@
 | staging_excel_import 存明文密码 | db_password_raw / os_password_raw 字段 | `SELECT count(*) FROM dbops.staging_excel_import WHERE db_password_raw IS NOT NULL;` | 定期清理暂存表或脱敏处理 |
 | resource_tag 无外键约束 | resource_id 可能指向不存在的资源 | 应用层校验 | 后续可加触发器或定期清理孤记录 |
 | backup_policy / inspection_item 等表无 API | 表结构已存在但无后端 API | 确认前端模块排期 | 10-module-map 已标注为"规划中" |
+| AWX callback 依赖网络可达性与 token 一致性 | 回调失败会导致状态无法回写 | 使用 curl 从 AWX 网络侧校验 callback URL 与 token | `backend/app/api/collector.py` |
 
 ## 9. 需现场确认
 
 - 历史迁移脚本（migrate_v4_4_cmdb_lite / migrate_asset_fields / migrate_drop_cluster_id）原始 .py 源码位置（仅在 `__pycache__` 中存在 .pyc 缓存）
 - backup_policy / inspection / biz_score 等表的 API 开发排期
+- 2026-06-04 增量 DDL 在目标开发库是否已执行并完成元数据复扫（需现场确认）
 
 > 2026-05-22：已连接测试库完成实时元数据扫描，DDL 文件与实际库结构一致。

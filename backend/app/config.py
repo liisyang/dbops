@@ -42,6 +42,16 @@ class Settings(BaseSettings):
     UPLOAD_FOLDER: str = "uploads"
     ALLOWED_EXTENSIONS: set = {"xlsx", "xls"}
 
+    # AWX / 资产校验
+    AWX_URL: str = ""
+    AWX_USER: str = ""
+    AWX_PASSWORD: str = ""
+    AWX_VERIFY_JOB_TEMPLATE_ID: int = 0
+    AWX_VERIFY_JOB_TEMPLATE_NAME: str = "JT_ASSET_VERIFY_PORT"
+    COLLECTOR_CALLBACK_URL: str = ""
+    COLLECTOR_CALLBACK_TOKEN: str = ""
+    AWX_REQUEST_TIMEOUT: int = 30
+
     class Config:
         env_file = os.path.join(BASE_DIR, '.env')
         extra = "allow"

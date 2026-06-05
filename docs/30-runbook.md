@@ -35,6 +35,9 @@
 | 异步任务入队但不执行 | Celery worker 未启动 | `run.py:63` worker 启动代码被注释 | 当前阶段不需要，后续恢复时取消 `run.py:63-68` 注释 | `backend/run.py:63-68` |
 | 操作日志页面无数据 | `/api/logs/list` 返回 `[]` | `logs.py:15` 硬编码返回空数组，审计模块未实现 | 当前阶段无数据，需实现审计模块 | `backend/app/api/logs.py:11-15` |
 | WebSocket 连接无推送 | Redis pub/sub 订阅者未启动 | `main.py:26` Redis 订阅者启动代码被注释 | 当前阶段不需要，后续恢复时取消注释 | `backend/app/main.py:26` + `backend/app/api/websocket.py:78-110` |
+| 实例详情“校验资产”提交失败，提示回调地址未配置 | `COLLECTOR_CALLBACK_URL` 是否显式配置；当前请求的 `base_url` 是否可用 | 直接调用内部服务时未传请求基址，或反向代理/Host 头异常导致无法自动回退 | 优先配置 `COLLECTOR_CALLBACK_URL`；若走前端入口，检查代理后重试 | `backend/app/services/collector_service.py:40-50,68-86` |
+| 实例详情“最近执行记录”显示 Not Found | 先看 `collector` 路由是否存在；再看后端是否为当前代码版本进程 | 后端未重启到包含 `collector` 路由的版本，或命中到其他用户旧进程 | 先验证 `/api/v1/collector/*` 路由是否返回 401（未鉴权）而非 404；必要时只重启当前用户进程 | `backend/app/main.py` + `backend/app/api/collector.py` |
+| 前端页面无法访问 `:61088` | Vite 进程是否存活、端口是否监听 | 前端 dev 进程退出或未成功启动 | 重启 `frontend` dev 进程并检查 `ss -lntp | grep 61088` 和 `curl http://127.0.0.1:61088/` | `frontend/vite.config.ts:15-23` |
 
 ## 3. 标准排查命令
 
@@ -123,6 +126,21 @@ bash scripts/ai/verify.sh
 
 **代码依据：** `scripts/ai/verify.sh`
 
+### 3.8 AWX collector 路由自检（防止 Not Found 复发）
+
+```bash
+# 1) 未带 JWT 访问 collector 路由
+curl -i http://127.0.0.1:60801/api/v1/collector/instances/961/runs
+
+# 预期：
+# - 401 = 路由已注册（只是没登录）
+# - 404 = 当前后端实例未加载 collector 路由（版本/进程问题）
+
+# 2) 检查 OpenAPI 是否包含 collector 路径
+curl -s http://127.0.0.1:60801/openapi.json \
+  | grep -E '"/api/v1/collector/instances/\{instance_id\}/runs"|"/api/v1/collector/runs/\{run_id\}"'
+```
+
 ## 4. 关键配置检查点
 
 | 配置项 | 默认值 / 来源 | 影响 | 代码依据 |
@@ -153,6 +171,9 @@ bash scripts/ai/verify.sh
 | Excel 导入 COLUMN_MAP 列名不匹配 | Excel 模板列名为 `業務主管`/`DBA負責人`，COLUMN_MAP 期期待 `業務主管(必填)`/`DBA負責人(必填)`，导致 business_manager/dba_owner 字段未填充 | COLUMN_MAP 增加无 `(必填)` 后缀的列名映射，保持向后兼容 | ✅ 已修复 | `backend/app/services/dbops_import_service.py:451-457` |
 | 导入执行时 deploy_type `云` 违反 CHECK 约束 | site 表 CHECK 约束只允许 `地端`/`私有雲`/`公有雲`，Excel 中使用 `云` | 添加 DEPLOY_TYPE_ALIASES 映射（`云`→`公有雲`），upsert_site 使用 normalize 后的值 | ✅ 已修复 | `backend/app/services/dbops_import_service.py:288-299,848-851` |
 | list_instances API 未返回 port 字段 | `list_instances` 方法构建返回字典时遗漏 `instance.port` | 在返回字典中增加 `"port": instance.port` | ✅ 已修复 | `backend/app/services/dbops_asset_service.py:378` |
+| 实例详情页显示 `Not Found` 且整页加载失败 | `InstanceDetail.vue` 把“最近执行记录”接口失败（如 `/api/v1/collector/instances/{id}/runs` 返回 404）当成主详情失败处理，导致详情数据被清空 | 将执行记录加载错误与主详情加载解耦：执行记录失败仅显示记录区错误，不影响基础详情展示 | ✅ 已修复 | `frontend/src/views/InstanceDetail.vue` |
+| 实例详情“最近执行记录”持续 Not Found | 本机 60801 命中旧后端进程，未加载 collector 路由 | 先做 collector 路由 401/404 判定，再仅重启当前用户后端进程并复查 openapi | ✅ 已处理 | `backend/app/main.py` + `backend/app/api/collector.py` |
+| 前端 `http://<host>:61088` 无法访问 | Vite dev 进程退出导致端口无监听 | 启动 `cd frontend && npm run dev -- --host 0.0.0.0 --port 61088`，再用 `curl http://127.0.0.1:61088/` 验证 | ✅ 已处理 | `frontend/vite.config.ts:15-23` |
 
 ## 6. 需现场确认
 

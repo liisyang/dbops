@@ -6,6 +6,8 @@ from app.models.dbops_assets import (
     BusinessSystemContact,
     Cluster,
     ClusterVip,
+    CollectorRun,
+    CollectorRunResult,
     Contact,
     DbInstance,
     DbType,
@@ -15,6 +17,8 @@ from app.models.dbops_assets import (
     Site,
     SystemGroup,
 )
+from app.schemas.collector import AssetVerifyLaunchRequest
+from app.services import collector_service as collector_service_module
 from app.services.asset_event_history_service import list_events, record_event
 from app.services.dbops_asset_service import DbopsAssetService
 from app.services.dbops_stats_service import DbopsStatsService
@@ -27,8 +31,26 @@ def test_dbops_asset_models_expose_phase1_keys():
     assert DbInstance.__tablename__ == "db_instance"
     assert "node_role" in DbInstance.__table__.columns
     assert "extra_attrs" in DbInstance.__table__.columns
+    assert "trust_status" in DbInstance.__table__.columns
+    assert "reachability_status" in DbInstance.__table__.columns
+    assert "last_verify_at" in DbInstance.__table__.columns
+    assert "verify_detail" in DbInstance.__table__.columns
     assert Server.__tablename__ == "server"
     assert Site.__tablename__ == "site"
+
+
+def test_collector_models_expose_expected_keys():
+    assert CollectorRun.__tablename__ == "collector_run"
+    assert "run_id" in CollectorRun.__table__.columns
+    assert "db_instance_id" in CollectorRun.__table__.columns
+    assert "status" in CollectorRun.__table__.columns
+    assert "target_host" in CollectorRun.__table__.columns
+    assert "target_port" in CollectorRun.__table__.columns
+    assert CollectorRunResult.__tablename__ == "collector_run_result"
+    assert "collector_run_id" in CollectorRunResult.__table__.columns
+    assert "run_id" in CollectorRunResult.__table__.columns
+    assert "check_type" in CollectorRunResult.__table__.columns
+    assert "status" in CollectorRunResult.__table__.columns
 
 
 def test_db_type_model_exposes_dictionary_fields():
@@ -111,6 +133,9 @@ class _FakeSession:
 
     def commit(self):
         return None
+
+    def refresh(self, obj):
+        return obj
 
     def delete(self, obj):
         rows = self.store.get(type(obj), [])
@@ -448,3 +473,68 @@ def test_stats_group_by_provider_returns_counts():
 
     assert result["groups"][0]["provider"] == "地端"
     assert result["groups"][0]["count"] == 1
+
+
+class _CollectorSettings:
+    def __init__(self, callback_url: str):
+        self.COLLECTOR_CALLBACK_URL = callback_url
+
+
+def test_launch_asset_verify_uses_request_base_url_when_callback_url_missing(monkeypatch):
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    monkeypatch.setattr(collector_service_module, "get_settings", lambda: _CollectorSettings(""))
+    monkeypatch.setattr(
+        collector_service_module.AwxService,
+        "launch_verify_job",
+        lambda extra_vars: {
+            "awx_job_id": 123,
+            "awx_job_url": "https://awx.example.com/#/jobs/playbook/123",
+            "awx_job_template_id": 456,
+            "awx_job_template_name": "JT_ASSET_VERIFY_PORT",
+        },
+    )
+
+    result = collector_service_module.CollectorService.launch_asset_verify(
+        db,
+        instance_id=80,
+        payload=AssetVerifyLaunchRequest(),
+        requested_by="admin",
+        request_base_url="http://testserver/",
+    )
+
+    collector_run = db.store[CollectorRun][0]
+    assert result["status"] == "launched"
+    assert collector_run.callback_url == "http://testserver/api/v1/collector/callback/"
+    assert collector_run.extra_vars["callback_url"] == collector_run.callback_url
+
+
+def test_launch_asset_verify_prefers_configured_callback_url(monkeypatch):
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    monkeypatch.setattr(
+        collector_service_module,
+        "get_settings",
+        lambda: _CollectorSettings("https://collector.example.com/api/v1/collector/callback/"),
+    )
+    monkeypatch.setattr(
+        collector_service_module.AwxService,
+        "launch_verify_job",
+        lambda extra_vars: {
+            "awx_job_id": 123,
+            "awx_job_url": "https://awx.example.com/#/jobs/playbook/123",
+            "awx_job_template_id": 456,
+            "awx_job_template_name": "JT_ASSET_VERIFY_PORT",
+        },
+    )
+
+    collector_service_module.CollectorService.launch_asset_verify(
+        db,
+        instance_id=80,
+        payload=AssetVerifyLaunchRequest(),
+        requested_by="admin",
+        request_base_url="http://testserver/",
+    )
+
+    collector_run = db.store[CollectorRun][0]
+    assert collector_run.callback_url == "https://collector.example.com/api/v1/collector/callback/"

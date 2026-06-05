@@ -9,7 +9,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
-from app.api import logs, servers, account_ops, websocket, auth
+from app.api import logs, servers, account_ops, websocket, auth, collector
 
 
 @asynccontextmanager
@@ -69,6 +69,7 @@ def create_app(testing: bool = False) -> FastAPI:
     app.include_router(servers.router, prefix="/api/v1/servers", tags=["servers"])
     app.include_router(account_ops.router, prefix="/api", tags=["account-ops"])
     app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+    app.include_router(collector.router, prefix="/api/v1", tags=["collector"])
     app.include_router(websocket.router, prefix="/ws", tags=["websocket"])
 
     return app

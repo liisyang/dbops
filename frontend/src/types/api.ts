@@ -144,9 +144,72 @@ export interface InstanceRow {
   deploy_type?: string | null
   provider?: string | null
   system_name?: string | null
+  trust_status?: 'unverified' | 'verified' | 'missing' | 'drifted' | string | null
+  reachability_status?: 'unknown' | 'online' | 'offline' | string | null
+  last_seen_at?: string | null
+  last_verify_at?: string | null
+  verify_message?: string | null
+  last_verify_run_id?: string | null
+  last_awx_job_id?: number | null
+  verify_detail?: Record<string, any> | null
 }
 
 export interface InstanceDetail extends InstanceRow {}
+
+export interface AssetVerifyLaunchPayload {
+  check_timeout: number
+  target_host_override?: string
+  target_port_override?: number
+}
+
+export interface AssetVerifyLaunchResponse {
+  detail: string
+  run_id: string
+  collector_run_id: number
+  instance_id: number
+  awx_job_id?: number | null
+  awx_job_url?: string | null
+  status: string
+}
+
+export interface CollectorRunResultRow {
+  run_id: string
+  check_type: string
+  status: string
+  port_reachable?: boolean | null
+  target_host: string
+  target_port: number
+  error_message?: string | null
+  awx_job_id?: number | null
+  checked_by?: string | null
+  checked_at?: string | null
+  raw_result: Record<string, any>
+  created_at?: string | null
+}
+
+export interface CollectorRunRow {
+  id: number
+  run_id: string
+  instance_id: number
+  job_type: string
+  status: 'pending' | 'launched' | 'success' | 'failed' | 'callback_failed' | string
+  awx_job_id?: number | null
+  awx_job_url?: string | null
+  awx_job_template_id?: number | null
+  awx_job_template_name?: string | null
+  target_host: string
+  target_port: number
+  callback_url?: string | null
+  requested_by?: string | null
+  request_payload?: Record<string, any>
+  extra_vars?: Record<string, any>
+  error_message?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  latest_result?: CollectorRunResultRow | null
+}
 
 export interface ClusterDetail extends ClusterRow {
   instances: InstanceRow[]

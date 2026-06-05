@@ -289,6 +289,14 @@ class DbInstance(DbopsAssetBase):
     node_role = Column(String(50), nullable=False, server_default=text("'unknown'"))
     db_size_gb = Column(Numeric(12, 2))
     status = Column(String(20), nullable=False, server_default=text("'active'"))
+    trust_status = Column(String(32), nullable=False, server_default=text("'unverified'"))
+    reachability_status = Column(String(32), nullable=False, server_default=text("'unknown'"))
+    last_seen_at = Column(DateTime)
+    last_verify_at = Column(DateTime)
+    verify_message = Column(Text)
+    last_verify_run_id = Column(String(64))
+    last_awx_job_id = Column(BigInteger)
+    verify_detail = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     remark = Column(Text)
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -298,6 +306,8 @@ class DbInstance(DbopsAssetBase):
     db_version = relationship("DbVersion", back_populates="instances")
     server = relationship("Server", back_populates="instances")
     cluster = relationship("Cluster", back_populates="instances")
+    collector_runs = relationship("CollectorRun", back_populates="db_instance")
+    collector_results = relationship("CollectorRunResult", back_populates="db_instance")
 
     __table_args__ = (
         UniqueConstraint("cluster_id", "server_id", "instance_name", "port", name="uq_instance_cluster_server_name_port"),
@@ -305,6 +315,95 @@ class DbInstance(DbopsAssetBase):
             "node_role IN ('primary','standby','single','member','unknown')",
             name="chk_node_role",
         ),
+        CheckConstraint(
+            "trust_status IN ('unverified', 'verified', 'missing', 'drifted')",
+            name="chk_db_instance_trust_status",
+        ),
+        CheckConstraint(
+            "reachability_status IN ('unknown', 'online', 'offline')",
+            name="chk_db_instance_reachability_status",
+        ),
+        Index("idx_db_instance_trust_status", "trust_status"),
+        Index("idx_db_instance_reachability_status", "reachability_status"),
+        Index("idx_db_instance_last_verify_at", last_verify_at.desc()),
+    )
+
+
+class CollectorRun(DbopsAssetBase):
+    __tablename__ = "collector_run"
+
+    id = Column(BigInteger, primary_key=True)
+    run_id = Column(String(64), nullable=False, unique=True)
+    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"), nullable=False)
+    job_type = Column(String(64), nullable=False, server_default=text("'ASSET_VERIFY_PORT'"))
+    status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    awx_job_id = Column(BigInteger)
+    awx_job_url = Column(Text)
+    awx_job_template_id = Column(BigInteger)
+    awx_job_template_name = Column(String(200))
+    target_host = Column(String(255), nullable=False)
+    target_port = Column(Integer, nullable=False)
+    callback_url = Column(Text)
+    requested_by = Column(String(100))
+    request_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    extra_vars = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error_message = Column(Text)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    db_instance = relationship("DbInstance", back_populates="collector_runs")
+    results = relationship("CollectorRunResult", back_populates="collector_run")
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'launched', 'success', 'failed', 'callback_failed')",
+            name="chk_collector_run_status",
+        ),
+        CheckConstraint(
+            "target_port BETWEEN 1 AND 65535",
+            name="chk_collector_run_target_port",
+        ),
+        Index("idx_collector_run_instance_time", "db_instance_id", created_at.desc()),
+        Index("idx_collector_run_awx_job", "awx_job_id"),
+        Index("idx_collector_run_status", "status"),
+    )
+
+
+class CollectorRunResult(DbopsAssetBase):
+    __tablename__ = "collector_run_result"
+
+    id = Column(BigInteger, primary_key=True)
+    collector_run_id = Column(BigInteger, ForeignKey("collector_run.id", ondelete="CASCADE"), nullable=False)
+    run_id = Column(String(64), nullable=False)
+    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"), nullable=False)
+    check_type = Column(String(64), nullable=False, server_default=text("'PORT_REACHABILITY'"))
+    status = Column(String(32), nullable=False)
+    port_reachable = Column(Boolean)
+    target_host = Column(String(255), nullable=False)
+    target_port = Column(Integer, nullable=False)
+    error_message = Column(Text)
+    awx_job_id = Column(BigInteger)
+    checked_by = Column(String(50))
+    checked_at = Column(DateTime)
+    raw_result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    collector_run = relationship("CollectorRun", back_populates="results")
+    db_instance = relationship("DbInstance", back_populates="collector_results")
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "check_type", name="uq_collector_run_result_run_check"),
+        CheckConstraint(
+            "status IN ('verified', 'missing', 'drifted')",
+            name="chk_collector_run_result_status",
+        ),
+        CheckConstraint(
+            "target_port BETWEEN 1 AND 65535",
+            name="chk_collector_run_result_target_port",
+        ),
+        Index("idx_collector_run_result_instance_time", "db_instance_id", created_at.desc()),
     )
 
 
@@ -499,6 +598,8 @@ __all__ = [
     "Cluster",
     "ClusterVip",
     "DbInstance",
+    "CollectorRun",
+    "CollectorRunResult",
     "TopologyRelation",
     "Tag",
     "ResourceTag",

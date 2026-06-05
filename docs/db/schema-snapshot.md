@@ -802,3 +802,7 @@ ORDER BY event_object_table, trigger_name;
 ## 16. 需现场确认
 
 - 无重大差异。DDL 文件与数据库实际结构一致。
+- 2026-06-04 新增 AWX 资产校验 DDL（`backend/db/dbops_awx_collector_phase1.sql`）后，需在开发库执行元数据复扫并刷新本快照：
+  - `db_instance` 新增校验字段与约束
+  - 新增 `collector_run` / `collector_run_result`
+  - 新增 collector 相关索引与触发器

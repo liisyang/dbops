@@ -1,6 +1,8 @@
 import request from './request'
 import type {
   AssetEventRow,
+  AssetVerifyLaunchPayload,
+  AssetVerifyLaunchResponse,
   BusinessContactLinkPayload,
   ClusterDetail,
   ClusterRow,
@@ -12,6 +14,7 @@ import type {
   ImportBatchRow,
   ImportExecuteResult,
   ImportPreviewResult,
+  CollectorRunRow,
   InstanceDetail,
   InstanceListResponse,
   ServerDetail,
@@ -39,6 +42,12 @@ export const assetsApi = {
     request.get('/v1/servers/instances', { params }),
   getInstance: (id: number | string): Promise<InstanceDetail> =>
     request.get(`/v1/servers/instances/${id}`),
+  launchAssetVerify: (id: number | string, data: AssetVerifyLaunchPayload): Promise<AssetVerifyLaunchResponse> =>
+    request.post(`/v1/automation/asset-verify/${id}/launch`, data),
+  getCollectorRun: (runId: string): Promise<CollectorRunRow> =>
+    request.get(`/v1/collector/runs/${runId}`),
+  listInstanceCollectorRuns: (id: number | string, params?: { limit?: number }): Promise<CollectorRunRow[]> =>
+    request.get(`/v1/collector/instances/${id}/runs`, { params }),
 
   listClusters: (): Promise<ClusterRow[]> =>
     request.get('/v1/servers/clusters'),

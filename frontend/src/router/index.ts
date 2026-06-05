@@ -214,6 +214,24 @@ const routes: RouteRecordRaw[] = [
         name: 'Knowledge',
         component: () => import('@/views/knowledge/Index.vue'),
         meta: { title: '知识库' }
+      },
+      {
+        path: 'ui-preview/assets',
+        name: 'UiPreviewAssets',
+        component: () => import('@/views/ui-preview/AssetsPreview.vue'),
+        meta: { title: 'UI 预览-资产', parent: '开发预览' }
+      },
+      {
+        path: 'ui-preview/instances.vue',
+        name: 'UiPreviewInstances',
+        component: () => import('@/views/ui-preview/instances.vue'),
+        meta: { title: 'UI 预览-实例', parent: '开发预览' }
+      },
+      {
+        path: 'ui-preview/servers.vue',
+        name: 'UiPreviewServers',
+        component: () => import('@/views/ui-preview/servers.vue'),
+        meta: { title: 'UI 预览-服务器', parent: '开发预览' }
       }
     ]
   }

@@ -24,6 +24,7 @@
 | Dashboard | 已实现 | 仪表盘统计卡片和图表 | `frontend/src/views/Dashboard.vue` + stats API |
 | 资产管理 - 服务器 | 已实现 | CRUD + 列表 + 详情 | `backend/app/api/servers.py:202-294` + `frontend/src/views/Servers.vue` |
 | 资产管理 - 实例 | 已实现 | CRUD + 列表 + 详情 | `backend/app/api/servers.py:85-198` + `frontend/src/views/Instances.vue` |
+| 资产管理 - AWX 资产校验 | 已实现（第一阶段最小闭环） | 实例详情可发起端口校验，callback URL 优先用配置值，未配置时回退到当前请求基址，AWX callback 回写实例状态与执行记录 | `backend/app/api/collector.py` + `backend/app/services/collector_service.py` + `frontend/src/views/InstanceDetail.vue` |
 | 资产管理 - 集群 | 已实现 | CRUD + 列表 + 详情 + 实例关联 | `backend/app/api/servers.py:564-658` + `frontend/src/views/Clusters.vue` |
 | 资产管理 - 业务系统 | 已实现 | CRUD + 详情 + 生命周期管理 + 联系人关联 | `backend/app/api/servers.py:348-477` + `frontend/src/views/Assets.vue` |
 | 资产管理 - 联系人 | 已实现 | CRUD | `backend/app/api/servers.py:299-343` + `frontend/src/views/Contacts.vue` |
@@ -53,6 +54,7 @@
 | 业务系统 | Assets.vue + BusinessSystemDetail.vue | assets.ts → `/v1/servers/business-services` | `api/servers.py:348-477` | DbopsAssetService | BusinessSystem | business_system | 已实现 |
 | 联系人 | Contacts.vue | assets.ts → `/v1/servers/contacts` | `api/servers.py:299-343` | DbopsContactService | Contact (dbops) | contact | 已实现 |
 | 导入 | Import.vue | assets.ts → `/v1/servers/imports/*` | `api/servers.py:704-774` | DbopsImportService | StagingExcelImport | staging_excel_import | 已实现 |
+| AWX 资产校验 | InstanceDetail.vue | assets.ts → `/v1/automation/*` + `/v1/collector/*` | `api/collector.py` | CollectorService + AwxService（callback URL 优先配置值，未配置时回退请求基址） | CollectorRun / CollectorRunResult / DbInstance | collector_run / collector_run_result / db_instance / asset_event_history | 已实现（第一阶段） |
 | 统计 | Stats.vue | stats.ts → `/v1/servers/stats/*` | `api/servers.py:489-561` | DbopsStatsService | - | (聚合查询) | 已实现 |
 | 账号操作 | Tasks.vue | `/users/add\|check\|chpasswd` | `api/account_ops.py` | account_tasks (Celery) | TaskState (Redis) | (Redis) | 部分实现 |
 | 主机清单 | Inventory.vue | 需现场确认 | 需现场确认 | Ansible inventory | - | (Ansible) | 部分实现 |
@@ -75,6 +77,8 @@
 | SSH 凭证 | credentials/Ssh.vue | /credentials/ssh | ops schema 有 host_credentials 表，无 API |
 | DB 凭证 | credentials/Db.vue | /credentials/db | ops schema 有 db_credentials 表，无 API |
 | 知识库 | knowledge/Index.vue | /knowledge | 无后端 |
+| UI 预览-服务器详情 | ui-preview/servers.vue | /ui-preview/servers.vue | Mock-only，仅用于开发预览，不调用真实 API |
+| UI 预览-实例详情 | ui-preview/instances.vue | /ui-preview/instances.vue | Mock-only，仅用于开发预览，不调用真实 API |
 
 ## 4. 主要调用链
 
@@ -125,6 +129,23 @@ Page (Import.vue)
   → StagingExcelImport (临时表)               # backend/app/models/dbops_assets.py:418
   → BusinessSystem / Server / Cluster / DbInstance / Contact (正式表)
   → ImportBatch (批次追踪)
+```
+
+### 4.5 AWX 资产校验闭环链路（第一阶段）
+
+```text
+Page (InstanceDetail.vue)
+  → POST /api/v1/automation/asset-verify/{instance_id}/launch
+  → collector.router
+  → CollectorService.launch_asset_verify()
+  → CollectorRun(pending) + extra_vars
+  → AwxService.launch_verify_job()
+  → CollectorRun(launched)
+  → AWX Job 执行后回调 POST /api/v1/collector/callback/
+  → CollectorService.handle_callback()
+  → CollectorRunResult(upsert) + CollectorRun(success)
+  → DbInstance trust/reachability/last_verify_* 更新
+  → AssetEventHistory 记录事件
 ```
 
 ## 5. 缺失链路

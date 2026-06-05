@@ -156,11 +156,29 @@
 
 ## 4. 近期变更
 
-无 git 历史记录，暂无近期变更信息。
+### 2026-06-04：新增 AWX 资产校验最小闭环接口
+
+新增后端接口：
+
+1. `POST /api/v1/automation/asset-verify/{instance_id}/launch`（JWT）
+2. `GET /api/v1/collector/runs/{run_id}`（JWT）
+3. `GET /api/v1/collector/instances/{instance_id}/runs`（JWT）
+4. `POST /api/v1/collector/callback/`（`X-Collector-Token`，不走 JWT）
+
+对应前端封装：
+
+1. `assetsApi.launchAssetVerify`
+2. `assetsApi.getCollectorRun`
+3. `assetsApi.listInstanceCollectorRuns`
 
 ## 5. 第三方对接
 
-当前未发现第三方系统对接接口。`account_tasks.py` 中的 Celery + Ansible Runner 为内部运维执行通道，非对外接口。
+已新增 AWX 对接接口（第一阶段）：
+
+1. DBOPS launch API 触发 AWX Job Template 执行
+2. AWX 调用 DBOPS callback API 回写校验结果
+
+`account_tasks.py` 中的 Celery + Ansible Runner 仍为内部运维执行通道，非对外接口。
 
 ## 6. 需现场确认
 
@@ -168,3 +186,4 @@
 - 账号操作（users/add, check, chpasswd）是否需要前端对接并启用 Celery worker？
 - WebSocket 连接是否需要前端实现实时推送 UI？
 - `logs.ts` vs `logs.js` 哪个是期望的封装？建议删除错误的 `logs.ts` 或修正路径并统一。
+- AWX 配置项（`AWX_URL/AWX_USER/AWX_PASSWORD/AWX_VERIFY_JOB_TEMPLATE_ID/COLLECTOR_CALLBACK_*`）在目标环境是否已正确注入（需现场确认）？
