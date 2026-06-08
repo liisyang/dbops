@@ -890,4 +890,43 @@ ALTER TABLE dbops.db_instance
 COMMIT;
 ```
 
-- **需现场确认**：该变更尚未在当前文档上下文中连接数据库执行元数据复扫，`schema-snapshot` 需在执行 DDL 后复扫校准。
+- **状态**：已在开发库执行并在后续元数据复扫中确认。
+
+### 4.2 2026-06-06 — AWX 资产校验第二阶段通用 item 底座（代码内 DDL）
+
+- **变更类型**：增量 DDL（已在开发库执行）
+- **DDL 文件**：`backend/db/dbops_awx_collector_phase2_refactor.sql`
+- **变更摘要**：
+  1. `collector_run` 增加 `target_scope`、`server_id`、`item_count`，并放宽 `db_instance_id` / `target_host` / `target_port`
+  2. 新增 `collector_check_definition`
+  3. 新增 `collector_run_item`
+  4. 新增 `asset_endpoint`
+  5. 新增 `asset_change_proposal`
+  6. `collector_run_result` 增加 `item_key`、`check_code`、`target_scope`、`server_id`、`collector_run_item_id`、`result_message`、`updated_at`
+  7. `collector_run_result` 唯一键从 run 级调整为 item 级
+
+- **回滚建议（需人工确认后执行）**：
+
+```sql
+BEGIN;
+SET search_path TO dbops, public;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP CONSTRAINT IF EXISTS uq_collector_run_result_item_id;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP CONSTRAINT IF EXISTS uq_collector_run_result_item;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS collector_run_item_id;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS item_key;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS check_code;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS target_scope;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS server_id;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS result_message;
+ALTER TABLE IF EXISTS dbops.collector_run_result DROP COLUMN IF EXISTS updated_at;
+DROP TABLE IF EXISTS dbops.asset_change_proposal;
+DROP TABLE IF EXISTS dbops.asset_endpoint;
+DROP TABLE IF EXISTS dbops.collector_run_item;
+DROP TABLE IF EXISTS dbops.collector_check_definition;
+ALTER TABLE IF EXISTS dbops.collector_run DROP COLUMN IF EXISTS target_scope;
+ALTER TABLE IF EXISTS dbops.collector_run DROP COLUMN IF EXISTS server_id;
+ALTER TABLE IF EXISTS dbops.collector_run DROP COLUMN IF EXISTS item_count;
+COMMIT;
+```
+
+- **状态**：已在开发库执行，`docs/db/schema-snapshot.md` 已按当前元数据刷新。

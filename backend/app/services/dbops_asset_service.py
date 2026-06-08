@@ -377,6 +377,14 @@ class DbopsAssetService:
                 "deploy_type": site.deploy_type if site else None,
                 "provider": site.provider if site else None,
                 "system_name": biz_system.system_name if biz_system else None,
+                "trust_status": instance.trust_status,
+                "reachability_status": instance.reachability_status,
+                "last_seen_at": instance.last_seen_at.isoformat() if instance.last_seen_at else None,
+                "last_verify_at": instance.last_verify_at.isoformat() if instance.last_verify_at else None,
+                "verify_message": instance.verify_message,
+                "last_verify_run_id": instance.last_verify_run_id,
+                "last_awx_job_id": instance.last_awx_job_id,
+                "verify_detail": instance.verify_detail or {},
             })
         return rows
 

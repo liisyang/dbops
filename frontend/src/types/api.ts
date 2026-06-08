@@ -174,25 +174,42 @@ export interface AssetVerifyLaunchResponse {
 
 export interface CollectorRunResultRow {
   run_id: string
-  check_type: string
+  item_key: string
+  check_code: string
+  target_scope: 'db_instance' | 'server' | string
   status: string
   port_reachable?: boolean | null
   target_host: string
   target_port: number
   error_message?: string | null
+  result_message?: string | null
   awx_job_id?: number | null
   checked_by?: string | null
   checked_at?: string | null
   raw_result: Record<string, any>
   created_at?: string | null
+  updated_at?: string | null
 }
 
 export interface CollectorRunRow {
   id: number
   run_id: string
-  instance_id: number
+  target_scope: string
+  instance_id?: number | null
+  server_id?: number | null
   job_type: string
-  status: 'pending' | 'launched' | 'success' | 'failed' | 'callback_failed' | string
+  status:
+    | 'pending'
+    | 'launched'
+    | 'running'
+    | 'success'
+    | 'partial_success'
+    | 'failed'
+    | 'callback_failed'
+    | 'timeout'
+    | 'canceled'
+    | string
+  item_count?: number
   awx_job_id?: number | null
   awx_job_url?: string | null
   awx_job_template_id?: number | null
@@ -209,6 +226,69 @@ export interface CollectorRunRow {
   created_at?: string | null
   updated_at?: string | null
   latest_result?: CollectorRunResultRow | null
+  items?: CollectorRunItemRow[]
+}
+
+export interface CollectorRunItemRow {
+  id: number
+  collector_run_id: number
+  run_id: string
+  item_key: string
+  check_code: string
+  target_scope: 'db_instance' | 'server' | string
+  server_id?: number | null
+  db_instance_id?: number | null
+  target_host: string
+  target_port: number
+  protocol: string
+  timeout_seconds: number
+  status: string
+  result_status?: string | null
+  result_message?: string | null
+  raw_result: Record<string, any>
+  started_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface CollectorEndpointRow {
+  id: number
+  entity_type: 'server' | 'db_instance' | string
+  entity_id: number
+  endpoint_type: string
+  host: string
+  port: number
+  protocol: string
+  source: string
+  expected: boolean
+  status: string
+  last_seen_at?: string | null
+  last_verify_at?: string | null
+  last_run_id?: string | null
+  last_message?: string | null
+  evidence: Record<string, any>
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface CollectorRunCreatePayload {
+  scope: {
+    target_scope: 'db_instance' | 'server'
+    asset_ids: number[]
+  }
+  check_codes: string[]
+  options?: Record<string, any>
+}
+
+export interface CollectorRunCreateResponse {
+  detail: string
+  run_id: string
+  collector_run_id: number
+  awx_job_id?: number | null
+  awx_job_url?: string | null
+  status: string
+  item_count: number
 }
 
 export interface ClusterDetail extends ClusterRow {

@@ -97,4 +97,33 @@
   textarea.field-input {
     @apply leading-relaxed;
   }
+
+  /* ─── UI Preview Info System ─── */
+  .preview-info-shell {
+    @apply rounded-2xl bg-surface-container/60 p-4 md:p-5;
+  }
+
+  .preview-info-summary {
+    @apply grid gap-3 sm:grid-cols-2;
+  }
+
+  .preview-info-summary-card {
+    @apply rounded-xl bg-surface-container-high/80 px-3 py-2.5;
+  }
+
+  .preview-info-section {
+    @apply rounded-xl bg-surface-container-high/55 p-3 md:p-4;
+  }
+
+  .preview-info-item {
+    @apply rounded-lg bg-surface-container/45 px-3 py-2.5;
+  }
+
+  .preview-metric-card {
+    @apply rounded-xl bg-surface-container-high/70 p-4;
+  }
+
+  .preview-muted-card {
+    @apply rounded-xl bg-surface-container/50 p-4;
+  }
 }

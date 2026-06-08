@@ -55,6 +55,15 @@ const getInstanceMock = vi.fn().mockResolvedValue({
   deploy_type: '生产',
   provider: '自建机房',
 })
+const createCollectorRunMock = vi.fn().mockResolvedValue({
+  detail: 'launched',
+  run_id: 'VERIFY-7',
+  collector_run_id: 99,
+  awx_job_id: 16,
+  awx_job_url: 'http://awx/jobs/16',
+  status: 'launched',
+  item_count: 2,
+})
 
 const routeState = reactive<{ params: Record<string, any> }>({
   params: { id: '7' },
@@ -65,6 +74,10 @@ vi.mock('@/api/assets', () => ({
   assetsApi: {
     listInstances: (...args: any[]) => listInstancesMock(...args),
     getInstance: (...args: any[]) => getInstanceMock(...args),
+    createCollectorRun: (...args: any[]) => createCollectorRunMock(...args),
+    listInstanceCollectorRuns: vi.fn().mockResolvedValue([]),
+    listCollectorEndpoints: vi.fn().mockResolvedValue([]),
+    listCollectorRunItems: vi.fn().mockResolvedValue([]),
   },
 }))
 
@@ -83,6 +96,11 @@ const globalStubs = {
   SimpleBarChart: { template: '<div />' },
   OpsSectionCard: { props: ['title', 'subtitle', 'icon'], template: '<section><h2 v-if="title">{{ title }}</h2><slot /></section>' },
   OpsEmptyState: { template: '<div />' },
+  OpsModal: {
+    props: ['open', 'title', 'subtitle', 'icon', 'size'],
+    emits: ['close'],
+    template: '<div v-if="open"><h2>{{ title }}</h2><slot /><slot name="footer" /></div>',
+  },
   RouterLink: { template: '<a><slot /></a>' },
 }
 
@@ -132,5 +150,39 @@ describe('Instances view and detail view', () => {
     expect(wrapper.text()).not.toContain('实例 ID')
     expect(wrapper.text()).not.toContain('集群 ID')
     expect(wrapper.html()).toContain('field-card')
+  })
+
+  it('launches a collector run with multiple checks from the instance detail page', async () => {
+    routeState.params = { id: '7' }
+
+    const wrapper = mount(InstanceDetail, {
+      global: {
+        stubs: globalStubs,
+      },
+    })
+
+    await flushPromises()
+    await flushPromises()
+
+    const primaryButtonsBefore = wrapper.findAll('button.ops-primary-button')
+    await primaryButtonsBefore[0].trigger('click')
+    await flushPromises()
+
+    expect(wrapper.text()).toContain('选择校验项')
+
+    const primaryButtonsAfter = wrapper.findAll('button.ops-primary-button')
+    await primaryButtonsAfter[1].trigger('click')
+    await flushPromises()
+
+    expect(createCollectorRunMock).toHaveBeenCalledWith({
+      scope: {
+        target_scope: 'db_instance',
+        asset_ids: [7],
+      },
+      check_codes: ['DB_PORT_REACHABILITY', 'SSH_PORT_REACHABILITY'],
+      options: {
+        timeout_seconds: 5,
+      },
+    })
   })
 })

@@ -56,30 +56,44 @@ class AwxService:
             raise AwxServiceError("AWX API 返回非 JSON 内容") from exc
 
     @staticmethod
-    def resolve_verify_job_template() -> tuple[int, str]:
-        settings = get_settings()
-        configured_id = int(settings.AWX_VERIFY_JOB_TEMPLATE_ID or 0)
-        configured_name = settings.AWX_VERIFY_JOB_TEMPLATE_NAME or "JT_ASSET_VERIFY_PORT"
+    def _resolve_job_template(template_id: int, template_name: str) -> tuple[int, str]:
+        if template_id > 0:
+            return template_id, template_name
 
-        if configured_id > 0:
-            return configured_id, configured_name
-
-        encoded_name = quote(configured_name, safe="")
+        encoded_name = quote(template_name, safe="")
         result = AwxService._request_json(
             "GET",
             f"/api/v2/job_templates/?name={encoded_name}",
         )
         items = result.get("results") or []
         if not items:
-            raise AwxServiceError(f"未找到 AWX Job Template: {configured_name}")
+            raise AwxServiceError(f"未找到 AWX Job Template: {template_name}")
         first = items[0]
-        template_id = int(first.get("id"))
-        template_name = str(first.get("name") or configured_name)
-        return template_id, template_name
+        resolved_id = int(first.get("id"))
+        resolved_name = str(first.get("name") or template_name)
+        return resolved_id, resolved_name
 
     @staticmethod
-    def launch_verify_job(extra_vars: dict[str, Any]) -> dict[str, Any]:
-        template_id, template_name = AwxService.resolve_verify_job_template()
+    def resolve_verify_job_template() -> tuple[int, str]:
+        settings = get_settings()
+        configured_id = int(settings.AWX_VERIFY_JOB_TEMPLATE_ID or 0)
+        configured_name = settings.AWX_VERIFY_JOB_TEMPLATE_NAME or "JT_ASSET_VERIFY_PORT"
+        return AwxService._resolve_job_template(configured_id, configured_name)
+
+    @staticmethod
+    def resolve_collector_job_template() -> tuple[int, str]:
+        settings = get_settings()
+        configured_id = int(settings.AWX_COLLECTOR_JOB_TEMPLATE_ID or 0)
+        configured_name = settings.AWX_COLLECTOR_JOB_TEMPLATE_NAME or "JT_DBOPS_COLLECTOR_GENERIC"
+        return AwxService._resolve_job_template(configured_id, configured_name)
+
+    @staticmethod
+    def launch_job(extra_vars: dict[str, Any], template_id: int | None = None, template_name: str | None = None) -> dict[str, Any]:
+        if template_id is None or template_name is None:
+            resolved_template_id, resolved_template_name = AwxService.resolve_collector_job_template()
+            template_id = resolved_template_id if template_id is None else template_id
+            template_name = resolved_template_name if template_name is None else template_name
+
         launch_result = AwxService._request_json(
             "POST",
             f"/api/v2/job_templates/{template_id}/launch/",
@@ -97,3 +111,7 @@ class AwxService:
             "awx_job_template_name": template_name,
             "raw_response": launch_result,
         }
+
+    @staticmethod
+    def launch_verify_job(extra_vars: dict[str, Any]) -> dict[str, Any]:
+        return AwxService.launch_job(extra_vars)

@@ -3,43 +3,17 @@
     <OpsPageHeader v-if="isListView || isCreateView" :title="headerTitle" :subtitle="headerSubtitle" />
 
     <template v-else-if="detail">
-      <section class="mb-6 border-b border-outline-variant/40 pb-5">
-        <div class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
-          <div class="space-y-4">
-            <router-link
-              to="/assets/servers"
-              class="inline-flex items-center gap-2 text-sm text-on-surface-variant transition-colors hover:text-on-surface"
-            >
-              <span class="material-symbols-outlined text-[18px]">arrow_back</span>
-              返回列表
-            </router-link>
+      <section class="mb-6 space-y-4">
+        <div class="flex flex-wrap items-center justify-between gap-3">
+          <router-link
+            to="/assets/servers"
+            class="inline-flex items-center gap-2 text-sm text-on-surface-variant transition-colors hover:text-on-surface"
+          >
+            <span class="material-symbols-outlined text-[18px]">arrow_back</span>
+            返回列表
+          </router-link>
 
-            <div class="flex flex-wrap gap-2">
-              <span class="rounded-md border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-on-surface">
-                {{ detail.server_type || '主机' }}
-              </span>
-              <span class="rounded-md border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-on-surface">
-                {{ detail.deploy_type || '部署类型' }}
-              </span>
-              <span class="rounded-md border border-white/10 bg-white/5 px-3 py-1 text-xs font-medium text-on-surface">
-                {{ detail.provider || 'Provider' }}
-              </span>
-            </div>
-
-            <div>
-              <div class="flex flex-wrap items-center gap-3">
-                <h1 class="text-4xl font-semibold tracking-tight text-on-surface">{{ detail.ip_address }}</h1>
-                <span class="rounded-md border border-emerald-500/30 bg-emerald-500/15 px-2.5 py-1 text-xs font-medium text-emerald-200">
-                  {{ detail.instance_count }} 台实例
-                </span>
-              </div>
-              <div class="mt-2 text-sm text-on-surface-variant">
-                {{ detail.hostname || '-' }} / {{ detail.server_code || '-' }}
-              </div>
-            </div>
-          </div>
-
-          <div class="flex flex-wrap items-center gap-2 xl:pt-10">
+          <div class="flex flex-wrap items-center gap-2">
             <button
               v-if="!editing"
               class="ops-primary-button"
@@ -59,7 +33,7 @@
               取消编辑
             </button>
             <button
-              class="inline-flex items-center gap-2 rounded-lg border border-white/10 bg-white/8 px-4 py-2 text-sm font-medium text-on-surface transition-colors hover:bg-white/12"
+              class="ops-secondary-button"
               type="button"
               @click="router.push('/audit/operations')"
             >
@@ -69,9 +43,13 @@
           </div>
         </div>
 
-        <div class="mt-6 flex items-center gap-8 border-t border-white/8 pt-4 text-sm font-medium">
-          <span class="border-b-2 border-sky-400 pb-4 text-on-surface">概览</span>
-        </div>
+        <OpsEntityHeader
+          :title="detail.ip_address || '服务器详情'"
+          :subtitle-parts="[detail.hostname, detail.server_code]"
+          icon="dns"
+          :chips="serverHeaderChips"
+        />
+
       </section>
     </template>
 
@@ -212,46 +190,142 @@
 
       <template v-else-if="detail">
         <section class="space-y-4">
-          <OpsSectionCard id="server-summary" title="基礎信息" icon="info">
-            <div v-if="!editing" class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-              <div
-                v-for="field in serverDisplayFields"
-                :key="field.label"
-                class="field-card"
-              >
-                <div class="field-label">{{ field.label }}</div>
-                <div class="field-value">{{ field.value }}</div>
-              </div>
-            </div>
+          <section class="grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(320px,0.65fr)]">
+            <OpsSectionCard id="server-summary" title="基础信息" subtitle="服务器详情基础字段" icon="info">
+              <div v-if="!editing" class="preview-info-shell">
+                <div class="space-y-4">
+                  <section
+                    v-for="group in baseInfoGroups"
+                    :key="group.key"
+                    class="preview-info-section"
+                  >
+                    <div class="flex items-center justify-between gap-3">
+                      <div class="flex min-w-0 items-center gap-2">
+                        <span class="inline-flex h-7 w-7 items-center justify-center rounded-md border border-primary/25 bg-primary/10">
+                          <span class="material-symbols-outlined text-[15px] text-primary">{{ group.icon }}</span>
+                        </span>
+                        <h3 class="min-w-0 truncate text-sm font-semibold text-slate-100">{{ group.title }}</h3>
+                      </div>
+                      <span class="rounded-full border border-white/10 bg-white/5 px-2.5 py-0.5 text-[11px] text-slate-300">{{ group.subtitle }}</span>
+                    </div>
 
-            <form v-else class="space-y-4" @submit.prevent="submitServerForm">
-              <div v-if="serverFormError" class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
-                {{ serverFormError }}
+                    <div class="mt-3 grid gap-2 md:grid-cols-2">
+                      <div
+                        v-for="field in group.fields"
+                        :key="`${group.key}-${field.label}`"
+                        class="preview-info-item"
+                      >
+                        <dl class="flex items-start justify-between gap-3">
+                          <dt class="min-w-0 text-xs font-medium tracking-wide text-slate-400">
+                            {{ field.label }}
+                          </dt>
+                          <dd
+                            class="min-w-0 text-right text-sm text-slate-100"
+                            :class="field.emphasis ? 'text-base font-semibold text-cyan-100' : 'font-medium'"
+                          >
+                            {{ field.value }}
+                          </dd>
+                        </dl>
+                      </div>
+                    </div>
+                  </section>
+                </div>
               </div>
-              <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-                <label
-                  v-for="field in serverFormFields"
-                  :key="String(field.key)"
-                  class="block field-card"
-                >
-                  <span class="field-label">{{ field.label }}</span>
-                  <input
-                    v-model.trim="serverForm[field.key]"
-                    class="field-input"
-                    :type="field.inputType"
-                  />
-                </label>
+
+              <form v-else class="space-y-3" @submit.prevent="submitServerForm">
+                <div v-if="serverFormError" class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
+                  {{ serverFormError }}
+                </div>
+                <div class="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+                  <label
+                    v-for="field in serverFormFields"
+                    :key="String(field.key)"
+                    class="block rounded-lg bg-surface-container-high px-3 py-2"
+                  >
+                    <span class="text-xs font-medium tracking-wide text-on-surface-variant">{{ field.label }}</span>
+                    <input
+                      v-model.trim="serverForm[field.key]"
+                      class="mt-1.5 block w-full rounded-md border-0 bg-surface px-2.5 py-2 text-sm text-on-surface placeholder:text-on-surface-variant/50 focus:outline-none focus:ring-2 focus:ring-primary/30"
+                      :type="field.inputType"
+                    />
+                  </label>
+                </div>
+                <div class="flex items-center justify-end gap-3 pt-2">
+                  <button class="ops-secondary-button" type="button" @click="cancelEditing">
+                    取消
+                  </button>
+                  <button class="ops-primary-button" type="submit" :disabled="serverFormSaving">
+                    {{ serverFormSaving ? '保存中...' : '保存' }}
+                  </button>
+                </div>
+              </form>
+            </OpsSectionCard>
+
+            <OpsSectionCard title="运行概览" subtitle="面向详情页的关键信息汇总（实时指标待接入）" icon="schema">
+              <div class="space-y-3">
+                <div class="rounded-2xl border border-outline-variant/30 bg-surface-container-high p-4">
+                  <div class="flex items-center gap-3">
+                    <span class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-primary/30 bg-primary/15">
+                      <span class="material-symbols-outlined text-[20px] text-primary">hard_drive</span>
+                    </span>
+                    <div>
+                      <div class="text-sm font-medium text-on-surface">磁盘使用率</div>
+                      <div class="text-xs text-on-surface-variant">{{ runtimeOverview.diskHint }}</div>
+                    </div>
+                    <div class="ml-auto text-lg font-semibold text-on-surface">{{ runtimeOverview.diskDisplay }}</div>
+                  </div>
+                  <div class="mt-3 h-2 rounded-full bg-surface-container-low">
+                    <div class="h-2 rounded-full bg-gradient-to-r from-[#4d96ff] to-[#67c3ff]" :style="{ width: `${runtimeOverview.diskPercent}%` }" />
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-outline-variant/30 bg-surface-container-high p-4">
+                  <div class="flex items-center gap-3">
+                    <span class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-primary/30 bg-primary/15">
+                      <span class="material-symbols-outlined text-[20px] text-primary">memory</span>
+                    </span>
+                    <div>
+                      <div class="text-sm font-medium text-on-surface">内存使用率</div>
+                      <div class="text-xs text-on-surface-variant">{{ runtimeOverview.memoryHint }}</div>
+                    </div>
+                    <div class="ml-auto text-lg font-semibold text-on-surface">{{ runtimeOverview.memoryDisplay }}</div>
+                  </div>
+                  <div class="mt-3 h-2 rounded-full bg-surface-container-low">
+                    <div class="h-2 rounded-full bg-gradient-to-r from-[#7c6cff] to-[#b06cff]" :style="{ width: `${runtimeOverview.memoryPercent}%` }" />
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-outline-variant/30 bg-surface-container-high p-4">
+                  <div class="flex items-center gap-3">
+                    <span class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-primary/30 bg-primary/15">
+                      <span class="material-symbols-outlined text-[20px] text-primary">bolt</span>
+                    </span>
+                    <div>
+                      <div class="text-sm font-medium text-on-surface">CPU 使用率</div>
+                      <div class="text-xs text-on-surface-variant">{{ runtimeOverview.cpuHint }}</div>
+                    </div>
+                    <div class="ml-auto text-lg font-semibold text-on-surface">{{ runtimeOverview.cpuDisplay }}</div>
+                  </div>
+                  <div class="mt-3 h-2 rounded-full bg-surface-container-low">
+                    <div class="h-2 rounded-full bg-gradient-to-r from-[#43d19e] to-[#69e6b8]" :style="{ width: `${runtimeOverview.cpuPercent}%` }" />
+                  </div>
+                </div>
+
+                <div class="rounded-2xl border border-outline-variant/30 bg-surface-container-high p-4">
+                  <div class="flex items-center gap-3">
+                    <span class="inline-flex h-10 w-10 items-center justify-center rounded-xl border border-primary/30 bg-primary/15">
+                      <span class="material-symbols-outlined text-[20px] text-primary">schedule</span>
+                    </span>
+                    <div>
+                      <div class="text-sm font-medium text-on-surface">最近同步时间</div>
+                      <div class="text-xs text-on-surface-variant">实时心跳待接入</div>
+                    </div>
+                    <div class="ml-auto text-sm font-medium text-on-surface">{{ runtimeOverview.lastSeen }}</div>
+                  </div>
+                </div>
               </div>
-              <div class="flex items-center justify-end gap-3 pt-2">
-                <button class="ops-secondary-button" type="button" @click="cancelEditing">
-                  取消
-                </button>
-                <button class="ops-primary-button" type="submit" :disabled="serverFormSaving">
-                  {{ serverFormSaving ? '保存中...' : '保存' }}
-                </button>
-              </div>
-            </form>
-          </OpsSectionCard>
+            </OpsSectionCard>
+          </section>
 
           <OpsSectionCard title="当前关联实例" subtitle="展示当前服务器挂载的实例列表。" icon="hub">
             <div v-if="detail.instances.length" class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -265,14 +339,14 @@
                     <div class="field-label">实例编号</div>
                     <div class="field-value font-mono">{{ instance.instance_code || '-' }}</div>
                   </div>
-                  <span class="shrink-0 rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-xs text-slate-300">
+                  <span class="shrink-0 rounded-full border border-outline-variant/40 bg-surface-container px-2.5 py-1 text-xs text-on-surface-variant">
                     {{ instance.node_role || instance.engine_role || '-' }}
                   </span>
                 </div>
-                <div class="mt-2 text-sm text-slate-100">
+                <div class="mt-2 text-sm text-on-surface">
                   {{ instance.instance_name || '-' }}
                 </div>
-                <div class="mt-3 grid gap-2 text-xs text-slate-400">
+                <div class="mt-3 grid gap-2 text-xs text-on-surface-variant">
                   <div>数据库类型：{{ instance.db_type || '-' }}</div>
                   <div>Cluster：{{ instance.cluster_code || '-' }}</div>
                   <div>服务器 IP：{{ instance.server_ip || '-' }}</div>
@@ -332,7 +406,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { assetsApi } from '@/api/assets'
 import DistributionDonutChart from '@/components/DistributionDonutChart.vue'
 import SimpleBarChart from '@/components/SimpleBarChart.vue'
-import { OpsColumnPicker, OpsEmptyState, OpsFilterBar, OpsPage, OpsPageHeader, OpsSectionCard, OpsStatGrid, OpsTableShell } from '@/components/ops'
+import { OpsColumnPicker, OpsEmptyState, OpsEntityHeader, OpsFilterBar, OpsPage, OpsPageHeader, OpsSectionCard, OpsStatGrid, OpsTableShell } from '@/components/ops'
 import { assetPageMetric, useAssetPageMetrics } from '@/composables/useAssetPageMetrics'
 import { useAssetStatBuckets } from '@/composables/useAssetStatBuckets'
 import { useColumnVisibility } from '@/composables/useColumnVisibility'
@@ -405,6 +479,41 @@ const headerSubtitle = computed(() => {
   if (isCreateView.value) return '填写基础服务器信息后保存。'
   if (detail.value) return [detail.value.hostname || '-', detail.value.server_code || '-'].join(' / ')
   return '查看和编辑单台服务器信息。'
+})
+const serverHeaderChips = computed(() => [
+  { icon: 'computer', label: detail.value?.server_type || '主机' },
+  { icon: 'view_in_ar', label: detail.value?.deploy_type || '部署类型' },
+  { icon: 'cloud', label: detail.value?.provider || 'Provider' },
+  { icon: 'hub', label: `${detail.value?.instance_count ?? 0} 台实例` },
+])
+
+const runtimeOverview = computed(() => {
+  if (!detail.value) {
+    return {
+      diskHint: '实时指标待接入',
+      diskDisplay: '-',
+      diskPercent: 0,
+      memoryHint: '实时指标待接入',
+      memoryDisplay: '-',
+      memoryPercent: 0,
+      cpuHint: '实时指标待接入',
+      cpuDisplay: '-',
+      cpuPercent: 0,
+      lastSeen: '-',
+    }
+  }
+  return {
+    diskHint: `容量 ${detail.value.disk_gb ?? '-'} GB`,
+    diskDisplay: '-',
+    diskPercent: 0,
+    memoryHint: `容量 ${detail.value.memory_gb ?? '-'} GB`,
+    memoryDisplay: '-',
+    memoryPercent: 0,
+    cpuHint: `规格 ${detail.value.cpu_cores ?? '-'} Core`,
+    cpuDisplay: '-',
+    cpuPercent: 0,
+    lastSeen: '-',
+  }
 })
 
 const heroStats = computed(() => [
@@ -523,12 +632,21 @@ const hasActiveFilters = computed(() => {
 })
 
 function formatServerValue(value: unknown) {
-  return value === null || value === undefined || value === '' ? '-' : String(value)
+  return value === null || value === undefined || value === '' ? '未配置' : String(value)
 }
 
 type DetailField = {
   label: string
   value: string
+  emphasis?: boolean
+}
+
+type DetailFieldGroup = {
+  key: string
+  icon: string
+  title: string
+  subtitle: string
+  fields: DetailField[]
 }
 
 type FormField = {
@@ -552,29 +670,72 @@ const serverFormFields: FormField[] = [
   { label: 'OS 版本', key: 'os_version', inputType: 'text' },
 ]
 
-const baseInfoFields = computed<DetailField[]>(() => {
+const baseInfoGroups = computed<DetailFieldGroup[]>(() => {
   if (!detail.value) return []
 
-  return serverFormFields.map((field) => ({
-    label: field.label,
-    value: getServerDetailFieldValue(field.key),
-  }))
+  return [
+    {
+      key: 'identity',
+      icon: 'badge',
+      title: '主机标识',
+      subtitle: '优先关注',
+      fields: [
+        { label: 'IP', value: getServerDetailFieldValue('ip'), emphasis: true },
+        { label: '主机名', value: getServerDetailFieldValue('hostname'), emphasis: true },
+        { label: '服务器编号', value: detail.value.server_code || '未配置' },
+        { label: 'DNS 名称', value: getServerDetailFieldValue('dns_name') },
+        { label: '主机属性', value: getServerDetailFieldValue('host_type') },
+      ],
+    },
+    {
+      key: 'resource',
+      icon: 'memory',
+      title: '资源规格',
+      subtitle: '容量信息',
+      fields: [
+        { label: 'CPU 核数', value: getServerDetailFieldValue('cpu_cores') },
+        { label: '内存 GB', value: getServerDetailFieldValue('memory_gb') },
+        { label: '磁盘 GB', value: getServerDetailFieldValue('disk_gb') },
+      ],
+    },
+    {
+      key: 'location',
+      icon: 'place',
+      title: '位置与部署',
+      subtitle: '机房落点',
+      fields: [
+        { label: '国家 / 厂区', value: getServerDetailFieldValue('factory') },
+        { label: '机房位置', value: getServerDetailFieldValue('room_location') },
+        { label: '部署类型', value: formatServerValue(detail.value.deploy_type) },
+        { label: 'Provider', value: formatServerValue(detail.value.provider) },
+      ],
+    },
+    {
+      key: 'system',
+      icon: 'schema',
+      title: '系统与归属',
+      subtitle: '运维上下文',
+      fields: [
+        { label: 'OS 类型', value: getServerDetailFieldValue('os_type') },
+        { label: 'OS 版本', value: getServerDetailFieldValue('os_version') },
+        { label: '业务组', value: getServerDetailFieldValue('business_group') },
+      ],
+    },
+  ]
 })
 
-const serverDisplayFields = computed<DetailField[]>(() => baseInfoFields.value)
-
 function getServerDetailFieldValue(key: keyof ServerUpsertPayload) {
-  if (!detail.value) return '-'
+  if (!detail.value) return '未配置'
 
   switch (key) {
     case 'ip':
-      return detail.value.ip_address || '-'
+      return detail.value.ip_address || '未配置'
     case 'hostname':
-      return detail.value.hostname || '-'
+      return detail.value.hostname || '未配置'
     case 'dns_name':
-      return '-'
+      return '未配置'
     case 'host_type':
-      return detail.value.server_type || '-'
+      return detail.value.server_type || '未配置'
     case 'cpu_cores':
       return formatServerValue(detail.value.cpu_cores)
     case 'business_group':
@@ -584,18 +745,18 @@ function getServerDetailFieldValue(key: keyof ServerUpsertPayload) {
     case 'disk_gb':
       return formatServerValue(detail.value.disk_gb)
     case 'factory':
-      return [detail.value.country, detail.value.factory_area].filter(Boolean).join(' / ') || '-'
+      return [detail.value.country, detail.value.factory_area].filter(Boolean).join(' / ') || '未配置'
     case 'machine_room':
     case 'room_location':
       return formatServerValue(detail.value.room_location)
     case 'os_type':
-      return detail.value.os_name || '-'
+      return detail.value.os_name || '未配置'
     case 'os_version':
-      return detail.value.os_version || '-'
+      return detail.value.os_version || '未配置'
     case 'status':
       return 'active'
     default:
-      return '-'
+      return '未配置'
   }
 }
 
@@ -784,5 +945,3 @@ async function loadDetail() {
   }
 }
 </script>
-
-

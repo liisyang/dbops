@@ -160,16 +160,28 @@
 
 新增后端接口：
 
-1. `POST /api/v1/automation/asset-verify/{instance_id}/launch`（JWT）
-2. `GET /api/v1/collector/runs/{run_id}`（JWT）
-3. `GET /api/v1/collector/instances/{instance_id}/runs`（JWT）
-4. `POST /api/v1/collector/callback/`（`X-Collector-Token`，不走 JWT）
+1. `POST /api/v1/collector/runs`（JWT，主入口）
+2. `POST /api/v1/automation/asset-verify/{instance_id}/launch`（JWT，兼容包装）
+3. `GET /api/v1/collector/runs/{run_id}`（JWT）
+4. `GET /api/v1/collector/instances/{instance_id}/runs`（JWT）
+5. `POST /api/v1/collector/callback/`（`X-Collector-Token`，不走 JWT）
 
 对应前端封装：
 
 1. `assetsApi.launchAssetVerify`
 2. `assetsApi.getCollectorRun`
 3. `assetsApi.listInstanceCollectorRuns`
+
+### 2026-06-06：AWX 资产校验升级为 run/item 底座
+
+新增后端接口：
+
+1. `POST /api/v1/collector/runs`
+2. `GET /api/v1/collector/runs/{run_id}/items`
+3. `GET /api/v1/collector/servers/{server_id}/runs`
+4. `GET /api/v1/collector/endpoints`
+
+callback 协议升级为 `items[]` 数组；旧 `/automation/asset-verify/{instance_id}/launch` 仍保留为兼容包装入口。
 
 ## 5. 第三方对接
 

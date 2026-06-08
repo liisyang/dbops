@@ -134,9 +134,13 @@
 
 | 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
 |---|---|---|---|---|---|---|
-| POST | `/api/v1/automation/asset-verify/{instance_id}/launch` | `api/collector.py:22` | CollectorService + AwxService | JWT | 已实现 | `backend/app/api/collector.py`, `backend/app/services/collector_service.py` |
+| POST | `/api/v1/collector/runs` | `api/collector.py:42` | CollectorService + AwxService | JWT | 已实现（主入口） | `backend/app/api/collector.py`, `backend/app/services/collector_service.py` |
+| POST | `/api/v1/automation/asset-verify/{instance_id}/launch` | `api/collector.py:22` | CollectorService + AwxService | JWT | 已实现（兼容包装） | `backend/app/api/collector.py`, `backend/app/services/collector_service.py` |
 | GET | `/api/v1/collector/runs/{run_id}` | `api/collector.py:43` | CollectorService | JWT | 已实现 | `backend/app/api/collector.py` |
+| GET | `/api/v1/collector/runs/{run_id}/items` | `api/collector.py:61` | CollectorService | JWT | 已实现 | `backend/app/api/collector.py` |
 | GET | `/api/v1/collector/instances/{instance_id}/runs` | `api/collector.py:54` | CollectorService | JWT | 已实现 | `backend/app/api/collector.py` |
+| GET | `/api/v1/collector/servers/{server_id}/runs` | `api/collector.py:71` | CollectorService | JWT | 已实现 | `backend/app/api/collector.py` |
+| GET | `/api/v1/collector/endpoints` | `api/collector.py:81` | CollectorService | JWT | 已实现 | `backend/app/api/collector.py` |
 | POST | `/api/v1/collector/callback/` | `api/collector.py:66` | CollectorService | `X-Collector-Token`（不走 JWT） | 已实现 | `backend/app/api/collector.py` |
 
 ## 3. 前端 API 封装清单
@@ -152,9 +156,13 @@
 | assetsApi.deleteServer | DELETE | `/api/v1/servers/servers/{id}` | Servers.vue | 已实现 | `frontend/src/api/assets.ts:35-36` |
 | assetsApi.listInstances | GET | `/api/v1/servers/instances` | Instances.vue | 已实现 | `frontend/src/api/assets.ts:38-39` |
 | assetsApi.getInstance | GET | `/api/v1/servers/instances/{id}` | InstanceDetail.vue | 已实现 | `frontend/src/api/assets.ts:40-41` |
-| assetsApi.launchAssetVerify | POST | `/api/v1/automation/asset-verify/{id}/launch` | InstanceDetail.vue | 已实现 | `frontend/src/api/assets.ts` |
+| assetsApi.createCollectorRun | POST | `/api/v1/collector/runs` | InstanceDetail.vue | 已实现（主入口） | `frontend/src/api/assets.ts` |
+| assetsApi.launchAssetVerify | POST | `/api/v1/automation/asset-verify/{id}/launch` | InstanceDetail.vue（兼容） | 已实现 | `frontend/src/api/assets.ts` |
 | assetsApi.getCollectorRun | GET | `/api/v1/collector/runs/{run_id}` | InstanceDetail.vue（可扩展） | 已实现 | `frontend/src/api/assets.ts` |
+| assetsApi.listCollectorRunItems | GET | `/api/v1/collector/runs/{run_id}/items` | InstanceDetail.vue | 已实现 | `frontend/src/api/assets.ts` |
 | assetsApi.listInstanceCollectorRuns | GET | `/api/v1/collector/instances/{id}/runs` | InstanceDetail.vue | 已实现 | `frontend/src/api/assets.ts` |
+| assetsApi.listServerCollectorRuns | GET | `/api/v1/collector/servers/{id}/runs` | InstanceDetail.vue（可扩展） | 已实现 | `frontend/src/api/assets.ts` |
+| assetsApi.listCollectorEndpoints | GET | `/api/v1/collector/endpoints` | InstanceDetail.vue | 已实现 | `frontend/src/api/assets.ts` |
 | assetsApi.listClusters | GET | `/api/v1/servers/clusters` | Clusters.vue, ClusterDetail.vue | 已实现 | `frontend/src/api/assets.ts:43-44` |
 | assetsApi.getCluster | GET | `/api/v1/servers/clusters/{id}` | ClusterDetail.vue | 已实现 | `frontend/src/api/assets.ts:45-46` |
 | assetsApi.getClusterInstances | GET | `/api/v1/servers/clusters/{id}/instances` | ClusterDetail.vue | 已实现 | `frontend/src/api/assets.ts:47-48` |

@@ -1,7 +1,7 @@
 # DB Schema Snapshot
 
 > 文档状态：AI 自动生成（基于实时数据库元数据查询）
-> 最近扫描：2026-05-21
+> 最近扫描：2026-06-06
 > 依据来源：PostgreSQL 17.9 @ 10.134.185.85:5432/dbops — 只读元数据 SQL 查询
 > 注意：本文件只记录数据库结构元数据，不记录业务数据。
 
@@ -96,7 +96,7 @@ ORDER BY event_object_table, trigger_name;
 
 | Schema | 说明 |
 |---|---|
-| dbops | DBOps 主业务 schema（26 表 + 4 视图 + 1 自定义函数 + 17 触发器 + 25 序列） |
+| dbops | DBOps 主业务 schema（32 表 + 4 视图 + 1 自定义函数 + 18 触发器 + 31 序列） |
 | public | PostgreSQL 默认 schema |
 
 ## 6. 表清单
@@ -129,6 +129,12 @@ ORDER BY event_object_table, trigger_name;
 | dbops | biz_score_result | BASE TABLE | 业务架构评分结果表 |
 | dbops | biz_score_result_detail | BASE TABLE | 业务架构评分扣分明细表 |
 | dbops | staging_excel_import | BASE TABLE | Excel原始导入暂存表。正式表只接清洗后的结构化数据。 |
+| dbops | collector_run | BASE TABLE | AWX校验任务主记录 |
+| dbops | collector_run_item | BASE TABLE | AWX校验任务项明细 |
+| dbops | collector_run_result | BASE TABLE | AWX校验结果明细 |
+| dbops | collector_check_definition | BASE TABLE | 检查项定义表 |
+| dbops | asset_endpoint | BASE TABLE | 端点状态表 |
+| dbops | asset_change_proposal | BASE TABLE | 资产变更提案表 |
 | dbops | v_instance_full | VIEW | 实例全量展示视图，用于资产列表和查询 |
 | dbops | v_staging_invalid_platform_category | VIEW | 平台分类不在固定8类中的记录 |
 | dbops | v_staging_invalid_site | VIEW | site字段不完整或部署类型非法的记录 |
@@ -795,14 +801,15 @@ ORDER BY event_object_table, trigger_name;
 
 | 差异项 | DDL 文件描述 | 实际数据库 | 影响 |
 |---|---|---|---|
-| 一致 | — | 26 表 + 4 视图完全匹配 | DDL 文件与实际库一致 |
-| 一致 | — | 98 个索引与 DDL 预期匹配 | |
+| 一致 | — | 32 表 + 4 视图完全匹配 | DDL 文件与实际库一致 |
+| 一致 | — | 126 个索引与 DDL 预期匹配 | |
 | pgcrypto 安装位置 | 预期在 public | 实际在 dbops schema | pgcrypto 函数注册在 dbops namespace 下，不影响使用 |
 
 ## 16. 需现场确认
 
 - 无重大差异。DDL 文件与数据库实际结构一致。
-- 2026-06-04 新增 AWX 资产校验 DDL（`backend/db/dbops_awx_collector_phase1.sql`）后，需在开发库执行元数据复扫并刷新本快照：
+- 2026-06-04 新增 AWX 资产校验 DDL（`backend/db/dbops_awx_collector_phase1.sql`）已在开发库落库，并在后续元数据复扫中确认：
   - `db_instance` 新增校验字段与约束
   - 新增 `collector_run` / `collector_run_result`
   - 新增 collector 相关索引与触发器
+- 2026-06-06 已在开发库执行 AWX 资产校验第二阶段 DDL（`backend/db/dbops_awx_collector_phase2_refactor.sql`），新增 `collector_run_item` / `asset_endpoint` / `asset_change_proposal` / `collector_check_definition`；本快照已按当前数据库状态刷新。

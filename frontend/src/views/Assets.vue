@@ -160,7 +160,7 @@
               <template v-else-if="col.key === 'status'">
                 <span
                   class="inline-flex items-center rounded-full border px-2.5 py-1 text-xs font-medium"
-                  :class="statusBadgeClass(system.status)"
+                  :class="getStatusBadgeClass(system.status)"
                 >
                   {{ formatStatusLabel(system.status) }}
                 </span>
@@ -198,6 +198,7 @@ import { useAssetStatBuckets } from '@/composables/useAssetStatBuckets'
 import { useAssetArrayList } from '@/composables/useAssetArrayList'
 import { useColumnVisibility } from '@/composables/useColumnVisibility'
 import type { BusinessContactRow, BusinessSystemUpsertPayload, SystemRow } from '@/types/api'
+import { formatStatusLabel, getStatusBadgeClass } from '@/composables/useStatusFormatters'
 
 const SYSTEM_COLUMNS = [
   { key: 'system_name',    label: '系统' },
@@ -441,41 +442,6 @@ function updatePageSize(value: number | 'all') {
   currentPage.value = 1
 }
 
-function formatStatusLabel(status?: string | null) {
-  const normalized = (status || '').trim().toLowerCase()
-  if (!normalized) return '-'
-  if (['building', 'build', 'draft', 'preparing', '建设中'].includes(normalized)) {
-    return '建设中'
-  }
-  if (['pending', 'ready', '待上线', '上线待定'].includes(normalized)) {
-    return '待上线'
-  }
-  if (['active', 'online', 'up', 'on', 'published', 'enabled', '1', '已上线', '在用'].includes(normalized)) {
-    return '已上线'
-  }
-  if (['retired', 'inactive', 'offline', 'down', 'off', 'disabled', '0', '已下线', '下线', '停用'].includes(normalized)) {
-    return '已下线'
-  }
-  return status || '-'
-}
-
-function statusBadgeClass(status?: string | null) {
-  const normalized = (status || '').trim().toLowerCase()
-  if (['building', 'build', 'draft', 'preparing', '建设中'].includes(normalized)) {
-    return 'border-sky-400/30 bg-sky-400/10 text-sky-200'
-  }
-  if (['pending', 'ready', '待上线', '上线待定'].includes(normalized)) {
-    return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-  }
-  if (['active', 'online', 'up', 'on', 'published', 'enabled', '1', '已上线', '在用'].includes(normalized)) {
-    return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
-  }
-  if (['retired', 'inactive', 'offline', 'down', 'off', 'disabled', '0', '已下线', '下线', '停用'].includes(normalized)) {
-    return 'border-slate-400/30 bg-slate-400/10 text-slate-200'
-  }
-  return 'border-white/10 bg-white/5 text-slate-200'
-}
-
 watch(filteredSystems, (items) => {
   const effectivePageSize = pageSize.value === 'all' ? Math.max(1, items.length) : pageSize.value
   const totalPages = Math.max(1, Math.ceil(items.length / effectivePageSize))
@@ -483,4 +449,5 @@ watch(filteredSystems, (items) => {
     currentPage.value = totalPages
   }
 }, { immediate: true })
+
 </script>

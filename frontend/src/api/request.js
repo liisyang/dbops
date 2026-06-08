@@ -111,6 +111,7 @@ request.interceptors.response.use(
     return Promise.reject(new Error(res?.message || '请求失败'))
   },
   error => {
+    const suppressErrorToast = Boolean(error?.config?.suppressErrorToast)
     if (error.response) {
       if (error.response.status === 401) {
         // Only redirect if not already on login page and router is available
@@ -124,10 +125,10 @@ request.interceptors.response.use(
             window.location.href = '/login'
           }
         }
-      } else {
+      } else if (!suppressErrorToast) {
         showMessage('error', extractErrorMessage(error.response.data))
       }
-    } else {
+    } else if (!suppressErrorToast) {
       showMessage('error', '网络错误')
     }
     return Promise.reject(error)

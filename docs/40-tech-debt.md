@@ -43,6 +43,9 @@
 | M8 | `/api/logs/list` 硬编码返回空数组 | `backend/app/api/logs.py:14-15` | 操作日志页面永远无数据 | Medium | 核心资产管理收尾后实现审计日志模块 | 待实现 | `logs.py:15`: `return []`；TODO 注释确认后续实现 |
 | M9 | `resource_tag.resource_id` 无外键约束 | DDL: `dbops_phase1_25_tables.sql` / ORM: `dbops_assets.py:341-355` | `resource_id` 可能指向不存在的资源（多态关联设计） | Medium | 后续可加应用层校验或定期清理孤儿记录 | 待处理 | DDL 未对 `resource_id` 建 FK，由 `resource_type` 决定引用目标表 |
 | M10 | `list_servers` 引用不存在的 `server.dns_name` | `backend/app/services/dbops_asset_service.py:409` | 服务器列表接口运行时 `AttributeError` | Medium | 从 `list_servers` 返回 dict 中移除 `dns_name` 字段 | ✅ 已修复 | `dbops_asset_service.py:409`: `"dns_name": server.dns_name`；`Server` 模型 (`dbops_assets.py:213-236`) 无 `dns_name` 列；测试 `test_list_servers_returns_business_group_and_room_location` 因此失败 |
+| M11 | 缺少“端口+路由”一键自检，易在共享环境误判服务状态 | 运维流程（非单文件） | 进程存在但路由未加载、或端口被旧实例占用时，前端出现 Not Found/不可访问 | Medium | 增加自检脚本：检查 60801/61088 监听、`/openapi.json` 包含 collector 路径、collector 路由未鉴权返回 401 | 待处理 | 本次故障：collector 接口 404 + 前端端口无监听，需手工多步排查 |
+| M12 | 共享后端进程可能滞后于仓库源码，导致 collector 新路由不可用 | 运维流程（非单文件） | 60801 上的后端仍是旧进程时，`POST /api/v1/collector/runs` 会直接 404 | Medium | 启动前先用 `/openapi.json` 核对 collector 路由；必要时重启后端到当前代码 | 已记录 | 本次 961 资产测试：旧 60801 进程缺少新 collector 主入口，重启后才恢复 |
+| M13 | AWX 项目 role 目录必须放在 playbooks/roles 下，否则 `include_role` 找不到 role | AWX 内容仓库布局 | `playbooks/dbops_collector_generic.yml` 执行时找不到 `port_check` role | Medium | 将执行 role 放到 `playbooks/roles/<role>/tasks/main.yml`，或改成显式 tasks include | 已记录 | 本次 AWX job 31 失败原因：role 放在仓库根 `roles/` 下，AWX 实际搜索路径未包含它 |
 
 ### 3.3 Low
 

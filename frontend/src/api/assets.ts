@@ -15,6 +15,10 @@ import type {
   ImportExecuteResult,
   ImportPreviewResult,
   CollectorRunRow,
+  CollectorRunCreatePayload,
+  CollectorRunCreateResponse,
+  CollectorRunItemRow,
+  CollectorEndpointRow,
   InstanceDetail,
   InstanceListResponse,
   ServerDetail,
@@ -40,14 +44,42 @@ export const assetsApi = {
 
   listInstances: (params?: Record<string, any>): Promise<InstanceListResponse> =>
     request.get('/v1/servers/instances', { params }),
-  getInstance: (id: number | string): Promise<InstanceDetail> =>
-    request.get(`/v1/servers/instances/${id}`),
+  getInstance: (id: number | string, options?: { suppressErrorToast?: boolean }): Promise<InstanceDetail> =>
+    request.get(`/v1/servers/instances/${id}`, { suppressErrorToast: options?.suppressErrorToast }),
   launchAssetVerify: (id: number | string, data: AssetVerifyLaunchPayload): Promise<AssetVerifyLaunchResponse> =>
     request.post(`/v1/automation/asset-verify/${id}/launch`, data),
+  createCollectorRun: (data: CollectorRunCreatePayload): Promise<CollectorRunCreateResponse> =>
+    request.post('/v1/collector/runs', data),
   getCollectorRun: (runId: string): Promise<CollectorRunRow> =>
     request.get(`/v1/collector/runs/${runId}`),
-  listInstanceCollectorRuns: (id: number | string, params?: { limit?: number }): Promise<CollectorRunRow[]> =>
-    request.get(`/v1/collector/instances/${id}/runs`, { params }),
+  listCollectorRunItems: (runId: string, options?: { suppressErrorToast?: boolean }): Promise<CollectorRunItemRow[]> =>
+    request.get(`/v1/collector/runs/${runId}/items`, { suppressErrorToast: options?.suppressErrorToast }),
+  listInstanceCollectorRuns: (
+    id: number | string,
+    params?: { limit?: number },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<CollectorRunRow[]> =>
+    request.get(`/v1/collector/instances/${id}/runs`, {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  listServerCollectorRuns: (
+    id: number | string,
+    params?: { limit?: number },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<CollectorRunRow[]> =>
+    request.get(`/v1/collector/servers/${id}/runs`, {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  listCollectorEndpoints: (
+    params?: { entity_type?: string; entity_id?: number },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<CollectorEndpointRow[]> =>
+    request.get('/v1/collector/endpoints', {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
 
   listClusters: (): Promise<ClusterRow[]> =>
     request.get('/v1/servers/clusters'),

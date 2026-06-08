@@ -139,6 +139,13 @@ curl -i http://127.0.0.1:60801/api/v1/collector/instances/961/runs
 # 2) 检查 OpenAPI 是否包含 collector 路径
 curl -s http://127.0.0.1:60801/openapi.json \
   | grep -E '"/api/v1/collector/instances/\{instance_id\}/runs"|"/api/v1/collector/runs/\{run_id\}"'
+
+# 如果 `/api/v1/collector/runs` 或 `/api/v1/collector/runs/{run_id}/items` 不在 OpenAPI 里，
+# 说明 60801 还在跑旧进程，需要用当前代码重启后端再测。
+
+# 如果 AWX job 失败并提示 `role 'port_check' was not found`，
+# 检查 `ansible-playbooks/playbooks/roles/port_check/tasks/main.yml` 是否存在，
+# 因为 AWX 项目的 playbook 目录只会自动搜索 `playbooks/roles`。
 ```
 
 ## 4. 关键配置检查点

@@ -199,7 +199,8 @@ describe('Business system detail shell', () => {
     expect(wrapper.text()).toContain('返回列表')
     expect(wrapper.text()).toContain('基础信息')
     expect(wrapper.text()).toContain('联系人')
-    expect(wrapper.text()).toContain('关联集群')
+    expect(wrapper.text()).toContain('拓扑关系')
+    expect(wrapper.text()).toContain('集群节点清单')
     expect(wrapper.text()).toContain('SYS-007')
     expect(wrapper.text()).toContain('订单系统')
     expect(wrapper.text()).toContain('事业群')
@@ -228,7 +229,7 @@ describe('Business system detail shell', () => {
     expect(wrapper.text()).toContain('查看历史')
     expect(wrapper.text()).not.toContain('status_change')
 
-    const historyButton = wrapper.findAll('button').find((button) => button.text() === '查看历史')
+    const historyButton = wrapper.findAll('button').find((button) => button.text().includes('查看历史'))
     expect(historyButton).toBeTruthy()
     await historyButton!.trigger('click')
     await flushPromises()
@@ -240,9 +241,8 @@ describe('Business system detail shell', () => {
   })
 
   it('binds and unbinds contacts from the detail page', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true)
-
     const wrapper = mount(BusinessSystemDetail, {
+      attachTo: document.body,
       global: {
         stubs: globalStubs,
       },
@@ -254,13 +254,23 @@ describe('Business system detail shell', () => {
     expect(wrapper.text()).toContain('新增绑定')
     expect(wrapper.text()).toContain('解除绑定')
 
-    const remarkInput = wrapper.findAll('input').find((input) => input.element instanceof HTMLInputElement && input.attributes('placeholder') === '可选')
-    expect(remarkInput).toBeTruthy()
-    await remarkInput!.setValue('绑定说明')
+    // Open the add-contact modal (modal teleports to body)
+    const openModalButton = wrapper.findAll('button').find((button) => button.text().includes('新增绑定'))
+    expect(openModalButton).toBeTruthy()
+    await openModalButton!.trigger('click')
+    await flushPromises()
 
-    const bindButton = wrapper.findAll('button').find((button) => button.text() === '绑定联系人')
+    const remarkInput = document.body.querySelector('input[placeholder="可选"]') as HTMLInputElement | null
+    expect(remarkInput).toBeTruthy()
+    remarkInput!.value = '绑定说明'
+    remarkInput!.dispatchEvent(new Event('input'))
+    await flushPromises()
+
+    const bindButton = Array.from(document.body.querySelectorAll('button')).find((button) =>
+      (button.textContent || '').includes('绑定联系人'),
+    ) as HTMLButtonElement | undefined
     expect(bindButton).toBeTruthy()
-    await bindButton!.trigger('click')
+    bindButton!.click()
     await flushPromises()
     await flushPromises()
 
@@ -270,13 +280,25 @@ describe('Business system detail shell', () => {
       remark: '绑定说明',
     })
 
-    const unbindButton = wrapper.findAll('button').find((button) => button.text() === '解除绑定')
+    // Click "解除绑定" trigger button in the contact row to open the confirm dialog
+    const unbindButton = wrapper.findAll('button').find((button) => button.text().includes('解除绑定'))
     expect(unbindButton).toBeTruthy()
     await unbindButton!.trigger('click')
     await flushPromises()
     await flushPromises()
 
+    // Confirm dialog is teleported to body; the dialog confirm button is the last danger button in the document
+    const dangerButtons = Array.from(document.body.querySelectorAll('button.ops-danger-button')) as HTMLButtonElement[]
+    const confirmUnbindButton = dangerButtons[dangerButtons.length - 1]
+    expect(confirmUnbindButton).toBeTruthy()
+    confirmUnbindButton!.click()
+    await flushPromises()
+    await flushPromises()
+
     expect(deleteBusinessSystemContactMock).toHaveBeenCalledWith(7, 31, 'BUSINESS_MANAGER')
+
+    wrapper.unmount()
+    document.body.innerHTML = ''
   })
 
   it.each([
@@ -294,7 +316,7 @@ describe('Business system detail shell', () => {
     await flushPromises()
     await flushPromises()
 
-    const actionButton = wrapper.findAll('button').find((button) => button.text() === buttonLabel)
+    const actionButton = wrapper.findAll('button').find((button) => button.text().includes(buttonLabel) && !button.text().includes('确认'))
     expect(actionButton).toBeTruthy()
     await actionButton!.trigger('click')
     await flushPromises()
@@ -305,7 +327,7 @@ describe('Business system detail shell', () => {
     await textareas[1].setValue('IP-Group-A')
     await flushPromises()
 
-    const confirmButton = wrapper.findAll('button').find((button) => button.text() === `确认${buttonLabel}`)
+    const confirmButton = wrapper.findAll('button').find((button) => button.text().includes(`确认${buttonLabel}`))
     expect(confirmButton).toBeTruthy()
     await confirmButton!.trigger('click')
     await flushPromises()

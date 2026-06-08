@@ -18,7 +18,7 @@
 2. **认证体系已就绪**：JWT 登录 + 路由守卫 + 请求拦截器 + 401 处理完整闭环。
 3. **旧 ops schema 代码已清理**：模型层统一为 dbops schema，配置统一为 pydantic-settings。
 4. **异步运维框架已就绪但暂缓启用**：Celery + Redis + WebSocket 架构完整，当前阶段有意不启动 worker。
-5. **AWX 资产校验最小闭环已实现**：可从实例详情发起 AWX 端口校验，callback 回写 `db_instance` 校验状态并落库 `collector_run/collector_run_result/asset_event_history`。
+5. **AWX 资产校验最小闭环已实现并开始演进底座**：可从实例详情发起 AWX 端口校验，callback 已支持 items 数组，回写 `collector_run/collector_run_item/collector_run_result/asset_endpoint/asset_event_history`，并仅在 db_instance item 上更新摘要状态。
 6. **扩展模块待排期**：备份恢复、SQL 分析、巡检健康、审计安全、凭证中心、知识库共 16 个前端页面，在核心资产管理收尾后统一排期。
 
 ## 3. 当前阻塞项
@@ -35,7 +35,7 @@
 |---|---|---|---|---|
 | 异步账号操作 | API 层完整 + Celery task 定义 + WebSocket 推送 + TaskState Redis 存储 | Celery worker 有意暂缓启用 | 后续需要时恢复 `backend/run.py` 中 worker 启动代码 | `backend/run.py:63` |
 | 审计日志 | 前端 3 个页面已就绪 | 后端返回空数组，无数据源 | 核心资产管理收尾后实现 | `backend/app/api/logs.py:15` |
-| AWX 资产校验闭环 | launch/callback/runs API + AWX service + collector service + 实例详情“校验资产”入口已完成；callback URL 未显式配置时自动回退到当前请求基址 | 第一阶段不含自动修复、SQL 执行、专项采集与任务中心 | 在开发库先执行 `backend/db/dbops_awx_collector_phase1.sql` 并联调 AWX 网络可达性 | `backend/app/api/collector.py`, `backend/app/services/collector_service.py`, `frontend/src/views/InstanceDetail.vue` |
+| AWX 资产校验闭环 | `collector/runs` 主入口 + AWX service + collector service + 实例详情“校验资产”入口已完成；callback URL 未显式配置时自动回退到当前请求基址 | 已从单结果模型升级为 run/item/endpoint 底座；实例详情页已支持多 `check_code` 选择；第一阶段仍不含自动修复、SQL 执行、专项采集与任务中心 | 在开发库先执行 `backend/db/dbops_awx_collector_phase2_refactor.sql` 并联调 AWX 网络可达性 | `backend/app/api/collector.py`, `backend/app/services/collector_service.py`, `frontend/src/views/InstanceDetail.vue` |
 | 巡检模块 | InspectionItem/Task/Result 表已定义 | 无 API，前端占位 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:371-393` |
 | 业务评分 | BizScoreRule/Result/Detail 表已定义 | 无 API，无前端页面 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:395-416` |
 | 凭证管理 | 前端占位页面 | 无 API，无模型 | 核心资产管理收尾后排期 | `frontend/src/views/credentials/*.vue` |

@@ -10,9 +10,11 @@
       </router-link>
     </div>
 
-    <OpsPageHeader
+    <OpsEntityHeader
       :title="headerTitle"
-      :subtitle="headerSubtitle"
+      :subtitle-parts="headerSubtitleParts"
+      icon="schema"
+      :chips="headerChips"
     />
 
     <OpsSectionCard title="基础信息" subtitle="展示当前集群已返回的基础字段，不扩展不存在的后端数据。" icon="info">
@@ -90,7 +92,7 @@ import { useRoute } from 'vue-router'
 
 import { assetsApi } from '@/api/assets'
 import OpsTopology from '@/components/ops/OpsTopology.vue'
-import { OpsEmptyState, OpsPage, OpsPageHeader, OpsSectionCard } from '@/components/ops'
+import { OpsEmptyState, OpsEntityHeader, OpsPage, OpsSectionCard } from '@/components/ops'
 import type { ClusterDetail, InstanceRow } from '@/types/api'
 
 type SummaryField = {
@@ -122,11 +124,16 @@ const error = ref('')
 const detail = ref<ClusterDetail | null>(null)
 
 const headerTitle = computed(() => detail.value?.cluster_name || detail.value?.cluster_code || '集群详情')
-const headerSubtitle = computed(() => {
-  if (!detail.value) return '按 cluster_code 查看集群概要和最小拓扑关系。'
+const headerSubtitleParts = computed(() => {
+  if (!detail.value) return ['按 cluster_code 查看集群概要和最小拓扑关系。']
   return [detail.value.cluster_code, detail.value.cluster_type, detail.value.source_cluster_no || '无来源号']
-    .join(' / ')
 })
+const headerChips = computed(() => [
+  {
+    icon: 'dns',
+    label: `实例数 ${detail.value?.instance_count ?? 0}`,
+  },
+])
 
 const summaryFields = computed<SummaryField[]>(() => {
   if (!detail.value) return []
@@ -295,5 +302,4 @@ function resolveErrorMessage(err: unknown) {
   return '请求集群详情失败，请稍后重试。'
 }
 </script>
-
 

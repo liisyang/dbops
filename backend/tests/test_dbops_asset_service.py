@@ -1,7 +1,9 @@
 from datetime import datetime
 
 from app.models.dbops_assets import (
+    AssetEndpoint,
     AssetEventHistory,
+    CollectorRunItem,
     BusinessSystem,
     BusinessSystemContact,
     Cluster,
@@ -43,14 +45,22 @@ def test_collector_models_expose_expected_keys():
     assert CollectorRun.__tablename__ == "collector_run"
     assert "run_id" in CollectorRun.__table__.columns
     assert "db_instance_id" in CollectorRun.__table__.columns
+    assert "target_scope" in CollectorRun.__table__.columns
+    assert "server_id" in CollectorRun.__table__.columns
+    assert "item_count" in CollectorRun.__table__.columns
     assert "status" in CollectorRun.__table__.columns
     assert "target_host" in CollectorRun.__table__.columns
     assert "target_port" in CollectorRun.__table__.columns
     assert CollectorRunResult.__tablename__ == "collector_run_result"
     assert "collector_run_id" in CollectorRunResult.__table__.columns
     assert "run_id" in CollectorRunResult.__table__.columns
-    assert "check_type" in CollectorRunResult.__table__.columns
+    assert "item_key" in CollectorRunResult.__table__.columns
+    assert "check_code" in CollectorRunResult.__table__.columns
+    assert "target_scope" in CollectorRunResult.__table__.columns
     assert "status" in CollectorRunResult.__table__.columns
+    assert CollectorRunItem.__tablename__ == "collector_run_item"
+    assert "item_key" in CollectorRunItem.__table__.columns
+    assert AssetEndpoint.__tablename__ == "asset_endpoint"
 
 
 def test_db_type_model_exposes_dictionary_fields():
@@ -87,17 +97,35 @@ class _FakeQuery:
 
     def filter(self, *conditions):
         for condition in conditions:
-            if hasattr(condition, "left") and hasattr(condition, "right") and getattr(condition.operator, "__name__", "") == "eq":
+            operator_name = getattr(condition.operator, "__name__", "")
+            if hasattr(condition, "left") and hasattr(condition, "right") and operator_name == "eq":
                 key = getattr(condition.left, "key", None)
                 value = getattr(condition.right, "value", None)
                 if key is not None:
                     self.filters[key] = value
+            elif hasattr(condition, "left") and hasattr(condition, "right") and operator_name == "in_op":
+                key = getattr(condition.left, "key", None)
+                value = getattr(condition.right, "value", None)
+                if key is not None:
+                    self.filters[key] = set(value or [])
+        return self
+
+    def order_by(self, *args, **kwargs):
+        return self
+
+    def limit(self, value):
+        return self
+
+    def with_for_update(self):
         return self
 
     def _rows(self):
         rows = self.session.store.get(self.model, [])
         for key, value in self.filters.items():
-            rows = [row for row in rows if getattr(row, key) == value]
+            if isinstance(value, set):
+                rows = [row for row in rows if getattr(row, key) in value]
+            else:
+                rows = [row for row in rows if getattr(row, key) == value]
         return rows
 
     def first(self):
@@ -486,12 +514,12 @@ def test_launch_asset_verify_uses_request_base_url_when_callback_url_missing(mon
     monkeypatch.setattr(collector_service_module, "get_settings", lambda: _CollectorSettings(""))
     monkeypatch.setattr(
         collector_service_module.AwxService,
-        "launch_verify_job",
+        "launch_job",
         lambda extra_vars: {
             "awx_job_id": 123,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/123",
             "awx_job_template_id": 456,
-            "awx_job_template_name": "JT_ASSET_VERIFY_PORT",
+            "awx_job_template_name": "JT_DBOPS_COLLECTOR_GENERIC",
         },
     )
 
@@ -507,6 +535,8 @@ def test_launch_asset_verify_uses_request_base_url_when_callback_url_missing(mon
     assert result["status"] == "launched"
     assert collector_run.callback_url == "http://testserver/api/v1/collector/callback/"
     assert collector_run.extra_vars["callback_url"] == collector_run.callback_url
+    assert collector_run.extra_vars["items"][0]["check_code"] == "DB_PORT_REACHABILITY"
+    assert collector_run.extra_vars["items"][0]["target_scope"] == "db_instance"
 
 
 def test_launch_asset_verify_prefers_configured_callback_url(monkeypatch):
@@ -519,12 +549,12 @@ def test_launch_asset_verify_prefers_configured_callback_url(monkeypatch):
     )
     monkeypatch.setattr(
         collector_service_module.AwxService,
-        "launch_verify_job",
+        "launch_job",
         lambda extra_vars: {
             "awx_job_id": 123,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/123",
             "awx_job_template_id": 456,
-            "awx_job_template_name": "JT_ASSET_VERIFY_PORT",
+            "awx_job_template_name": "JT_DBOPS_COLLECTOR_GENERIC",
         },
     )
 
@@ -538,3 +568,141 @@ def test_launch_asset_verify_prefers_configured_callback_url(monkeypatch):
 
     collector_run = db.store[CollectorRun][0]
     assert collector_run.callback_url == "https://collector.example.com/api/v1/collector/callback/"
+
+
+def test_launch_collector_run_builds_multiple_items(monkeypatch):
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    monkeypatch.setattr(collector_service_module, "get_settings", lambda: _CollectorSettings(""))
+    monkeypatch.setattr(
+        collector_service_module.AwxService,
+        "launch_job",
+        lambda extra_vars: {
+            "awx_job_id": 321,
+            "awx_job_url": "https://awx.example.com/#/jobs/playbook/321",
+            "awx_job_template_id": 456,
+            "awx_job_template_name": "JT_DBOPS_COLLECTOR_GENERIC",
+        },
+    )
+
+    payload = collector_service_module.CollectorRunCreateRequest(
+        scope={"target_scope": "db_instance", "asset_ids": [80]},
+        check_codes=["DB_PORT_REACHABILITY", "SSH_PORT_REACHABILITY"],
+        options={"timeout_seconds": 3},
+    )
+    result = collector_service_module.CollectorService.launch_collector_run(
+        db,
+        payload=payload,
+        requested_by="admin",
+        request_base_url="http://testserver/",
+    )
+
+    assert result["item_count"] == 2
+    collector_run = db.store[CollectorRun][0]
+    assert collector_run.item_count == 2
+    assert collector_run.target_scope == "mixed"
+    assert len(db.store[CollectorRunItem]) == 2
+    assert all(item.collector_run_id == collector_run.id for item in db.store[CollectorRunItem])
+    assert collector_run.extra_vars["items"][0]["check_code"] == "DB_PORT_REACHABILITY"
+    assert collector_run.extra_vars["items"][1]["check_code"] == "SSH_PORT_REACHABILITY"
+
+
+def test_handle_callback_items_array_updates_instance_and_endpoint():
+    db = _FakeSession()
+    group, system, contact, link, db_type, db_version, site, os_version, server, cluster, vip, instance = _seed_asset_graph()
+    db.seed(
+        group,
+        system,
+        contact,
+        link,
+        db_type,
+        db_version,
+        site,
+        os_version,
+        server,
+        cluster,
+        vip,
+        instance,
+        CollectorRun(
+            id=1,
+            run_id="COLLECT-20260606150000-db_instance-80",
+            target_scope="mixed",
+            db_instance_id=80,
+            server_id=60,
+            status="launched",
+            item_count=2,
+            target_host="10.0.0.10",
+            target_port=1521,
+            callback_url="http://testserver/api/v1/collector/callback/",
+            extra_vars={},
+            request_payload={},
+        ),
+        CollectorRunItem(
+            id=2,
+            collector_run_id=1,
+            run_id="COLLECT-20260606150000-db_instance-80",
+            item_key="db_instance:80:DB_PORT_REACHABILITY:10.0.0.10:1521",
+            check_code="DB_PORT_REACHABILITY",
+            target_scope="db_instance",
+            db_instance_id=80,
+            server_id=60,
+            target_host="10.0.0.10",
+            target_port=1521,
+            status="pending",
+            timeout_seconds=5,
+        ),
+        CollectorRunItem(
+            id=3,
+            collector_run_id=1,
+            run_id="COLLECT-20260606150000-db_instance-80",
+            item_key="server:60:SSH_PORT_REACHABILITY:10.0.0.10:22",
+            check_code="SSH_PORT_REACHABILITY",
+            target_scope="server",
+            db_instance_id=80,
+            server_id=60,
+            target_host="10.0.0.10",
+            target_port=22,
+            status="pending",
+            timeout_seconds=5,
+        ),
+    )
+
+    payload = collector_service_module.CollectorCallbackRequest(
+        run_id="COLLECT-20260606150000-db_instance-80",
+        awx_job_id=123,
+        items=[
+            collector_service_module.CollectorCallbackItem(
+                item_key="db_instance:80:DB_PORT_REACHABILITY:10.0.0.10:1521",
+                check_code="DB_PORT_REACHABILITY",
+                target_scope="db_instance",
+                asset_id=80,
+                target_host="10.0.0.10",
+                target_port=1521,
+                status="verified",
+                reachable=True,
+                message="PORT_REACHABILITY_OK",
+                raw_result={"elapsed_ms": 20},
+            ),
+            collector_service_module.CollectorCallbackItem(
+                item_key="server:60:SSH_PORT_REACHABILITY:10.0.0.10:22",
+                check_code="SSH_PORT_REACHABILITY",
+                target_scope="server",
+                asset_id=60,
+                target_host="10.0.0.10",
+                target_port=22,
+                status="missing",
+                reachable=False,
+                message="SSH_PORT_REACHABILITY_FAILED",
+                raw_result={"error": "timeout"},
+            ),
+        ],
+    )
+
+    result = collector_service_module.CollectorService.handle_callback(db, payload=payload)
+
+    assert result["status"] == "partial_success"
+    assert instance.trust_status == "verified"
+    assert instance.reachability_status == "online"
+    assert len(db.store.get(CollectorRunResult, [])) == 2
+    assert len(db.store.get(AssetEndpoint, [])) == 2
+    assert len(db.store.get(AssetEventHistory, [])) >= 1

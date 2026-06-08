@@ -3,8 +3,7 @@ from __future__ import annotations
 import hmac
 from typing import List, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from fastapi import Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, get_db
@@ -15,6 +14,10 @@ from app.schemas.collector import (
     AssetVerifyLaunchResponse,
     CollectorCallbackRequest,
     CollectorCallbackResponse,
+    CollectorEndpointResponse,
+    CollectorRunCreateRequest,
+    CollectorRunCreateResponse,
+    CollectorRunItemResponse,
     CollectorRunResponse,
 )
 from app.services.collector_service import CollectorService
@@ -46,6 +49,28 @@ async def launch_asset_verify(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
+@router.post("/collector/runs", response_model=CollectorRunCreateResponse)
+async def create_collector_run(
+    payload: CollectorRunCreateRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    try:
+        return CollectorService.launch_collector_run(
+            db,
+            payload=payload,
+            requested_by=current_user.username,
+            request_base_url=str(request.base_url),
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
 @router.get("/collector/runs/{run_id}", response_model=CollectorRunResponse)
 async def get_collector_run(
     run_id: str,
@@ -58,6 +83,15 @@ async def get_collector_run(
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@router.get("/collector/runs/{run_id}/items", response_model=List[CollectorRunItemResponse])
+async def list_collector_run_items(
+    run_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return CollectorService.list_run_items(db, run_id=run_id)
+
+
 @router.get("/collector/instances/{instance_id}/runs", response_model=List[CollectorRunResponse])
 async def list_instance_collector_runs(
     instance_id: int,
@@ -66,6 +100,26 @@ async def list_instance_collector_runs(
     db: Session = Depends(get_db),
 ):
     return CollectorService.list_instance_runs(db, instance_id=instance_id, limit=limit)
+
+
+@router.get("/collector/servers/{server_id}/runs", response_model=List[CollectorRunResponse])
+async def list_server_collector_runs(
+    server_id: int,
+    limit: int = Query(20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return CollectorService.list_server_runs(db, server_id=server_id, limit=limit)
+
+
+@router.get("/collector/endpoints", response_model=List[CollectorEndpointResponse])
+async def list_collector_endpoints(
+    entity_type: Optional[str] = Query(default=None),
+    entity_id: Optional[int] = Query(default=None, ge=1),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return CollectorService.list_endpoints(db, entity_type=entity_type, entity_id=entity_id)
 
 
 @router.post("/collector/callback/", response_model=CollectorCallbackResponse)

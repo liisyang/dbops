@@ -308,6 +308,7 @@ class DbInstance(DbopsAssetBase):
     cluster = relationship("Cluster", back_populates="instances")
     collector_runs = relationship("CollectorRun", back_populates="db_instance")
     collector_results = relationship("CollectorRunResult", back_populates="db_instance")
+    collector_items = relationship("CollectorRunItem", back_populates="db_instance")
 
     __table_args__ = (
         UniqueConstraint("cluster_id", "server_id", "instance_name", "port", name="uq_instance_cluster_server_name_port"),
@@ -334,15 +335,18 @@ class CollectorRun(DbopsAssetBase):
 
     id = Column(BigInteger, primary_key=True)
     run_id = Column(String(64), nullable=False, unique=True)
-    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"), nullable=False)
+    target_scope = Column(String(32), nullable=False, server_default=text("'db_instance'"))
+    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"))
+    server_id = Column(BigInteger, ForeignKey("server.id"))
     job_type = Column(String(64), nullable=False, server_default=text("'ASSET_VERIFY_PORT'"))
     status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    item_count = Column(Integer, nullable=False, server_default=text("0"))
     awx_job_id = Column(BigInteger)
     awx_job_url = Column(Text)
     awx_job_template_id = Column(BigInteger)
     awx_job_template_name = Column(String(200))
-    target_host = Column(String(255), nullable=False)
-    target_port = Column(Integer, nullable=False)
+    target_host = Column(String(255))
+    target_port = Column(Integer)
     callback_url = Column(Text)
     requested_by = Column(String(100))
     request_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
@@ -354,20 +358,86 @@ class CollectorRun(DbopsAssetBase):
     updated_at = Column(DateTime, default=datetime.utcnow)
 
     db_instance = relationship("DbInstance", back_populates="collector_runs")
+    server = relationship("Server")
+    items = relationship("CollectorRunItem", back_populates="collector_run", cascade="all, delete-orphan")
     results = relationship("CollectorRunResult", back_populates="collector_run")
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending', 'launched', 'success', 'failed', 'callback_failed')",
+            "target_scope IN ('db_instance', 'server', 'mixed')",
+            name="chk_collector_run_target_scope",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'launched', 'running', 'success', 'partial_success', 'failed', 'callback_failed', 'timeout', 'canceled')",
             name="chk_collector_run_status",
+        ),
+        CheckConstraint(
+            "item_count >= 0",
+            name="chk_collector_run_item_count",
         ),
         CheckConstraint(
             "target_port BETWEEN 1 AND 65535",
             name="chk_collector_run_target_port",
         ),
         Index("idx_collector_run_instance_time", "db_instance_id", created_at.desc()),
+        Index("idx_collector_run_server_time", "server_id", created_at.desc()),
         Index("idx_collector_run_awx_job", "awx_job_id"),
         Index("idx_collector_run_status", "status"),
+        Index("idx_collector_run_target_scope", "target_scope"),
+    )
+
+
+class CollectorRunItem(DbopsAssetBase):
+    __tablename__ = "collector_run_item"
+
+    id = Column(BigInteger, primary_key=True)
+    collector_run_id = Column(BigInteger, ForeignKey("collector_run.id", ondelete="CASCADE"), nullable=False)
+    run_id = Column(String(64), nullable=False)
+    item_key = Column(String(255), nullable=False)
+    check_code = Column(String(100), nullable=False)
+    target_scope = Column(String(32), nullable=False)
+    server_id = Column(BigInteger, ForeignKey("server.id"))
+    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"))
+    target_host = Column(String(255), nullable=False)
+    target_port = Column(Integer, nullable=False)
+    protocol = Column(String(20), nullable=False, server_default=text("'tcp'"))
+    timeout_seconds = Column(Integer, nullable=False, server_default=text("5"))
+    status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    result_status = Column(String(32))
+    result_message = Column(Text)
+    raw_result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    collector_run = relationship("CollectorRun", back_populates="items")
+    server = relationship("Server")
+    db_instance = relationship("DbInstance", back_populates="collector_items")
+    result = relationship("CollectorRunResult", back_populates="collector_item", uselist=False)
+
+    __table_args__ = (
+        UniqueConstraint("collector_run_id", "item_key", name="uq_collector_run_item_key"),
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_collector_run_item_target_scope",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'success', 'failed', 'skipped', 'timeout')",
+            name="chk_collector_run_item_status",
+        ),
+        CheckConstraint(
+            "result_status IS NULL OR result_status IN ('verified', 'missing', 'drifted', 'collected', 'failed')",
+            name="chk_collector_run_item_result_status",
+        ),
+        CheckConstraint(
+            "target_port BETWEEN 1 AND 65535",
+            name="chk_collector_run_item_target_port",
+        ),
+        Index("idx_collector_run_item_run", "collector_run_id"),
+        Index("idx_collector_run_item_scope_instance", "db_instance_id", created_at.desc()),
+        Index("idx_collector_run_item_scope_server", "server_id", created_at.desc()),
+        Index("idx_collector_run_item_status", "status"),
     )
 
 
@@ -377,33 +447,163 @@ class CollectorRunResult(DbopsAssetBase):
     id = Column(BigInteger, primary_key=True)
     collector_run_id = Column(BigInteger, ForeignKey("collector_run.id", ondelete="CASCADE"), nullable=False)
     run_id = Column(String(64), nullable=False)
-    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"), nullable=False)
-    check_type = Column(String(64), nullable=False, server_default=text("'PORT_REACHABILITY'"))
+    collector_run_item_id = Column(BigInteger, ForeignKey("collector_run_item.id", ondelete="CASCADE"))
+    item_key = Column(String(255), nullable=False)
+    check_code = Column(String(100), nullable=False)
+    target_scope = Column(String(32), nullable=False)
+    db_instance_id = Column(BigInteger, ForeignKey("db_instance.id"))
+    server_id = Column(BigInteger, ForeignKey("server.id"))
+    check_type = Column(String(64))
     status = Column(String(32), nullable=False)
     port_reachable = Column(Boolean)
     target_host = Column(String(255), nullable=False)
     target_port = Column(Integer, nullable=False)
     error_message = Column(Text)
+    result_message = Column(Text)
     awx_job_id = Column(BigInteger)
     checked_by = Column(String(50))
     checked_at = Column(DateTime)
     raw_result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
 
     collector_run = relationship("CollectorRun", back_populates="results")
     db_instance = relationship("DbInstance", back_populates="collector_results")
+    server = relationship("Server")
+    collector_item = relationship("CollectorRunItem", back_populates="result")
 
     __table_args__ = (
-        UniqueConstraint("run_id", "check_type", name="uq_collector_run_result_run_check"),
+        UniqueConstraint("collector_run_id", "item_key", name="uq_collector_run_result_item"),
+        UniqueConstraint("collector_run_item_id", name="uq_collector_run_result_item_id"),
         CheckConstraint(
-            "status IN ('verified', 'missing', 'drifted')",
+            "status IN ('verified', 'missing', 'drifted', 'collected', 'failed')",
             name="chk_collector_run_result_status",
+        ),
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_collector_run_result_target_scope",
         ),
         CheckConstraint(
             "target_port BETWEEN 1 AND 65535",
             name="chk_collector_run_result_target_port",
         ),
         Index("idx_collector_run_result_instance_time", "db_instance_id", created_at.desc()),
+        Index("idx_collector_run_result_server_time", "server_id", created_at.desc()),
+    )
+
+
+class CollectorCheckDefinition(DbopsAssetBase):
+    __tablename__ = "collector_check_definition"
+
+    id = Column(BigInteger, primary_key=True)
+    check_code = Column(String(100), nullable=False, unique=True)
+    check_name = Column(String(200), nullable=False)
+    target_scope = Column(String(32), nullable=False)
+    task_type = Column(String(32), nullable=False)
+    db_type_code = Column(String(50))
+    os_type_code = Column(String(50))
+    awx_role = Column(String(100))
+    default_timeout_seconds = Column(Integer, nullable=False, server_default=text("5"))
+    enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    description = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_collector_check_definition_target_scope",
+        ),
+        CheckConstraint(
+            "task_type IN ('PORT_CHECK', 'DB_PORT_DISCOVERY', 'OS_DISCOVERY', 'DB_SQL_COLLECT')",
+            name="chk_collector_check_definition_task_type",
+        ),
+    )
+
+
+class AssetEndpoint(DbopsAssetBase):
+    __tablename__ = "asset_endpoint"
+
+    id = Column(BigInteger, primary_key=True)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(BigInteger, nullable=False)
+    endpoint_type = Column(String(32), nullable=False, server_default=text("'port'"))
+    host = Column(String(255), nullable=False)
+    port = Column(Integer, nullable=False)
+    protocol = Column(String(20), nullable=False, server_default=text("'tcp'"))
+    source = Column(String(32), nullable=False, server_default=text("'cmdb'"))
+    expected = Column(Boolean, nullable=False, server_default=text("true"))
+    status = Column(String(32), nullable=False, server_default=text("'unknown'"))
+    last_seen_at = Column(DateTime)
+    last_verify_at = Column(DateTime)
+    last_run_id = Column(String(64))
+    last_message = Column(Text)
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('server', 'db_instance')",
+            name="chk_asset_endpoint_entity_type",
+        ),
+        CheckConstraint(
+            "protocol IN ('tcp', 'udp')",
+            name="chk_asset_endpoint_protocol",
+        ),
+        CheckConstraint(
+            "source IN ('cmdb', 'discovered', 'manual')",
+            name="chk_asset_endpoint_source",
+        ),
+        CheckConstraint(
+            "status IN ('unknown', 'online', 'offline', 'drifted')",
+            name="chk_asset_endpoint_status",
+        ),
+        CheckConstraint(
+            "port BETWEEN 1 AND 65535",
+            name="chk_asset_endpoint_port",
+        ),
+        UniqueConstraint(
+            "entity_type", "entity_id", "endpoint_type", "host", "port", "source",
+            name="uq_asset_endpoint_identity",
+        ),
+        Index("idx_asset_endpoint_entity_time", "entity_type", "entity_id", updated_at.desc()),
+        Index("idx_asset_endpoint_status", "status"),
+    )
+
+
+class AssetChangeProposal(DbopsAssetBase):
+    __tablename__ = "asset_change_proposal"
+
+    id = Column(BigInteger, primary_key=True)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(BigInteger, nullable=False)
+    change_type = Column(String(64), nullable=False)
+    old_value = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    new_value = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    evidence_run_id = Column(String(64))
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    requested_by = Column(String(100))
+    approved_by = Column(String(100))
+    approved_at = Column(DateTime)
+    applied_at = Column(DateTime)
+    rejected_reason = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "entity_type IN ('server', 'db_instance')",
+            name="chk_asset_change_proposal_entity_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'approved', 'rejected', 'applied', 'canceled')",
+            name="chk_asset_change_proposal_status",
+        ),
+        Index("idx_asset_change_proposal_entity_time", "entity_type", "entity_id", created_at.desc()),
+        Index("idx_asset_change_proposal_status", "status"),
     )
 
 
@@ -599,7 +799,11 @@ __all__ = [
     "ClusterVip",
     "DbInstance",
     "CollectorRun",
+    "CollectorRunItem",
     "CollectorRunResult",
+    "CollectorCheckDefinition",
+    "AssetEndpoint",
+    "AssetChangeProposal",
     "TopologyRelation",
     "Tag",
     "ResourceTag",

@@ -23,7 +23,7 @@
 | 数据库类型 | PostgreSQL 17.9 |
 | 当前连接环境 | 测试库 / 开发库（已连接扫描，结构已与 DDL 文件校准） |
 | 权限边界 | 由数据库账号控制 |
-| 结构来源 | `backend/db/dbops_phase1_25_tables.sql` + ORM 模型 + Service 查询 + 实时元数据扫描 |
+| 结构来源 | `backend/db/dbops_phase1_25_tables.sql` + `backend/db/dbops_awx_collector_phase2_refactor.sql` + ORM 模型 + Service 查询 + 实时元数据扫描 |
 | 文档维护方式 | AI 自动维护 |
 
 ## 3. DB 连接安全边界
@@ -40,7 +40,7 @@
 
 | Schema | 用途 | 依据 | 备注 |
 |---|---|---|---|
-| dbops | DBOps 平台主 schema，当前 baseline 为 26 张业务表；2026-06-04 增量新增 collector_run / collector_run_result（执行后共 28 表） | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/db/dbops_awx_collector_phase1.sql` + `backend/app/database.py:18` | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
+| dbops | DBOps 平台主 schema，当前 baseline 为 26 张业务表；2026-06-04 增量新增 collector_run / collector_run_result（执行后共 28 表）；2026-06-06 phase2 refactor 已在开发库落库，当前共 32 张业务表 | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/db/dbops_awx_collector_phase1.sql` + `backend/db/dbops_awx_collector_phase2_refactor.sql` + `backend/app/database.py:18` | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
 | public | PostgreSQL 默认 schema | — | plpgsql 扩展所在 |
 
 ## 5. 核心表摘要
@@ -57,8 +57,8 @@
 | 资产 | cluster | 数据库集群 | cluster_code, cluster_type, ha_enabled | `backend/app/services/dbops_asset_service.py:295-325` |
 | 资产 | cluster_vip | 集群 VIP | vip_address, vip_type | `backend/app/services/dbops_asset_service.py:302-303` |
 | 资产 | db_instance | 数据库实例 | instance_name, node_role, cluster_id | `backend/app/services/dbops_asset_service.py:341-380` |
-| 自动化校验 | collector_run | AWX 校验任务主记录 | run_id, db_instance_id, status, awx_job_id | `backend/app/models/dbops_assets.py` |
-| 自动化校验 | collector_run_result | AWX 校验结果明细 | run_id, check_type, status, port_reachable | `backend/app/models/dbops_assets.py` |
+| 自动化校验 | collector_run | AWX 校验任务主记录 | run_id, target_scope, db_instance_id, server_id, status | `backend/app/models/dbops_assets.py` |
+| 自动化校验 | collector_run / collector_run_item / collector_run_result / asset_endpoint | AWX 校验任务、item 明细、结果明细、端点状态 | run_id, item_key, check_code, status, port_reachable | `backend/app/models/dbops_assets.py` + `backend/db/dbops_awx_collector_phase2_refactor.sql` |
 | 资产 | topology_relation | 实例拓扑关系 | relation_type, sync_mode | `backend/app/services/dbops_import_service.py:1030-1062` |
 | 资产 | asset_event_history | 资产事件历史 | asset_type, event_type, changed_fields | `backend/app/services/asset_event_history_service.py` |
 | 字典 | os_version | OS 版本字典+生命周期 | os_name, version_name, lifecycle_status | ORM 模型 |
@@ -88,7 +88,7 @@
 | db_instance | idx_instance_cluster / idx_instance_server / idx_instance_status | 实例核心查询 | phase1 L659-662 |
 | db_instance | idx_db_instance_trust_status / idx_db_instance_reachability_status / idx_db_instance_last_verify_at | 资产校验状态查询 | `backend/db/dbops_awx_collector_phase1.sql` |
 | collector_run | idx_collector_run_instance_time / idx_collector_run_status / idx_collector_run_awx_job | 按实例、状态、AWX job 查询校验任务 | `backend/db/dbops_awx_collector_phase1.sql` |
-| collector_run_result | idx_collector_run_result_instance_time | 按实例回看历史校验结果 | `backend/db/dbops_awx_collector_phase1.sql` |
+| collector_run_result | idx_collector_run_result_instance_time / idx_collector_run_result_server_time | 按实例/服务器回看历史校验结果 | `backend/db/dbops_awx_collector_phase2_refactor.sql` |
 | staging_excel_import | idx_staging_batch | 按批次查询导入记录 | phase1 L1054 |
 | biz_score_result | idx_score_result_system_time | 业务评分历史趋势 | phase1 L939 |
 | asset_event_history | idx_asset_event_history_asset | 资产事件时间线 | phase1 L302-303 |
