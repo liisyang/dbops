@@ -393,28 +393,12 @@ class BatchCollectorService:
     # === Dispatch Launch ===
 
     @staticmethod
-    def _extract_credential_ids(dispatch_items: list[dict[str, Any]]) -> list[int]:
-        """Extract unique awx_credential_id values from dispatch items.
-
-        Returns sorted list of unique credential IDs.
-        NEVER extracts passwords or keys — only AWX credential ID integers.
-        """
-        cred_ids: set[int] = set()
-        for item in dispatch_items:
-            cred_id = item.get("awx_credential_id")
-            if cred_id is not None:
-                cred_ids.add(int(cred_id))
-        return sorted(cred_ids)
-
-    @staticmethod
     def launch_dispatches(
         db: Session,
         batch_run_id: int,
     ) -> list[dict[str, Any]]:
         """Launch AWX jobs for all pending dispatches in a batch.
 
-        Phase 3.3A: Extracts awx_credential_id values from dispatch items
-        and passes them as credentials: [45, 66] to AWX launch.
         Individual dispatch failure does NOT block others.
         """
         dispatches = (
@@ -437,23 +421,9 @@ class BatchCollectorService:
                 .first()
             )
 
-            # Extract credential IDs from dispatch items
-            dispatch_items = (dispatch.request_payload or {}).get("items", [])
-            credential_ids = BatchCollectorService._extract_credential_ids(dispatch_items)
-
-            # Compute and store credential_group_hash and profile_ids
-            from app.services.dispatch_planner_service import DispatchPlannerService
-            cred_hash = DispatchPlannerService.compute_credential_group_hash(dispatch_items)
-            if cred_hash:
-                dispatch.credential_group_hash = cred_hash
-            if credential_ids:
-                dispatch.credential_profile_ids = credential_ids
-                dispatch.credential_strategy = "best_match"
-
             try:
                 launch_result = AwxService.launch_job(
                     extra_vars=collector_run.extra_vars if collector_run else {"items": []},
-                    credentials=credential_ids if credential_ids else None,
                 )
                 dispatch.status = "launched"
                 dispatch.awx_job_id = launch_result.get("awx_job_id")

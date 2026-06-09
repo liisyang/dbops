@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import json
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -110,19 +108,16 @@ class DispatchPlannerService:
         items: list[dict[str, Any]],
         target_scope: str,
     ) -> dict[str, list[dict[str, Any]]]:
-        """Group a list of item dicts by (network_zone, awx_instance_group, credential_group_hash).
+        """Group a list of item dicts by (network_zone, awx_instance_group).
 
         Each item dict must have an 'asset_id' or 'db_instance_id'/'server_id'
         key so we can resolve its dispatch target.
 
-        Phase 3.3A: The grouping key now includes credential_group_hash to ensure
-        items with different DB credential sets are dispatched to separate AWX jobs.
-        This prevents AWX from injecting conflicting env vars (e.g., DBOPS_DB_USERNAME)
-        from different credentials into the same job.
-
-        Returns dict keyed by group_label like "NET_A|IG_NET_A|abc123...".
+        Returns dict keyed by group_label like "NET_A|IG_NET_A".
         """
         # Build a lookup of asset_id → (network_zone, awx_instance_group)
+        # from the items themselves. For efficiency we resolve each unique
+        # asset once and cache.
         asset_cache: dict[tuple[str, int], tuple[str, str]] = {}
 
         def _resolve(scope: str, asset_id: int) -> tuple[str, str]:
@@ -135,12 +130,12 @@ class DispatchPlannerService:
                 )
             return asset_cache[cache_key]
 
-        # First pass: group by (nz, ig) only, then compute credential_hash per group
         grouped: dict[str, list[dict[str, Any]]] = {}
         for item in items:
             item_scope = item.get("target_scope") or target_scope
             asset_id = item.get("db_instance_id") or item.get("server_id") or item.get("asset_id")
             if asset_id is None:
+                # Can't resolve — put in skipped bucket
                 group_key = "__skipped__"
             else:
                 nz, ig = _resolve(item_scope, int(asset_id))
@@ -151,73 +146,4 @@ class DispatchPlannerService:
 
             grouped.setdefault(group_key, []).append(item)
 
-        # Second pass: split each network_zone/ig group by credential_group_hash
-        final_grouped: dict[str, list[dict[str, Any]]] = {}
-        for group_key, group_items in grouped.items():
-            if group_key == "__skipped__":
-                final_grouped[group_key] = group_items
-                continue
-
-            # Compute credential group hash for this group
-            cred_hash = cls.compute_credential_group_hash(group_items)
-            if cred_hash:
-                final_key = f"{group_key}|{cred_hash}"
-            else:
-                final_key = group_key
-
-            final_grouped.setdefault(final_key, []).extend(group_items)
-
-        return final_grouped
-
-    @staticmethod
-    def compute_credential_group_hash(items: list[dict[str, Any]]) -> str | None:
-        """Compute stable SHA256 hex digest from credential references in items.
-
-        Algorithm:
-        1. Collect unique {awx_credential_id, credential_type, binding_role, credential_profile_id}
-        2. Sort by awx_credential_id
-        3. Serialize to canonical JSON (sorted keys)
-        4. SHA256 → hex digest
-
-        Returns None if no items have credential references (e.g., port-check items).
-        This means port-check items do NOT get split by credentials — they stay in
-        the same dispatch as before (backward compatible).
-
-        Constraints enforced:
-        - Same dispatch cannot mix multiple DB credentials that inject same env var names
-        - Different credential types (oracle vs sqlserver) always produce different hashes
-        - Different binding_roles always produce different hashes
-        """
-        # Collect unique credential references
-        seen: set[tuple[int, str, str, int]] = set()
-        for item in items:
-            awx_cred_id = item.get("awx_credential_id")
-            cred_type = item.get("credential_type") or item.get("credential_code", "")
-            binding_role = item.get("credential_role") or item.get("binding_role", "")
-            profile_id = item.get("credential_profile_id")
-            if awx_cred_id is not None and profile_id is not None:
-                seen.add((int(awx_cred_id), str(cred_type), str(binding_role), int(profile_id)))
-
-        if not seen:
-            return None  # No credentials — use original grouping (backward compatible)
-
-        # Sort by awx_credential_id for deterministic output
-        sorted_refs = sorted(seen, key=lambda x: x[0])
-
-        # Serialize to canonical JSON
-        refs_json = json.dumps(
-            [
-                {
-                    "awx_credential_id": r[0],
-                    "credential_type": r[1],
-                    "binding_role": r[2],
-                    "credential_profile_id": r[3],
-                }
-                for r in sorted_refs
-            ],
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-
-        # SHA256 hex digest
-        return hashlib.sha256(refs_json.encode("utf-8")).hexdigest()
+        return grouped
