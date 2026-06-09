@@ -175,7 +175,9 @@ const handleLogin = async () => {
 
     router.push('/')
   } catch (error: any) {
-    errorMsg.value = error.message || '登录失败'
+    // 优先展示后端返回的具体错误原因，而不是 Axios 通用的 "Request failed with status code 401"
+    const serverDetail = error?.response?.data?.detail
+    errorMsg.value = serverDetail || error.message || '登录失败'
   } finally {
     loading.value = false
   }
