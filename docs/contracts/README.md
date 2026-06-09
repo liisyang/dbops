@@ -183,6 +183,25 @@
 
 callback 协议升级为 `items[]` 数组；旧 `/automation/asset-verify/{instance_id}/launch` 仍保留为兼容包装入口。
 
+### 2026-06-08：Phase 3.1 端口画像与半自动端口校准
+
+新增后端接口：
+
+1. `GET /api/v1/collector/port-profiles`
+2. `GET /api/v1/collector/assets/{target_scope}/{asset_id}/endpoints`
+3. `GET /api/v1/collector/proposals`
+4. `POST /api/v1/collector/proposals/{proposal_id}/approve`
+5. `POST /api/v1/collector/proposals/{proposal_id}/reject`
+6. `POST /api/v1/collector/proposals/{proposal_id}/apply`
+
+`POST /api/v1/collector/runs` 新增 `run_type=port_calibration`：
+
+- 后端按 `asset_endpoint / db_instance.port / server.extra_attrs / staging_excel_import / port_profile` 优先级自动展开候选端口 items。
+- 可选 `options.include_related_server=true` 会把关联服务器管理端口一起纳入候选，并按 `host+port+protocol` 去重。
+- callback `items[]` 透传并回写 `endpoint_type / protocol / port_source / is_required`。
+- 对于校准候选失败，响应会通过 `candidate_state` 区分 `candidate_unreachable`，不会直接等同于资产 missing。
+- 仅生成 proposal，不自动修改 `db_instance.port`；`apply` 且状态为 `approved` 时才更新正式资产字段。
+
 ## 5. 第三方对接
 
 已新增 AWX 对接接口（第一阶段）：

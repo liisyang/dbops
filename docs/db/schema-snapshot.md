@@ -133,6 +133,7 @@ ORDER BY event_object_table, trigger_name;
 | dbops | collector_run_item | BASE TABLE | AWX校验任务项明细 |
 | dbops | collector_run_result | BASE TABLE | AWX校验结果明细 |
 | dbops | collector_check_definition | BASE TABLE | 检查项定义表 |
+| dbops | port_profile | BASE TABLE | 端口画像配置表 |
 | dbops | asset_endpoint | BASE TABLE | 端点状态表 |
 | dbops | asset_change_proposal | BASE TABLE | 资产变更提案表 |
 | dbops | v_instance_full | VIEW | 实例全量展示视图，用于资产列表和查询 |
@@ -813,3 +814,5 @@ ORDER BY event_object_table, trigger_name;
   - 新增 `collector_run` / `collector_run_result`
   - 新增 collector 相关索引与触发器
 - 2026-06-06 已在开发库执行 AWX 资产校验第二阶段 DDL（`backend/db/dbops_awx_collector_phase2_refactor.sql`），新增 `collector_run_item` / `asset_endpoint` / `asset_change_proposal` / `collector_check_definition`；本快照已按当前数据库状态刷新。
+- 2026-06-08 已新增 Phase 3.1 DDL（`backend/db/dbops_port_profile_phase3_1.sql`），新增 `port_profile` 并增强 `collector_run_item` / `collector_run_result` / `asset_endpoint` / `asset_change_proposal` 字段用于端口校准与提案审批。
+- 2026-06-08 端口校准 refactor 仅调整候选去重、`include_related_server` 与候选失败语义，不修改 schema 结构。

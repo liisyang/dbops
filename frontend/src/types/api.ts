@@ -183,6 +183,7 @@ export interface CollectorRunResultRow {
   target_port: number
   error_message?: string | null
   result_message?: string | null
+  candidate_state?: string | null
   awx_job_id?: number | null
   checked_by?: string | null
   checked_at?: string | null
@@ -195,6 +196,7 @@ export interface CollectorRunRow {
   id: number
   run_id: string
   target_scope: string
+  run_type?: string
   instance_id?: number | null
   server_id?: number | null
   job_type: string
@@ -241,10 +243,14 @@ export interface CollectorRunItemRow {
   target_host: string
   target_port: number
   protocol: string
+  endpoint_type?: string | null
+  port_source?: string | null
+  is_required?: boolean
   timeout_seconds: number
   status: string
   result_status?: string | null
   result_message?: string | null
+  candidate_state?: string | null
   raw_result: Record<string, any>
   started_at?: string | null
   finished_at?: string | null
@@ -263,6 +269,11 @@ export interface CollectorEndpointRow {
   source: string
   expected: boolean
   status: string
+  reachable?: boolean | null
+  port_source?: string | null
+  is_required?: boolean
+  last_checked_at?: string | null
+  last_item_key?: string | null
   last_seen_at?: string | null
   last_verify_at?: string | null
   last_run_id?: string | null
@@ -273,12 +284,53 @@ export interface CollectorEndpointRow {
 }
 
 export interface CollectorRunCreatePayload {
+  run_type?: string
   scope: {
     target_scope: 'db_instance' | 'server'
     asset_ids: number[]
   }
+  target_scope?: 'db_instance' | 'server'
+  asset_ids?: number[]
   check_codes: string[]
   options?: Record<string, any>
+}
+
+export interface PortProfileRow {
+  id: number
+  profile_code: string
+  target_scope: 'server' | 'db_instance'
+  endpoint_type: string
+  db_type_code?: string | null
+  os_family?: string | null
+  protocol: string
+  default_port: number
+  is_required: boolean
+  is_candidate: boolean
+  is_enabled: boolean
+  priority: number
+  remark?: string | null
+}
+
+export interface AssetChangeProposalRow {
+  id: number
+  target_type: 'server' | 'db_instance' | string
+  target_id: number
+  proposal_type: string
+  field_path?: string | null
+  current_value?: any
+  suggested_value?: any
+  confidence?: string | null
+  evidence: Record<string, any>
+  source_run_id?: string | null
+  source_item_key?: string | null
+  status: 'pending' | 'approved' | 'rejected' | 'applied' | 'cancelled' | string
+  requested_by?: string | null
+  approved_by?: string | null
+  approved_at?: string | null
+  applied_at?: string | null
+  rejected_reason?: string | null
+  created_at?: string | null
+  updated_at?: string | null
 }
 
 export interface CollectorRunCreateResponse {
@@ -462,4 +514,112 @@ export interface DbInstanceUpsertPayload {
   service_name?: string | null
   status?: string | null
   remark?: string | null
+}
+
+// ============================================================================
+// Phase 3.2 — Batch Verify types
+// ============================================================================
+
+export interface BatchRunFilters {
+  db_type_code?: string
+  status?: string
+  site_id?: number
+  target_scope?: 'server' | 'db_instance'
+}
+
+export interface BatchRunCreatePayload {
+  run_type?: string
+  target_scope: 'db_instance' | 'server'
+  asset_ids?: number[]
+  filters?: BatchRunFilters
+  check_codes: string[]
+  include_related_server?: boolean
+  max_items_per_dispatch?: number
+  timeout_seconds?: number
+}
+
+export interface DispatchRunSummary {
+  dispatch_run_id: number
+  dispatch_code?: string | null
+  collector_run_id?: number | null
+  network_zone?: string | null
+  awx_instance_group?: string | null
+  awx_job_template?: string
+  awx_job_id?: number | null
+  status: string
+  item_count: number
+  success_item_count: number
+  failed_item_count: number
+  error_message?: string | null
+  launched_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+}
+
+export interface BatchRunCreateResponse {
+  batch_run_id: number
+  batch_code: string
+  status: string
+  run_type: string
+  target_scope: string
+  total_asset_count: number
+  total_item_count: number
+  dispatch_count: number
+  dispatches: DispatchRunSummary[]
+}
+
+export interface BatchRunRow {
+  id: number
+  batch_code: string
+  run_type: string
+  target_scope: string
+  status: string
+  total_asset_count: number
+  total_item_count: number
+  success_item_count: number
+  failed_item_count: number
+  pending_item_count: number
+  running_item_count: number
+  skipped_item_count: number
+  dispatch_count: number
+  request_payload?: Record<string, any>
+  error_message?: string | null
+  created_by?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  dispatches?: DispatchRunSummary[]
+}
+
+export interface DispatchRunRow {
+  id: number
+  dispatch_code?: string | null
+  batch_run_id: number
+  collector_run_id?: number | null
+  network_zone?: string | null
+  awx_instance_group?: string | null
+  awx_job_template?: string
+  awx_job_id?: number | null
+  status: string
+  item_count: number
+  success_item_count: number
+  failed_item_count: number
+  request_payload?: Record<string, any>
+  error_message?: string | null
+  launched_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface BatchRunItemRow extends CollectorRunItemRow {
+  batch_run_id?: number | null
+  dispatch_run_id?: number | null
+  network_zone?: string | null
+  awx_instance_group?: string | null
+}
+
+export interface RetryFailedPayload {
+  scope: 'failed' | 'dispatch_failed'
 }

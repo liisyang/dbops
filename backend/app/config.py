@@ -54,6 +54,9 @@ class Settings(BaseSettings):
     COLLECTOR_CALLBACK_TOKEN: str = ""
     AWX_REQUEST_TIMEOUT: int = 30
 
+    # AWX 批量调度
+    AWX_DEFAULT_INSTANCE_GROUP: str = "default"
+
     class Config:
         env_file = os.path.join(BASE_DIR, '.env')
         extra = "allow"

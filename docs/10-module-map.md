@@ -24,7 +24,7 @@
 | Dashboard | 已实现 | 仪表盘统计卡片和图表 | `frontend/src/views/Dashboard.vue` + stats API |
 | 资产管理 - 服务器 | 已实现 | CRUD + 列表 + 详情 | `backend/app/api/servers.py:202-294` + `frontend/src/views/Servers.vue` |
 | 资产管理 - 实例 | 已实现 | CRUD + 列表 + 详情 | `backend/app/api/servers.py:85-198` + `frontend/src/views/Instances.vue` |
-| 资产管理 - AWX 资产校验 | 已实现（第一阶段最小闭环，正演进为 run/item/endpoint 底座） | 实例详情可发起端口校验，旧 launch 兼容包装新 run 模型，callback 支持 items 数组，回写 `collector_run/collector_run_item/collector_run_result/asset_endpoint/db_instance` | `backend/app/api/collector.py` + `backend/app/services/collector_service.py` + `frontend/src/views/InstanceDetail.vue` |
+| 资产管理 - AWX 资产校验 | 已实现（Phase 3.1 端口画像 + 端点治理 + 半自动校准） | 实例详情可发起端口校验与端口校准；校准 run 会按 `port_profile + endpoint + 资产字段` 自动展开候选端口，并按 `host+port+protocol` 去重；`include_related_server=true` 时会把关联服务器管理端口一起纳入候选，提案需人工 approve+apply 才更新正式端口字段 | `backend/app/api/collector.py` + `backend/app/services/collector_service.py` + `backend/app/services/port_calibration_service.py` + `frontend/src/views/InstanceDetail.vue` |
 | 资产管理 - 集群 | 已实现 | CRUD + 列表 + 详情 + 实例关联 | `backend/app/api/servers.py:564-658` + `frontend/src/views/Clusters.vue` |
 | 资产管理 - 业务系统 | 已实现 | CRUD + 详情 + 生命周期管理 + 联系人关联 | `backend/app/api/servers.py:348-477` + `frontend/src/views/Assets.vue` |
 | 资产管理 - 联系人 | 已实现 | CRUD | `backend/app/api/servers.py:299-343` + `frontend/src/views/Contacts.vue` |
@@ -32,6 +32,7 @@
 | 资产管理 - 统计 | 已实现 | 多维度分组统计 | `backend/app/api/servers.py:489-561` + `frontend/src/views/Stats.vue` |
 | 自动化运维 - 主机清单 | 已实现 | Ansible 主机清单管理 | `backend/app/ansible/inventory.py` + `frontend/src/views/Inventory.vue` |
 | 自动化运维 - 作业执行 | 部分实现 | 账号操作 API 已就绪，Celery worker 有意暂缓启用 | `backend/app/api/account_ops.py` + `frontend/src/views/ops/Tasks.vue` |
+| 自动化运维 - 批量校验 | 已实现（Phase 3.2） | 批量资产校验 + 分网段 AWX 分发调度；支持 asset_ids/filters 选择、check_codes 多选、按 awx_instance_group 分组、dispatch_run 级分发、item 级结果、失败重跑 | `backend/app/api/collector.py` + `backend/app/services/batch_collector_service.py` + `backend/app/services/dispatch_planner_service.py` + `backend/app/services/check_item_builder_registry.py` + `frontend/src/views/ops/BatchVerify.vue` |
 | 备份与恢复 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/backup/*.vue` |
 | SQL 分析 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/sql/*.vue` |
 | 巡检与健康 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/inspection/*.vue` |
@@ -54,7 +55,7 @@
 | 业务系统 | Assets.vue + BusinessSystemDetail.vue | assets.ts → `/v1/servers/business-services` | `api/servers.py:348-477` | DbopsAssetService | BusinessSystem | business_system | 已实现 |
 | 联系人 | Contacts.vue | assets.ts → `/v1/servers/contacts` | `api/servers.py:299-343` | DbopsContactService | Contact (dbops) | contact | 已实现 |
 | 导入 | Import.vue | assets.ts → `/v1/servers/imports/*` | `api/servers.py:704-774` | DbopsImportService | StagingExcelImport | staging_excel_import | 已实现 |
-| AWX 资产校验 | InstanceDetail.vue | assets.ts → `/v1/collector/runs`（主入口）+ `/v1/automation/asset-verify/{id}/launch`（兼容包装） | `api/collector.py` | CollectorService + AwxService（callback URL 优先配置值，未配置时回退请求基址） | CollectorRun / CollectorRunItem / CollectorRunResult / AssetEndpoint / DbInstance / Server | collector_run / collector_run_item / collector_run_result / asset_endpoint / db_instance / asset_event_history | 已实现（第一阶段，实例详情页支持多 `check_code` 选择） |
+| AWX 资产校验 | InstanceDetail.vue | assets.ts → `/v1/collector/runs`（主入口）+ `/v1/automation/asset-verify/{id}/launch`（兼容包装）+ `/v1/collector/proposals*` | `api/collector.py` | CollectorService + PortProfileService + PortCalibrationService + AssetProposalService + AwxService（callback URL 优先配置值，未配置时回退请求基址） | CollectorRun / CollectorRunItem / CollectorRunResult / CollectorCheckDefinition / PortProfile / AssetEndpoint / AssetChangeProposal / DbInstance / Server | collector_run / collector_run_item / collector_run_result / collector_check_definition / port_profile / asset_endpoint / asset_change_proposal / db_instance / asset_event_history | 已实现（Phase 3.1：支持 run_type=port_calibration 与提案审批/应用） |
 | 统计 | Stats.vue | stats.ts → `/v1/servers/stats/*` | `api/servers.py:489-561` | DbopsStatsService | - | (聚合查询) | 已实现 |
 | 账号操作 | Tasks.vue | `/users/add\|check\|chpasswd` | `api/account_ops.py` | account_tasks (Celery) | TaskState (Redis) | (Redis) | 部分实现 |
 | 主机清单 | Inventory.vue | 需现场确认 | 需现场确认 | Ansible inventory | - | (Ansible) | 部分实现 |
@@ -131,21 +132,24 @@ Page (Import.vue)
   → ImportBatch (批次追踪)
 ```
 
-### 4.5 AWX 资产校验闭环链路（第一阶段 + item 底座）
+### 4.5 AWX 资产校验闭环链路（Phase 3.1）
 
 ```text
 Page (InstanceDetail.vue)
-  → POST /api/v1/automation/asset-verify/{instance_id}/launch
+  → POST /api/v1/collector/runs (run_type=asset_verify | port_calibration)
   → collector.router
-  → CollectorService.launch_asset_verify()
+  → CollectorService.launch_collector_run()
+  → PortCalibrationService.build_port_calibration_items()  # run_type=port_calibration，候选按 host+port+protocol 去重
   → CollectorRun(pending) + CollectorRunItem[] + extra_vars.items
   → AwxService.launch_job()
   → CollectorRun(launched)
   → AWX Job 执行后回调 POST /api/v1/collector/callback/
   → CollectorService.handle_callback()
-  → CollectorRunItem / CollectorRunResult(upsert)
-  → AssetEndpoint upsert
-  → DbInstance trust/reachability/last_verify_* 更新（仅 db_instance item）
+  → CollectorRunItem / CollectorRunResult(upsert, 含 endpoint metadata)
+  → AssetEndpoint upsert（reachable/status/port_source/is_required）
+  → PortCalibrationService.create_port_change_proposals()
+  → AssetProposalService approve/reject/apply
+  → apply 后才更新 DbInstance.port，并写入 AssetEventHistory
   → AssetEventHistory 记录事件
 ```
 

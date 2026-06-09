@@ -53,6 +53,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/ops/Tasks.vue'),
         meta: { title: '作业执行', parent: '自动化运维' }
       },
+      {
+        path: 'ops/batch-verify',
+        name: 'BatchVerify',
+        component: () => import('@/views/ops/BatchVerify.vue'),
+        meta: { title: '批量校验', parent: '自动化运维' }
+      },
       // 资产管理
       {
         path: 'assets/servers',

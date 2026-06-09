@@ -135,7 +135,9 @@ const menuItems = [
     icon: 'build',
     label: '自动化运维',
     children: [
+      { icon: 'dns', label: '主机清单', path: '/ops/inventory' },
       { icon: 'play_circle', label: '作业执行', path: '/ops/tasks' },
+      { icon: 'checklist', label: '批量校验', path: '/ops/batch-verify' },
     ]
   },
       {

@@ -890,6 +890,8 @@ ALTER TABLE dbops.db_instance
 COMMIT;
 ```
 
+- **2026-06-08 端口校准 refactor 说明**：候选合并、`include_related_server` 与 `candidate_state` 仅影响后端逻辑和前端展示，不引入新的 DDL。
+
 - **状态**：已在开发库执行并在后续元数据复扫中确认。
 
 ### 4.2 2026-06-06 — AWX 资产校验第二阶段通用 item 底座（代码内 DDL）
@@ -930,3 +932,47 @@ COMMIT;
 ```
 
 - **状态**：已在开发库执行，`docs/db/schema-snapshot.md` 已按当前元数据刷新。
+
+### 4.3 2026-06-08 — Phase 3.1 端口画像 + 端点治理 + 半自动端口校准
+
+- **变更类型**：增量 DDL（兼容已有结构，优先补字段）
+- **DDL 文件**：`backend/db/dbops_port_profile_phase3_1.sql`
+- **变更摘要**：
+  1. 新增 `dbops.port_profile`
+  2. 初始化 Linux/Windows/Oracle/SQLServer 默认与候选端口画像（幂等 upsert）
+  3. `collector_run_item` 增加 `endpoint_type`、`port_source`、`is_required`
+  4. `collector_run_result` 增加 `endpoint_type`、`protocol`、`port_source`、`is_required`
+  5. `asset_endpoint` 增加 `last_checked_at`、`last_item_key`、`reachable`、`port_source`、`is_required`
+  6. `asset_change_proposal` 兼容增强：增加 `proposal_type`、`field_path`、`current_value`、`suggested_value`、`confidence`、`source_run_id`、`source_item_key`
+
+- **回滚建议（需人工确认后执行）**：
+
+```sql
+BEGIN;
+SET search_path TO dbops, public;
+ALTER TABLE IF EXISTS dbops.asset_change_proposal
+    DROP COLUMN IF EXISTS proposal_type,
+    DROP COLUMN IF EXISTS field_path,
+    DROP COLUMN IF EXISTS current_value,
+    DROP COLUMN IF EXISTS suggested_value,
+    DROP COLUMN IF EXISTS confidence,
+    DROP COLUMN IF EXISTS source_run_id,
+    DROP COLUMN IF EXISTS source_item_key;
+ALTER TABLE IF EXISTS dbops.asset_endpoint
+    DROP COLUMN IF EXISTS last_checked_at,
+    DROP COLUMN IF EXISTS last_item_key,
+    DROP COLUMN IF EXISTS reachable,
+    DROP COLUMN IF EXISTS port_source,
+    DROP COLUMN IF EXISTS is_required;
+ALTER TABLE IF EXISTS dbops.collector_run_result
+    DROP COLUMN IF EXISTS endpoint_type,
+    DROP COLUMN IF EXISTS protocol,
+    DROP COLUMN IF EXISTS port_source,
+    DROP COLUMN IF EXISTS is_required;
+ALTER TABLE IF EXISTS dbops.collector_run_item
+    DROP COLUMN IF EXISTS endpoint_type,
+    DROP COLUMN IF EXISTS port_source,
+    DROP COLUMN IF EXISTS is_required;
+DROP TABLE IF EXISTS dbops.port_profile;
+COMMIT;
+```

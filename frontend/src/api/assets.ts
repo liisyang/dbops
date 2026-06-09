@@ -19,6 +19,14 @@ import type {
   CollectorRunCreateResponse,
   CollectorRunItemRow,
   CollectorEndpointRow,
+  PortProfileRow,
+  AssetChangeProposalRow,
+  BatchRunRow,
+  BatchRunCreatePayload,
+  BatchRunCreateResponse,
+  BatchRunItemRow,
+  DispatchRunRow,
+  RetryFailedPayload,
   InstanceDetail,
   InstanceListResponse,
   ServerDetail,
@@ -80,6 +88,32 @@ export const assetsApi = {
       params,
       suppressErrorToast: options?.suppressErrorToast,
     }),
+  listAssetCollectorEndpoints: (
+    targetScope: 'server' | 'db_instance',
+    assetId: number | string,
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<CollectorEndpointRow[]> =>
+    request.get(`/v1/collector/assets/${targetScope}/${assetId}/endpoints`, {
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  listPortProfiles: (
+    params?: { target_scope?: string; db_type_code?: string; os_family?: string; is_enabled?: boolean }
+  ): Promise<PortProfileRow[]> =>
+    request.get('/v1/collector/port-profiles', { params }),
+  listCollectorProposals: (
+    params?: { target_type?: string; target_id?: number; proposal_type?: string; status?: string },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<AssetChangeProposalRow[]> =>
+    request.get('/v1/collector/proposals', {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  approveCollectorProposal: (proposalId: number | string): Promise<AssetChangeProposalRow> =>
+    request.post(`/v1/collector/proposals/${proposalId}/approve`, {}),
+  rejectCollectorProposal: (proposalId: number | string, data?: { reason?: string }): Promise<AssetChangeProposalRow> =>
+    request.post(`/v1/collector/proposals/${proposalId}/reject`, data || {}),
+  applyCollectorProposal: (proposalId: number | string): Promise<AssetChangeProposalRow> =>
+    request.post(`/v1/collector/proposals/${proposalId}/apply`, {}),
 
   listClusters: (): Promise<ClusterRow[]> =>
     request.get('/v1/servers/clusters'),
@@ -145,4 +179,28 @@ export const assetsApi = {
     request.post('/v1/servers/imports/execute', data),
   getImportBatches: (): Promise<ImportBatchRow[]> =>
     request.get('/v1/servers/imports/batches'),
+
+  // Phase 3.2 — Batch verify
+  createBatchRun: (data: BatchRunCreatePayload): Promise<BatchRunCreateResponse> =>
+    request.post('/v1/collector/batch-runs', data),
+  listBatchRuns: (params?: Record<string, any>): Promise<BatchRunRow[]> =>
+    request.get('/v1/collector/batch-runs', { params }),
+  getBatchRun: (id: number | string): Promise<BatchRunRow> =>
+    request.get(`/v1/collector/batch-runs/${id}`),
+  listBatchDispatches: (id: number | string): Promise<DispatchRunRow[]> =>
+    request.get(`/v1/collector/batch-runs/${id}/dispatches`),
+  listBatchItems: (
+    id: number | string,
+    params?: Record<string, any>,
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<BatchRunItemRow[]> =>
+    request.get(`/v1/collector/batch-runs/${id}/items`, {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  retryFailedBatchItems: (
+    id: number | string,
+    data?: RetryFailedPayload
+  ): Promise<any> =>
+    request.post(`/v1/collector/batch-runs/${id}/retry-failed`, data || { scope: 'failed' }),
 }

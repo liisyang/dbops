@@ -354,6 +354,10 @@ class CollectorRun(DbopsAssetBase):
     error_message = Column(Text)
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
+    batch_run_id = Column(BigInteger, ForeignKey("collector_batch_run.id"))
+    dispatch_run_id = Column(BigInteger, ForeignKey("collector_dispatch_run.id"))
+    network_zone = Column(String(100))
+    awx_instance_group = Column(String(100))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
 
@@ -361,6 +365,8 @@ class CollectorRun(DbopsAssetBase):
     server = relationship("Server")
     items = relationship("CollectorRunItem", back_populates="collector_run", cascade="all, delete-orphan")
     results = relationship("CollectorRunResult", back_populates="collector_run")
+    dispatch_run = relationship("CollectorDispatchRun", foreign_keys=[dispatch_run_id])
+    batch_run = relationship("CollectorBatchRun", foreign_keys=[batch_run_id])
 
     __table_args__ = (
         CheckConstraint(
@@ -401,6 +407,9 @@ class CollectorRunItem(DbopsAssetBase):
     target_host = Column(String(255), nullable=False)
     target_port = Column(Integer, nullable=False)
     protocol = Column(String(20), nullable=False, server_default=text("'tcp'"))
+    endpoint_type = Column(String(100))
+    port_source = Column(String(50))
+    is_required = Column(Boolean, nullable=False, server_default=text("false"))
     timeout_seconds = Column(Integer, nullable=False, server_default=text("5"))
     status = Column(String(32), nullable=False, server_default=text("'pending'"))
     result_status = Column(String(32))
@@ -458,6 +467,10 @@ class CollectorRunResult(DbopsAssetBase):
     port_reachable = Column(Boolean)
     target_host = Column(String(255), nullable=False)
     target_port = Column(Integer, nullable=False)
+    endpoint_type = Column(String(100))
+    protocol = Column(String(20))
+    port_source = Column(String(50))
+    is_required = Column(Boolean)
     error_message = Column(Text)
     result_message = Column(Text)
     awx_job_id = Column(BigInteger)
@@ -522,6 +535,46 @@ class CollectorCheckDefinition(DbopsAssetBase):
     )
 
 
+class PortProfile(DbopsAssetBase):
+    __tablename__ = "port_profile"
+
+    id = Column(BigInteger, primary_key=True)
+    profile_code = Column(String(100), nullable=False, unique=True)
+    target_scope = Column(String(50), nullable=False)
+    endpoint_type = Column(String(100), nullable=False)
+    db_type_code = Column(String(50))
+    os_family = Column(String(50))
+    protocol = Column(String(10), nullable=False, server_default=text("'tcp'"))
+    default_port = Column(Integer, nullable=False)
+    is_required = Column(Boolean, nullable=False, server_default=text("true"))
+    is_candidate = Column(Boolean, nullable=False, server_default=text("true"))
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    priority = Column(Integer, nullable=False, server_default=text("100"))
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_port_profile_target_scope",
+        ),
+        CheckConstraint(
+            "protocol IN ('tcp', 'udp')",
+            name="chk_port_profile_protocol",
+        ),
+        CheckConstraint(
+            "default_port BETWEEN 1 AND 65535",
+            name="chk_port_profile_default_port",
+        ),
+        Index("idx_port_profile_scope", "target_scope"),
+        Index("idx_port_profile_db_type", "db_type_code"),
+        Index("idx_port_profile_os_family", "os_family"),
+        Index("idx_port_profile_enabled", "is_enabled"),
+        Index("idx_port_profile_endpoint_type", "endpoint_type"),
+    )
+
+
 class AssetEndpoint(DbopsAssetBase):
     __tablename__ = "asset_endpoint"
 
@@ -537,8 +590,13 @@ class AssetEndpoint(DbopsAssetBase):
     status = Column(String(32), nullable=False, server_default=text("'unknown'"))
     last_seen_at = Column(DateTime)
     last_verify_at = Column(DateTime)
+    last_checked_at = Column(DateTime)
     last_run_id = Column(String(64))
+    last_item_key = Column(String(255))
     last_message = Column(Text)
+    reachable = Column(Boolean)
+    port_source = Column(String(50))
+    is_required = Column(Boolean, nullable=False, server_default=text("false"))
     evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -580,15 +638,23 @@ class AssetChangeProposal(DbopsAssetBase):
     entity_type = Column(String(32), nullable=False)
     entity_id = Column(BigInteger, nullable=False)
     change_type = Column(String(64), nullable=False)
+    proposal_type = Column(String(64))
+    field_path = Column(String(255))
     old_value = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     new_value = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    current_value = Column(JSONB)
+    suggested_value = Column(JSONB)
+    confidence = Column(String(20))
     evidence_run_id = Column(String(64))
+    source_run_id = Column(String(64))
+    source_item_key = Column(String(255))
     evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     status = Column(String(32), nullable=False, server_default=text("'pending'"))
     requested_by = Column(String(100))
     approved_by = Column(String(100))
     approved_at = Column(DateTime)
     applied_at = Column(DateTime)
+    rejected_by = Column(String(100))
     rejected_reason = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow)
@@ -783,6 +849,86 @@ class StagingExcelImport(DbopsAssetBase):
     imported_at = Column(DateTime, default=datetime.utcnow)
 
 
+class CollectorBatchRun(DbopsAssetBase):
+    __tablename__ = "collector_batch_run"
+
+    id = Column(BigInteger, primary_key=True)
+    batch_code = Column(String(100), nullable=False, unique=True)
+    run_type = Column(String(50), nullable=False)
+    target_scope = Column(String(50), nullable=False)
+    status = Column(String(30), nullable=False, server_default=text("'pending'"))
+    total_asset_count = Column(Integer, nullable=False, server_default=text("0"))
+    total_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    success_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    failed_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    pending_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    running_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    skipped_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    dispatch_count = Column(Integer, nullable=False, server_default=text("0"))
+    request_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error_message = Column(Text)
+    created_by = Column(String(100))
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    dispatches = relationship("CollectorDispatchRun", back_populates="batch_run", cascade="all, delete-orphan")
+    collector_runs = relationship("CollectorRun", foreign_keys="CollectorRun.batch_run_id", overlaps="batch_run")
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_collector_batch_run_scope",
+        ),
+        CheckConstraint(
+            "status IN ('pending','dispatching','running','success','partial_success','failed','cancelled')",
+            name="chk_collector_batch_run_status",
+        ),
+        Index("idx_collector_batch_run_status", "status"),
+        Index("idx_collector_batch_run_type", "run_type"),
+        Index("idx_collector_batch_run_created_at", created_at.desc()),
+    )
+
+
+class CollectorDispatchRun(DbopsAssetBase):
+    __tablename__ = "collector_dispatch_run"
+
+    id = Column(BigInteger, primary_key=True)
+    dispatch_code = Column(String(100))
+    batch_run_id = Column(BigInteger, ForeignKey("collector_batch_run.id", ondelete="CASCADE"), nullable=False)
+    collector_run_id = Column(BigInteger, ForeignKey("collector_run.id"))
+    network_zone = Column(String(100))
+    awx_instance_group = Column(String(100))
+    awx_job_template = Column(String(200), nullable=False, server_default=text("'JT_DBOPS_COLLECTOR_GENERIC'"))
+    awx_job_template_id = Column(Integer)
+    awx_job_id = Column(BigInteger)
+    status = Column(String(30), nullable=False, server_default=text("'pending'"))
+    item_count = Column(Integer, nullable=False, server_default=text("0"))
+    success_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    failed_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    request_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    error_message = Column(Text)
+    launched_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    batch_run = relationship("CollectorBatchRun", back_populates="dispatches")
+    collector_run = relationship("CollectorRun", foreign_keys=[collector_run_id])
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending','launching','launched','running','success','partial_success','failed','cancelled')",
+            name="chk_collector_dispatch_run_status",
+        ),
+        Index("idx_collector_dispatch_batch", "batch_run_id"),
+        Index("idx_collector_dispatch_status", "status"),
+        Index("idx_collector_dispatch_awx_job", "awx_job_id"),
+        Index("idx_collector_dispatch_group", "network_zone", "awx_instance_group"),
+    )
+
+
 __all__ = [
     "DbopsAssetBase",
     "SystemGroup",
@@ -798,10 +944,13 @@ __all__ = [
     "Cluster",
     "ClusterVip",
     "DbInstance",
+    "CollectorBatchRun",
+    "CollectorDispatchRun",
     "CollectorRun",
     "CollectorRunItem",
     "CollectorRunResult",
     "CollectorCheckDefinition",
+    "PortProfile",
     "AssetEndpoint",
     "AssetChangeProposal",
     "TopologyRelation",
