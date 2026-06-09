@@ -929,6 +929,183 @@ class CollectorDispatchRun(DbopsAssetBase):
     )
 
 
+# ============================================================================
+# Phase 3.3A — Credential Management + Fact Collection + Drift Detection
+# ============================================================================
+
+
+class CredentialProfile(DbopsAssetBase):
+    """AWX credential reference — stores ONLY awx_credential_id, never passwords."""
+
+    __tablename__ = "credential_profile"
+
+    id = Column(BigInteger, primary_key=True)
+    profile_code = Column(String(100), nullable=False, unique=True)
+    profile_name = Column(String(200), nullable=False)
+    credential_type = Column(String(50), nullable=False)
+    awx_credential_id = Column(Integer, nullable=False)
+    awx_credential_name = Column(String(200))
+    db_type_code = Column(String(50))
+    os_family = Column(String(50))
+    default_database = Column(String(100))
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    remark = Column(Text)
+    extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    bindings = relationship("CredentialBinding", back_populates="profile", cascade="all, delete-orphan")
+    fact_snapshots = relationship("AssetFactSnapshot", back_populates="credential_profile")
+
+    __table_args__ = (
+        CheckConstraint(
+            "credential_type IN ('ssh_key', 'ssh_password', 'db_password', 'winrm_password', 'api_token')",
+            name="ck_credential_profile_type",
+        ),
+        Index("idx_credential_profile_awx", "awx_credential_id"),
+        Index("idx_credential_profile_db_type", "db_type_code"),
+        Index("idx_credential_profile_enabled", "is_enabled"),
+    )
+
+
+class CredentialBinding(DbopsAssetBase):
+    """Binds credential profiles to targets with priority-based resolution."""
+
+    __tablename__ = "credential_binding"
+
+    id = Column(BigInteger, primary_key=True)
+    profile_id = Column(BigInteger, ForeignKey("credential_profile.id", ondelete="CASCADE"), nullable=False)
+    binding_role = Column(String(50), nullable=False)
+    binding_target_type = Column(String(50), nullable=False)
+    binding_target_id = Column(BigInteger)
+    network_zone = Column(String(100))
+    priority = Column(Integer, nullable=False, server_default=text("100"))
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    profile = relationship("CredentialProfile", back_populates="bindings")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "profile_id", "binding_role", "binding_target_type",
+            "binding_target_id", "network_zone",
+            name="uq_credential_binding",
+        ),
+        Index("idx_credential_binding_target", "binding_target_type", "binding_target_id"),
+        Index("idx_credential_binding_role", "binding_role"),
+        Index("idx_credential_binding_profile", "profile_id"),
+        Index("idx_credential_binding_nz", "network_zone"),
+    )
+
+
+class AssetFactSnapshot(DbopsAssetBase):
+    """One row per fact collection event."""
+
+    __tablename__ = "asset_fact_snapshot"
+
+    id = Column(BigInteger, primary_key=True)
+    snapshot_id = Column(String(64), nullable=False, unique=True)
+    run_id = Column(String(64), nullable=False)
+    collector_run_id = Column(BigInteger, ForeignKey("collector_run.id"), nullable=False)
+    item_key = Column(String(255), nullable=False)
+    check_code = Column(String(100), nullable=False)
+    target_type = Column(String(50), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    target_host = Column(String(255), nullable=False)
+    target_port = Column(Integer)
+    db_type_code = Column(String(50))
+    credential_profile_id = Column(BigInteger, ForeignKey("credential_profile.id"))
+    snapshot_status = Column(String(32), nullable=False, server_default=text("'ok'"))
+    error_code = Column(String(100))
+    raw_result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    collected_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    credential_profile = relationship("CredentialProfile", back_populates="fact_snapshots")
+    collector_run = relationship("CollectorRun")
+    values = relationship("AssetFactValue", back_populates="snapshot", cascade="all, delete-orphan")
+    drifts = relationship("AssetDriftRecord", back_populates="snapshot")
+
+    __table_args__ = (
+        UniqueConstraint("collector_run_id", "item_key", name="uq_asset_fact_snapshot_item"),
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance')",
+            name="ck_asset_fact_snapshot_target_type",
+        ),
+        CheckConstraint(
+            "snapshot_status IN ('ok', 'partial', 'error', 'skipped')",
+            name="ck_asset_fact_snapshot_status",
+        ),
+        Index("idx_fact_snapshot_target", "target_type", "target_id", created_at.desc()),
+        Index("idx_fact_snapshot_run", "run_id"),
+        Index("idx_fact_snapshot_check_code", "check_code"),
+    )
+
+
+class AssetFactValue(DbopsAssetBase):
+    """Individual fact key-value, FK to snapshot."""
+
+    __tablename__ = "asset_fact_value"
+
+    id = Column(BigInteger, primary_key=True)
+    snapshot_id = Column(BigInteger, ForeignKey("asset_fact_snapshot.id", ondelete="CASCADE"), nullable=False)
+    fact_key = Column(String(200), nullable=False)
+    fact_value = Column(JSONB)
+    fact_category = Column(String(100))
+    source_query = Column(Text)
+    is_null = Column(Boolean, nullable=False, server_default=text("false"))
+    collected_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    snapshot = relationship("AssetFactSnapshot", back_populates="values")
+
+    __table_args__ = (
+        Index("idx_fact_value_snapshot", "snapshot_id"),
+        Index("idx_fact_value_key", "fact_key"),
+        Index("idx_fact_value_category", "fact_category"),
+    )
+
+
+class AssetDriftRecord(DbopsAssetBase):
+    """Independent drift audit trail — never auto-updates formal asset fields."""
+
+    __tablename__ = "asset_drift_record"
+
+    id = Column(BigInteger, primary_key=True)
+    snapshot_id = Column(BigInteger, ForeignKey("asset_fact_snapshot.id"), nullable=False)
+    proposal_id = Column(BigInteger, ForeignKey("asset_change_proposal.id"))
+    target_type = Column(String(50), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    field_path = Column(String(255))
+    expected_value = Column(JSONB)
+    actual_value = Column(JSONB)
+    drift_type = Column(String(50), nullable=False)
+    severity = Column(String(20), nullable=False, server_default=text("'info'"))
+    resolved = Column(Boolean, nullable=False, server_default=text("false"))
+    resolved_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    snapshot = relationship("AssetFactSnapshot", back_populates="drifts")
+    proposal = relationship("AssetChangeProposal")
+
+    __table_args__ = (
+        CheckConstraint(
+            "drift_type IN ('value_mismatch', 'missing', 'extra', 'type_change')",
+            name="ck_asset_drift_record_type",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="ck_asset_drift_record_severity",
+        ),
+        Index("idx_drift_record_target", "target_type", "target_id", "resolved"),
+        Index("idx_drift_record_snapshot", "snapshot_id"),
+        Index("idx_drift_record_proposal", "proposal_id"),
+        Index("idx_drift_record_unresolved", "severity", created_at.desc()),
+    )
+
+
 __all__ = [
     "DbopsAssetBase",
     "SystemGroup",
@@ -965,4 +1142,9 @@ __all__ = [
     "BizScoreResult",
     "BizScoreResultDetail",
     "StagingExcelImport",
+    "CredentialProfile",
+    "CredentialBinding",
+    "AssetFactSnapshot",
+    "AssetFactValue",
+    "AssetDriftRecord",
 ]

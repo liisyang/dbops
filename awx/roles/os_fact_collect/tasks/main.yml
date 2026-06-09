@@ -1,0 +1,79 @@
+---
+# os_fact_collect role — Phase 3.3A
+# ==================================
+# Validates item fields, calls the collector client for OS fact collection,
+# and appends the result to the global `collector_results` list.
+#
+# Expected item fields:
+#   item_key, check_code, target_scope, target_host, target_port,
+#   os_family, timeout_seconds
+#
+# AWX-injected env vars (from credentials):
+#   DBOPS_OS_USERNAME, DBOPS_OS_PASSWORD, DBOPS_OS_PRIVATE_KEY
+
+- name: Validate required OS item fields
+  assert:
+    that:
+      - item.item_key is defined
+      - item.check_code is defined
+      - item.target_host is defined
+    fail_msg: "OS fact collect item missing required fields: {{ item | to_json }}"
+  ignore_errors: yes
+
+- name: Skip if item missing critical fields
+  set_fact:
+    skip_result:
+      item_key: "{{ item.item_key | default('unknown') }}"
+      status: "failed"
+      error_code: "INVALID_ITEM"
+      error_message: "Missing required fields for OS fact collection"
+      facts: []
+      warnings: []
+      metadata: {}
+  when: >
+    item.item_key is not defined or
+    item.check_code is not defined or
+    item.target_host is not defined
+
+- name: Serialize item to JSON
+  set_fact:
+    item_json: "{{ item | to_json }}"
+  when: skip_result is not defined
+
+- name: Execute collector client for OS fact collection
+  command: "/opt/dbops-collector/venv/bin/python -m collector_client.cli --item-json '{{ item_json }}'"
+  register: collector_output
+  when: skip_result is not defined
+  ignore_errors: yes
+
+- name: Parse collector output
+  set_fact:
+    parsed_result: "{{ collector_output.stdout | from_json }}"
+  when:
+    - skip_result is not defined
+    - collector_output is defined
+    - collector_output.stdout is defined
+    - collector_output.stdout | length > 0
+
+- name: Use skip result if item was invalid
+  set_fact:
+    parsed_result: "{{ skip_result }}"
+  when: skip_result is defined
+
+- name: Use error result if collector failed
+  set_fact:
+    parsed_result:
+      item_key: "{{ item.item_key | default('unknown') }}"
+      status: "failed"
+      error_code: "COLLECTOR_EXECUTION_ERROR"
+      error_message: "{{ collector_output.stderr | default('Unknown error') }}"
+      facts: []
+      warnings: []
+      metadata: {}
+  when:
+    - parsed_result is not defined
+    - skip_result is not defined
+
+- name: Append result to collector_results
+  set_fact:
+    collector_results: "{{ collector_results | default([]) + [parsed_result] }}"

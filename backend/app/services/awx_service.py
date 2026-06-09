@@ -88,16 +88,38 @@ class AwxService:
         return AwxService._resolve_job_template(configured_id, configured_name)
 
     @staticmethod
-    def launch_job(extra_vars: dict[str, Any], template_id: int | None = None, template_name: str | None = None) -> dict[str, Any]:
+    def launch_job(
+        extra_vars: dict[str, Any],
+        template_id: int | None = None,
+        template_name: str | None = None,
+        credentials: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Launch an AWX job template.
+
+        Args:
+            extra_vars: Extra variables to pass to the job.
+            template_id: AWX job template ID (resolved if not provided).
+            template_name: AWX job template name (resolved if not provided).
+            credentials: Optional list of AWX credential IDs to attach to the job.
+                         These are AWX credential IDs only — NEVER passwords.
+                         AWX injects the actual credentials as env vars at runtime.
+
+        Phase 3.3A: credentials parameter enables passing DB/OS credentials
+        to the AWX job without exposing usernames/passwords in DBOPS.
+        """
         if template_id is None or template_name is None:
             resolved_template_id, resolved_template_name = AwxService.resolve_collector_job_template()
             template_id = resolved_template_id if template_id is None else template_id
             template_name = resolved_template_name if template_name is None else template_name
 
+        body: dict[str, Any] = {"extra_vars": extra_vars}
+        if credentials:
+            body["credentials"] = credentials  # AWX API: array of credential IDs
+
         launch_result = AwxService._request_json(
             "POST",
             f"/api/v2/job_templates/{template_id}/launch/",
-            {"extra_vars": extra_vars},
+            body,
         )
         awx_job_id = launch_result.get("job")
         awx_job_url = None

@@ -116,6 +116,31 @@ class CollectorService:
                 "task_type": "PORT_CHECK",
                 "default_timeout_seconds": 3,
             },
+            # Phase 3.3A — Fact collection check codes
+            "OS_BASIC_FACT_COLLECTION": {
+                "check_name": "OS基础信息采集",
+                "target_scope": "server",
+                "task_type": "OS_FACT_COLLECT",
+                "default_timeout_seconds": 30,
+            },
+            "DB_BASIC_FACT_COLLECTION": {
+                "check_name": "DB基础信息采集",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 30,
+            },
+            "DB_VERSION_FACT_COLLECTION": {
+                "check_name": "DB版本信息采集",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 30,
+            },
+            "DB_ROLE_FACT_COLLECTION": {
+                "check_name": "DB角色信息采集",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 30,
+            },
         }
         return defaults.get(
             check_code,
@@ -1094,6 +1119,118 @@ class CollectorService:
                 callback_items=calibration_results,
             )
 
+        # Phase 3.3A: Fact collection callback processing
+        FACT_CHECK_CODES = {
+            "OS_BASIC_FACT_COLLECTION",
+            "DB_BASIC_FACT_COLLECTION",
+            "DB_VERSION_FACT_COLLECTION",
+            "DB_ROLE_FACT_COLLECTION",
+        }
+        fact_callback_items = [
+            ci for ci in callback_items
+            if ci.check_code in FACT_CHECK_CODES
+        ]
+        if fact_callback_items:
+            from app.services.fact_snapshot_service import FactSnapshotService
+            from app.services.drift_detection_service import DriftDetectionService
+
+            for ci in fact_callback_items:
+                run_item = (
+                    db.query(CollectorRunItem)
+                    .filter(
+                        CollectorRunItem.run_id == payload.run_id,
+                        CollectorRunItem.item_key == ci.item_key,
+                    )
+                    .with_for_update()
+                    .first()
+                )
+                if run_item is None:
+                    continue
+
+                raw_result = dict(ci.raw_result or {})
+                error_code = raw_result.get("error_code")
+
+                if error_code == "CREDENTIAL_MISSING":
+                    # Do NOT fail the AWX job — mark item as skipped
+                    run_item.status = "skipped"
+                    run_item.result_status = "missing"
+                    run_item.result_message = "CREDENTIAL_MISSING"
+                    run_item.raw_result = raw_result
+                    run_item.finished_at = now
+                    if run_item.started_at is None:
+                        run_item.started_at = now
+                    continue
+
+                # Check if run_item already has a result
+                result = (
+                    db.query(CollectorRunResult)
+                    .filter(
+                        CollectorRunResult.collector_run_id == run.id,
+                        CollectorRunResult.item_key == ci.item_key,
+                    )
+                    .first()
+                )
+                if result is None:
+                    result = CollectorRunResult(
+                        collector_run_id=run.id,
+                        run_id=run.run_id,
+                        collector_run_item_id=run_item.id,
+                        item_key=ci.item_key,
+                        check_code=run_item.check_code,
+                        target_scope=run_item.target_scope,
+                        db_instance_id=run_item.db_instance_id,
+                        server_id=run_item.server_id,
+                        check_type=run_item.check_code,
+                        target_host=ci.target_host,
+                        target_port=ci.target_port,
+                    )
+                    db.add(result)
+
+                status = raw_result.get("status", "failed")
+                if status == "success":
+                    run_item.status = "success"
+                    run_item.result_status = "collected"
+                    result.status = "collected"
+                elif status == "partial":
+                    run_item.status = "success"
+                    run_item.result_status = "collected"
+                    result.status = "collected"
+                elif status == "skipped":
+                    run_item.status = "skipped"
+                    run_item.result_status = "missing"
+                    result.status = "missing"
+                else:
+                    run_item.status = "failed"
+                    run_item.result_status = "failed"
+                    result.status = "failed"
+
+                run_item.result_message = raw_result.get("error_message")
+                run_item.raw_result = raw_result
+                run_item.finished_at = now
+                if run_item.started_at is None:
+                    run_item.started_at = now
+
+                result.target_host = ci.target_host
+                result.target_port = ci.target_port
+                result.result_message = raw_result.get("error_message")
+                result.awx_job_id = payload.awx_job_id
+                result.checked_by = payload.checked_by or "awx"
+                result.checked_at = payload.checked_at or now
+                result.raw_result = raw_result
+                result.updated_at = now
+
+                # Create fact snapshot from raw_result (only if not skipped/CREDENTIAL_MISSING)
+                if status in ("success", "partial") and raw_result.get("facts"):
+                    try:
+                        snapshot = FactSnapshotService.create_from_collector_result(
+                            db, run_item, result, raw_result
+                        )
+                        # Detect drifts from snapshot
+                        DriftDetectionService.detect_for_snapshot(db, snapshot)
+                    except Exception:
+                        # Snapshot/drift creation failure should not break callback
+                        pass
+
         run.status = CollectorService._summarize_run_status(
             db.query(CollectorRunItem).filter(CollectorRunItem.run_id == run.run_id).all()
         )
@@ -1121,8 +1258,14 @@ class CollectorService:
         if not items:
             return "failed"
         statuses = [item.status for item in items]
+        # All skipped is still partial_success — AWX job ran but no credentials
+        if all(status == "skipped" for status in statuses):
+            return "partial_success"
         if all(status == "success" for status in statuses):
             return "success"
+        # mixed success/skipped = partial_success
+        if all(status in {"success", "skipped"} for status in statuses):
+            return "partial_success"
         if any(status == "success" for status in statuses) and any(status in {"failed", "timeout"} for status in statuses):
             return "partial_success"
         if any(status == "success" for status in statuses):
