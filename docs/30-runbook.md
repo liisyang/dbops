@@ -1,7 +1,7 @@
 # 排障手册
 
 > 文档状态：已校准
-> 最近校准：2026-05-22
+> 最近校准：2026-06-11
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -35,7 +35,10 @@
 | 异步任务入队但不执行 | Celery worker 未启动 | `run.py:63` worker 启动代码被注释 | 当前阶段不需要，后续恢复时取消 `run.py:63-68` 注释 | `backend/run.py:63-68` |
 | 操作日志页面无数据 | `/api/logs/list` 返回 `[]` | `logs.py:15` 硬编码返回空数组，审计模块未实现 | 当前阶段无数据，需实现审计模块 | `backend/app/api/logs.py:11-15` |
 | WebSocket 连接无推送 | Redis pub/sub 订阅者未启动 | `main.py:26` Redis 订阅者启动代码被注释 | 当前阶段不需要，后续恢复时取消注释 | `backend/app/main.py:26` + `backend/app/api/websocket.py:78-110` |
-| 实例详情“校验资产”提交失败，提示回调地址未配置 | `COLLECTOR_CALLBACK_URL` 是否显式配置；当前请求的 `base_url` 是否可用 | 直接调用内部服务时未传请求基址，或反向代理/Host 头异常导致无法自动回退 | 优先配置 `COLLECTOR_CALLBACK_URL`；若走前端入口，检查代理后重试 | `backend/app/services/collector_service.py:40-50,68-86` |
+| AWX EE 容器内 collector `--item-json` 返回 `COLLECTOR_ERROR_IMPORTERROR: libodbc.so.2: cannot open shared object file` | Ansible `command` 任务不继承容器启动时的环境变量，`dlopen()` 找不到 ODBC 库 | `import pyodbc` 成功但 `pyodbc.connect()` 触发 unixODBC 动态加载驱动时失败 | `db_fact_collect/tasks/main.yml` 的 environment 块加入 `LD_LIBRARY_PATH: /usr/lib64:/opt/microsoft/msodbcsql18/lib64` | `ansible-playbooks/playbooks/roles/db_fact_collect/tasks/main.yml` |
+| AWX EE 容器内 collector 返回 `COLLECTOR_ERROR_OPERATIONALERROR: SSL Provider: certificate verify failed: self-signed certificate` | ODBC Driver 18 默认强制 SSL 加密并验证证书；内网 SQL Server 使用自签名证书 | Driver 17 默认 Encrypt=no，Driver 18 改为 Encrypt=yes + 强制校验 | `mssql.py` 连接串加 `TrustServerCertificate=yes;` | `ansible-playbooks/files/collector_client/db_connectors/mssql.py` |
+| AWX collector 任务 `--item-json` 参数含特殊字符时命令解析失败 | `cmd:` 格式用单引号包裹 JSON，若 JSON 中含单引号则破坏 bash 参数 | Ansible `command` 的 `cmd:` 按 shell 规则分词 | 改为 `argv:` 列表格式，JSON 作为独立参数直接传递，无 shell 解析 | `ansible-playbooks/playbooks/roles/db_fact_collect/tasks/main.yml` |
+| 实例详情"校验资产"提交失败，提示回调地址未配置 | `COLLECTOR_CALLBACK_URL` 是否显式配置；当前请求的 `base_url` 是否可用 | 直接调用内部服务时未传请求基址，或反向代理/Host 头异常导致无法自动回退 | 优先配置 `COLLECTOR_CALLBACK_URL`；若走前端入口，检查代理后重试 | `backend/app/services/collector_service.py:40-50,68-86` |
 | 端口校准按钮提示 `不支持的 check_code: PORT_CANDIDATE_REACHABILITY` | 当前后端是否已加载最新 `port_calibration` 分流代码；前端是否仍在发旧 payload | 命中旧后端进程，或旧客户端只传了 `PORT_CANDIDATE_REACHABILITY` 而未被新分流识别 | 重启后端到最新代码；确认前端已加载最新 `InstanceDetail.vue`，并检查 `POST /api/v1/collector/runs` payload 是否含 `run_type=port_calibration` | `backend/app/services/collector_service.py:312-346` + `frontend/src/views/InstanceDetail.vue:681-698` |
 | 端口校准里某个候选端口失败后实例状态仍保持未验证 | 该项是否属于候选端口而非已登记/必选端口 | 校准流程只把候选失败记为 `candidate_state=candidate_unreachable`，不会直接把实例改成 missing/offline | 只检查 `candidate_state`、`result_status` 和 `asset_endpoint`；若是已登记/必选端口失败才需要继续排查资产异常 | `backend/app/services/collector_service.py:869-1042` |
 | 端口从 1521 切到 1526 后没有生成变更建议 | proposal 是否按单个端口分组了 | 旧逻辑按 `host+port+protocol` 分组，导致同一资产的“当前端口 + 备选端口”没有被放到同一比较集合里 | 现已改为按 `asset_id+host+protocol` 聚合；若再次出现，先看回调是否包含当前端口和备选端口的同一次校准结果 | `backend/app/services/port_calibration_service.py:498-596` |
@@ -45,6 +48,8 @@
 | AWX 回调步骤返回 500 且报 `uq_asset_endpoint_identity` | `asset_endpoint` upsert 是否先命中完整 identity，再回退 generic 行 | 旧实现只按 host+port 取第一行，更新 endpoint_type/source 时可能撞上已存在的精确记录 | 已改成先按完整 identity 查找，避免把 generic 记录更新成重复键；若再出现先看 traceback 是否仍在 `collector_service._upsert_endpoint()` | `backend/app/services/collector_service.py:729-796` |
 | 实例详情“最近执行记录”显示 Not Found | 先看 `collector` 路由是否存在；再看后端是否为当前代码版本进程 | 后端未重启到包含 `collector` 路由的版本，或命中到其他用户旧进程 | 先验证 `/api/v1/collector/*` 路由是否返回 401（未鉴权）而非 404；必要时只重启当前用户进程 | `backend/app/main.py` + `backend/app/api/collector.py` |
 | 前端页面无法访问 `:61088` | Vite 进程是否存活、端口是否监听 | 前端 dev 进程退出或未成功启动 | 重启 `frontend` dev 进程并检查 `ss -lntp | grep 61088` 和 `curl http://127.0.0.1:61088/` | `frontend/vite.config.ts:15-23` |
+| AWX EE collector 调用 `--item-json` 报 `libodbc.so.2: cannot open shared object file` | Ansible command 任务缺少 `LD_LIBRARY_PATH` | pyodbc.connect() 触发 unixODBC 动态加载 libmsodbcsql18.so 时找不到 libodbc.so.2 | playbook task environment 块加 `LD_LIBRARY_PATH: /usr/lib64:/opt/microsoft/msodbcsql18/lib64` | `ansible-playbooks/playbooks/roles/db_fact_collect/tasks/main.yml` |
+| MSSQL collector 报 `SSL Provider: certificate verify failed: self-signed certificate` | ODBC Driver 18 默认 Encrypt=yes + 强制证书验证 | 内网 SQL Server 使用自签名证书，Driver 18 拒绝连接 | 连接串加 `TrustServerCertificate=yes;` | `ansible-playbooks/files/collector_client/db_connectors/mssql.py` |
 
 ## 3. 标准排查命令
 

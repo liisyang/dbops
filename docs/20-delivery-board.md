@@ -1,7 +1,7 @@
 # 交付看板
 
 > 文档状态：已校准
-> 最近校准：2026-05-21
+> 最近校准：2026-06-11
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -19,7 +19,8 @@
 3. **旧 ops schema 代码已清理**：模型层统一为 dbops schema，配置统一为 pydantic-settings。
 4. **异步运维框架已就绪但暂缓启用**：Celery + Redis + WebSocket 架构完整，当前阶段有意不启动 worker。
 5. **AWX 资产校验已进入 Phase 3.1**：在原 run/item/callback 底座上新增 `port_profile`、`run_type=port_calibration`、端点候选探测、`asset_change_proposal` 审批/应用流程（仅人工 apply 后更新正式端口字段）；后续 refactor 已将候选收敛到 `host+port+protocol`，并支持 `include_related_server`。
-6. **扩展模块待排期**：备份恢复、SQL 分析、巡检健康、审计安全、凭证中心、知识库共 16 个前端页面，在核心资产管理收尾后统一排期。
+6. **Phase 3.3A — DB 事实采集已完整交付并验证通过**：凭证中心（Profiles + Bindings）、CredentialResolverService、CheckItemBuilder、credential_group_hash 分发、AwxService 凭证注入、EE Collector Client、AWX Playbook 角色路由、Callback Fact Snapshots + Drift Detection、前端批量校验扩展均已实现。2 台 SQL Server 各采集 14 个 facts，端到端通过。
+7. **扩展模块待排期**：备份恢复、SQL 分析、巡检健康、审计安全、知识库共多个前端页面，在 Phase 3.3A 收尾后统一排期。
 
 ## 3. 当前阻塞项
 
@@ -46,9 +47,11 @@
 |---|---|---|---|
 | ~~1~~ | ~~核心资产管理收尾~~ | ~~Phase 3.1 已完成~~ | ✅ |
 | ~~2~~ | ~~AWX 闭环联调~~ | ~~callback 链路已就绪~~ | ✅ |
-| 3 | Phase 3.2: 批量资产校验中心 + 分网段 AWX 分发调度 | 已实现（后端 + 前端已完成，需 AWX 联调验收） | `POST /api/v1/collector/batch-runs` + BatchVerify.vue |
-| 4 | Phase 3.3: 只读资产事实采集 | 批量底座就绪后接入采集能力 | 通过 BatchCollectorService 下发 |
-| 5 | AWX 多网段联调验收 | 验证 IG_NET_A/B/C 分发正确性 | 需现场确认 |
+| ~~3~~ | ~~Phase 3.2: 批量资产校验中心 + 分网段 AWX 分发调度~~ | ~~已实现（后端 + 前端已完成）~~ | ✅ |
+| ~~4~~ | ~~Phase 3.3A: DB 事实采集~~ | ~~全部 9 个 Phase + Batch 4 联调验证通过~~ | ✅ 2026-06-11 |
+| 5 | Phase 10: 单元测试补全 | Phase 3.3A 测试未做，需补 CredentialResolverService、CheckItemBuilder、AwxService 凭证注入、Callback Fact Snapshot、Drift Detection 的 pytest | `cd backend && pytest tests/` |
+| 6 | AWX 多网段执行节点扩展 | 当前只有 IG_LOCAL_LH_TEST 一个 instance group，生产需按网段分组分发 | 需现场确认各网段执行节点 IP 和 SSH 免密配置 |
+| 7 | Phase 3.3B: Oracle / PostgreSQL / MySQL 事实采集联调 | MSSQL 已通；其他 connector 已实现但未联调 | 对各 DB 类型触发 batch run 并验证 14+ facts |
 
 ## 6. Phase 3.2 交付物
 
@@ -61,10 +64,28 @@
 - ✅ `BatchVerify.vue` — 前端批量校验页面（`/ops/batch-verify`）
 - ✅ 18 个后端测试全部通过，62 个总测试（含回归）全部通过
 
-## 7. 需现场确认
+## 7. Phase 3.3A 交付物（2026-06-11 验证通过）
 
-- AWX playbook `port_check` role metadata 透传修复（endpoint_type/protocol/port_source/is_required）
-- AWX 多 Instance Group 联调（IG_NET_A/B/C）
-- SSH 认证方式确认：仅密钥 or 需要密码认证？
-- 生产环境 Redis 地址（当前默认 localhost:6379）？
-- AWX Pod 到回调地址的网络连通性与回调 token 一致性（需现场确认）？
+- ✅ `collector_credential_profile` / `collector_credential_binding` 表（凭证中心 DB 模型）
+- ✅ `CredentialResolverService` — 按 asset_id + check_code 解析凭证，构建 AWX extra_vars 注入
+- ✅ `CheckItemBuilderRegistry` 4 个 fact builder — DB_BASIC_FACT_COLLECTION / DB_VERSION_FACT_COLLECTION / DB_ROLE_FACT_COLLECTION / OS_BASIC_FACT_COLLECTION
+- ✅ `DispatchPlannerService` credential_group_hash 分组 — 同凭证的 item 聚合到同一 dispatch，减少 AWX job 数
+- ✅ `AwxService.launch_job_with_credentials()` — 凭证作为 extra_vars 注入 AWX job，不写入 AWX credential 对象
+- ✅ `ExecutionNodeCollectorClient` — 执行节点 collector_client CLI 封装
+- ✅ AWX Playbook 角色路由 (`dbops_collector_generic.yml`) — 按 `check_code` 前缀路由到 `db_fact_collect` / `os_fact_collect` role，`port_check` 跳过
+- ✅ `FactSnapshotService` + `DriftDetectionService` — callback 写入 fact_snapshot，与上次快照比对生成 drift_event
+- ✅ 前端扩展：`credentials/Profiles.vue` + `credentials/Bindings.vue` + `BatchVerify.vue` 支持 fact_collection run_type
+- ✅ `backend/db/dbops_phase3_3a.sql` — Phase 3.3A DDL（fact_snapshot、drift_event、credential 相关表）
+- ✅ Batch 4 端到端验证：2 台 SQLSERVER 各采集 14 个 facts，AWX Job 245 successful，batch_run 80 status=success
+
+**关键修复（Batch 4 联调中发现）：**
+- `LD_LIBRARY_PATH: /usr/lib64:/opt/microsoft/msodbcsql18/lib64` — Ansible command 任务不继承容器环境，需显式传入 ODBC 库路径（`ansible-playbooks/playbooks/roles/db_fact_collect/tasks/main.yml`）
+- `TrustServerCertificate=yes` — ODBC Driver 18 默认强制 SSL 验证，内网自签名证书需跳过（`files/collector_client/db_connectors/mssql.py`）
+- `argv:` 替代 `cmd:` — 避免 JSON 中特殊字符破坏 shell 参数解析
+
+## 8. 需现场确认
+
+- AWX 多网段执行节点扩展：各网段节点 IP + SSH 免密 + AWX Instance Group 配置（当前仅 IG_LOCAL_LH_TEST）
+- Phase 3.3B：Oracle / PostgreSQL / MySQL 采集联调，需对应 DB 实例访问凭证
+- Phase 10 测试优先级：是否在开发下个功能前补全 Phase 3.3A 测试
+- 生产环境部署前 SECRET_KEY / POSTGRES_PASSWORD 须通过环境变量覆盖
