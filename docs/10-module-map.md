@@ -162,11 +162,10 @@ Page (InstanceDetail.vue)
 | 备份恢复 | 前端有 3 个页面，后端无 API | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `frontend/src/views/backup/*.vue` |
 | SQL 分析 | 前端有 3 个页面，后端无 API | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `frontend/src/views/sql/*.vue` |
 | 巡检健康 | 模型表已定义但无 API | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:371-393` |
-| 凭证中心 | 前端占位 | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `frontend/src/views/credentials/*.vue` |
 | 知识库 | 仅前端占位页面 | 页面无内容 | 核心资产管理收尾后排期 | `frontend/src/views/knowledge/Index.vue` |
 | 业务评分 | BizScoreRule/Result/Detail 表已定义但无 API | 无法使用 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:395-416` |
 
 ## 6. 需现场确认
 
-- 备份恢复、SQL 分析、巡检健康、审计安全、凭证中心、知识库的具体排期（核心资产管理收尾后）
+- 备份恢复、SQL 分析、巡检健康、审计安全、知识库的具体排期（核心资产管理收尾后）
 - Inventory.vue 对应的后端 API 是哪个？是否复用 `/api/v1/servers/servers` 的服务器列表？

@@ -1,7 +1,7 @@
 # 项目简报
 
 > 文档状态：已校准
-> 最近校准：2026-05-21
+> 最近校准：2026-06-11
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -26,14 +26,17 @@
 - **资产管理**：服务器、数据库实例、集群、业务系统、联系人的统一管理与 Excel 导入
 - **自动化运维**：主机清单管理、通过 SSH/Ansible 远程执行账号操作（新增用户、改密、用户检查）
 - **资产统计**：按 DB 类型、厂区、国家、部署类型等维度统计
-- **备份与恢复、SQL 分析、巡检与健康、审计与安全、凭证中心**：前端路由已注册，后端功能待完善
+- **自动化采集**：AWX 批量校验、分发调度、DB/OS facts 采集、凭证中心（Profiles/Bindings）与快照漂移检测已交付（Phase 3.3A）
+- **备份与恢复、SQL 分析、巡检与健康、审计与安全**：前端路由已注册，后端功能待完善
 
 代码依据：
 
 - 应用标题 `"DBOPS API"` v3.0.0（`backend/app/main.py:49`）
 - FastAPI 路由涵盖 servers CRUD、instances、clusters、business services、contacts、stats、imports（`backend/app/api/servers.py`）
 - 异步账号操作 API（`backend/app/api/account_ops.py`）
+- AWX 批量校验、凭证中心、采集回调 API（`backend/app/api/collector.py`）
 - 前端路由覆盖仪表盘、自动化运维、资产管理、备份恢复、SQL 分析、巡检健康、审计安全、凭证中心、知识库（`frontend/src/router/index.ts`）
+- 凭证中心与批量校验页（`frontend/src/views/credentials/*.vue` + `frontend/src/views/ops/BatchVerify.vue`）
 
 ## 3. 技术栈
 
@@ -99,6 +102,7 @@ bash scripts/ai/verify.sh
 | 认证鉴权 | JWT Bearer token，OAuth2PasswordBearer | `backend/app/api/deps.py:20-23` | tokenUrl=/api/rbac/login，开发密钥硬编码 |
 | 配置管理 | pydantic-settings + .env 文件 | `backend/app/config.py:2,46` | 已统一为单套配置 |
 | 前端状态 | localStorage token + Pinia store | `frontend/src/stores/user.ts` | |
+| AWX 采集链路 | `collector/runs` 启动、AWX callback 回写结果，fact_collection 会写 fact_snapshot + drift_event | `backend/app/services/batch_collector_service.py` + `backend/app/services/fact_snapshot_service.py` + `backend/app/services/drift_detection_service.py` | 分发按 `awx_instance_group` + `credential_group_hash` 聚合 |
 
 ## 6. 重要风险
 
@@ -108,10 +112,10 @@ bash scripts/ai/verify.sh
 | POSTGRES_PASSWORD 硬编码默认值 | 数据库凭据泄露风险 | 生产环境部署前必须通过环境变量覆盖 | `backend/app/config.py:14` |
 | SSH_PASSWORD 未配置 | 无法通过密码方式 SSH 连接 | 确认是否仅使用密钥认证，如需密码认证则配置环境变量 | `.env` 中 SSH_PASSWORD 为空 |
 | 审计日志 API 为空实现 | /api/logs/list 永远返回 [] | 实现审计模块或移除空路由 | `backend/app/api/logs.py:15` |
-| 前端多数二级页面为占位 | 备份/SQL/巡检/审计/凭证页面功能可能不完整 | 核心资产管理收尾后再排期 | `frontend/src/router/index.ts` 路由已注册 |
+| 前端多数二级页面为占位 | 备份/SQL/巡检/审计页面功能可能不完整 | 核心资产管理收尾后再排期 | `frontend/src/router/index.ts` 路由已注册 |
 
 ## 7. 需现场确认
 
-- 前端备份恢复、SQL 分析、巡检健康、审计安全、凭证中心等模块的具体排期（核心资产管理收尾后）
+- 前端备份恢复、SQL 分析、巡检健康、审计安全等模块的具体排期（核心资产管理收尾后）
 - 生产环境部署前，SECRET_KEY / POSTGRES_PASSWORD / SSH_PASSWORD 必须在环境变量中配置生产值
 - SSH 认证方式：仅密钥（当前 `~/.ssh/id_ed25519`）还是需要密码认证？
