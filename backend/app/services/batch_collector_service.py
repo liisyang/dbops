@@ -171,6 +171,29 @@ class BatchCollectorService:
             raise ValueError(f"不支持的 target_scope: {target_scope}")
         return results
 
+    @staticmethod
+    def _parse_group_key(group_key: str) -> tuple[str, str, str]:
+        """Parse a dispatch group key into (network_zone, awx_instance_group, credential_hash).
+
+        Supported formats:
+          IG                           → ("", "IG", "")
+          IG|cred_hash                 → ("", "IG", "cred_hash")
+          NZ|IG                        → ("NZ", "IG", "")
+          NZ|IG|cred_hash              → ("NZ", "IG", "cred_hash")
+        """
+        parts = group_key.split("|")
+        if len(parts) == 1:
+            return "", parts[0], ""
+        if len(parts) == 2:
+            # Could be NZ|IG or IG|cred_hash
+            # Heuristic: credential hashes are 16-char hex strings
+            second = parts[1]
+            if len(second) == 16 and all(c in "0123456789abcdef" for c in second):
+                return "", parts[0], second
+            return parts[0], parts[1], ""
+        # len >= 3: NZ|IG|hash
+        return parts[0], parts[1], parts[2] if len(parts) > 2 else ""
+
     # === Batch Creation ===
 
     @staticmethod
@@ -248,15 +271,35 @@ class BatchCollectorService:
         batch_run.total_item_count = len(all_items)
         batch_run.pending_item_count = len(all_items)
 
+        credential_skipped_items = [it for it in all_items if str(it.get("status") or "").lower() == "skipped"]
+        dispatchable_items = [it for it in all_items if str(it.get("status") or "").lower() != "skipped"]
+
+        batch_run.skipped_item_count = len(credential_skipped_items)
+        batch_run.pending_item_count = len(dispatchable_items)
+
+        if not dispatchable_items:
+           batch_run.status = "failed"
+           batch_run.error_message = (
+               f"未生成任何可执行校验项，已跳过 {len(credential_skipped_items)} 项"
+               if credential_skipped_items
+               else "未生成任何可执行校验项"
+           )
+           batch_run.finished_at = BatchCollectorService._now()
+           db.commit()
+           raise ValueError(batch_run.error_message)
+
         # 4. Group items by dispatch target
         grouped = DispatchPlannerService.group_items_by_dispatch_target(
-            db, all_items, payload.target_scope
+           db, dispatchable_items, payload.target_scope
         )
 
-        skipped_items = grouped.pop("__skipped__", [])
-        if skipped_items:
-            batch_run.skipped_item_count = len(skipped_items)
-            batch_run.pending_item_count -= len(skipped_items)
+        dispatch_skipped_items = grouped.pop("__skipped__", [])
+        if dispatch_skipped_items:
+           batch_run.skipped_item_count += len(dispatch_skipped_items)
+           batch_run.pending_item_count = max(
+               0,
+               batch_run.pending_item_count - len(dispatch_skipped_items),
+           )
 
         # 5. Create dispatch_run + collector_run for each group × chunk
         callback_url = BatchCollectorService._resolve_callback_url()
@@ -264,12 +307,8 @@ class BatchCollectorService:
         run_seq = 0  # monotonically increasing across all groups/chunks
 
         for group_key, group_items in sorted(grouped.items()):
-            # Parse group_key → network_zone, awx_instance_group
-            if "|" in group_key:
-                network_zone, awx_instance_group = group_key.split("|", 1)
-            else:
-                network_zone = ""
-                awx_instance_group = group_key
+            # Parse group_key → network_zone, awx_instance_group, credential_hash
+            network_zone, awx_instance_group, cred_hash = BatchCollectorService._parse_group_key(group_key)
 
             max_items = payload.max_items_per_dispatch
             # Chunk: NEVER truncate — split into multiple dispatches
@@ -279,6 +318,13 @@ class BatchCollectorService:
             ]
 
             for chunk_seq, chunk_items in enumerate(chunks):
+                # Collect unique credential profile IDs for this chunk
+                cred_profile_ids = sorted(set(
+                    it["credential_profile_id"]
+                    for it in chunk_items
+                    if it.get("credential_profile_id")
+                )) if chunk_items else []
+
                 dispatch_code = BatchCollectorService._generate_dispatch_code(batch_suffix, run_seq)
                 run_id = BatchCollectorService._generate_run_id(run_seq)
                 now = BatchCollectorService._now()
@@ -315,6 +361,8 @@ class BatchCollectorService:
                     network_zone=network_zone or None,
                     awx_instance_group=awx_instance_group or None,
                     awx_job_template="JT_DBOPS_COLLECTOR_GENERIC",
+                    credential_group_hash=cred_hash or None,
+                    credential_profile_ids=cred_profile_ids or [],
                     status="pending",
                     item_count=len(chunk_items),
                     request_payload={"items": chunk_items},
@@ -368,6 +416,45 @@ class BatchCollectorService:
 
         # 7. Refresh batch status after launch
         BatchCollectorService.refresh_batch_status(db, int(batch_run.id))
+
+        # Persist skipped items so the UI can show explicit skip reasons.
+        all_skipped_items = credential_skipped_items + dispatch_skipped_items
+        if all_skipped_items and dispatches:
+            first_dispatch = next((d for d in dispatches if d.get("collector_run_id")), None)
+            if first_dispatch:
+                collector_run = (
+                    db.query(CollectorRun)
+                    .filter(CollectorRun.id == int(first_dispatch["collector_run_id"]))
+                    .first()
+                )
+                if collector_run:
+                    skipped_run_items = []
+                    for item_dict in all_skipped_items:
+                        skipped_run_items.append(
+                            CollectorRunItem(
+                                collector_run_id=int(collector_run.id),
+                                run_id=collector_run.run_id,
+                                item_key=str(item_dict["item_key"]),
+                                check_code=str(item_dict["check_code"]),
+                                target_scope=str(item_dict["target_scope"]),
+                                db_instance_id=item_dict.get("db_instance_id"),
+                                server_id=item_dict.get("server_id"),
+                                target_host=str(item_dict["target_host"]),
+                                target_port=int(item_dict["target_port"]),
+                                protocol=str(item_dict.get("protocol") or "tcp"),
+                                endpoint_type=item_dict.get("endpoint_type"),
+                                port_source=item_dict.get("port_source"),
+                                is_required=bool(item_dict.get("is_required")),
+                                timeout_seconds=int(item_dict.get("timeout_seconds") or 5),
+                                status="skipped",
+                                result_message=str(item_dict.get("result_message") or "SKIPPED"),
+                                raw_result=item_dict.get("raw_result") or {},
+                            )
+                        )
+                    for row in skipped_run_items:
+                        db.add(row)
+                    db.commit()
+
         db.refresh(batch_run)
 
         return {
@@ -421,9 +508,15 @@ class BatchCollectorService:
                 .first()
             )
 
+            extra_vars = collector_run.extra_vars if collector_run else {"items": []}
+
+            # Phase 3.3A: Extract unique AWX credential IDs from fact collection items
+            credential_ids = BatchCollectorService._extract_credential_ids(extra_vars)
+
             try:
                 launch_result = AwxService.launch_job(
-                    extra_vars=collector_run.extra_vars if collector_run else {"items": []},
+                    extra_vars=extra_vars,
+                    credentials=credential_ids if credential_ids else None,
                 )
                 dispatch.status = "launched"
                 dispatch.awx_job_id = launch_result.get("awx_job_id")
@@ -462,6 +555,43 @@ class BatchCollectorService:
 
         db.commit()
         return result
+
+    @staticmethod
+    def _extract_credential_ids(extra_vars: dict[str, Any]) -> list[int]:
+        """Extract unique AWX credential IDs to pass at launch time.
+
+        Fact collection items carry awx_credential_id; port-check items do not.
+        Pre-bound credential IDs (e.g. callback token) from
+        AWX_PREBOUND_CREDENTIAL_IDS are always merged so AWX doesn't reject
+        the launch for removing them.
+
+        Returns a sorted, deduplicated list, or empty list if there are no
+        fact-collection credentials (letting AWX use template defaults).
+        """
+        items = extra_vars.get("items") or []
+
+        # Collect fact collection credential IDs
+        fact_cred_ids: set[int] = set()
+        for item in items:
+            awx_id = item.get("awx_credential_id")
+            if awx_id is not None:
+                fact_cred_ids.add(int(awx_id))
+
+        # Merge pre-bound credential IDs from config.
+        prebound_str = get_settings().AWX_PREBOUND_CREDENTIAL_IDS or ""
+        for part in prebound_str.split(","):
+            part = part.strip()
+            if part:
+                try:
+                    fact_cred_ids.add(int(part))
+                except ValueError:
+                    pass
+
+        # No fact credentials and no prebound credentials -> let AWX use template defaults.
+        if not fact_cred_ids:
+            return []
+
+        return sorted(fact_cred_ids)
 
     # === Status Refresh ===
 
@@ -824,11 +954,7 @@ class BatchCollectorService:
             if group_key == "__skipped__":
                 continue
 
-            if "|" in group_key:
-                network_zone, awx_instance_group = group_key.split("|", 1)
-            else:
-                network_zone = ""
-                awx_instance_group = group_key
+            network_zone, awx_instance_group, _cred_hash = BatchCollectorService._parse_group_key(group_key)
 
             callback_url = BatchCollectorService._resolve_callback_url()
 
@@ -839,6 +965,14 @@ class BatchCollectorService:
             ]
 
             for chunk_seq, chunk_items in enumerate(chunks):
+                # Compute credential info for this chunk
+                retry_cred_hash = DispatchPlannerService._compute_credential_hash(chunk_items[0]) if chunk_items else ""
+                retry_cred_profile_ids = sorted(set(
+                    it.get("credential_profile_id")
+                    for it in chunk_items
+                    if it.get("credential_profile_id")
+                )) if chunk_items else []
+
                 dispatch_code = BatchCollectorService._generate_dispatch_code(batch_suffix, run_seq + 100)
                 run_id = BatchCollectorService._generate_run_id(run_seq + 100)
                 now = BatchCollectorService._now()
@@ -891,6 +1025,8 @@ class BatchCollectorService:
                     network_zone=network_zone or None,
                     awx_instance_group=awx_instance_group or None,
                     awx_job_template="JT_DBOPS_COLLECTOR_GENERIC",
+                    credential_group_hash=retry_cred_hash or None,
+                    credential_profile_ids=retry_cred_profile_ids or [],
                     status="pending",
                     item_count=len(chunk_items),
                     request_payload={

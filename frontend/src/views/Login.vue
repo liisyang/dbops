@@ -175,9 +175,19 @@ const handleLogin = async () => {
 
     router.push('/')
   } catch (error: any) {
-    // 优先展示后端返回的具体错误原因，而不是 Axios 通用的 "Request failed with status code 401"
+    // 优先展示后端返回的具体错误原因
     const serverDetail = error?.response?.data?.detail
-    errorMsg.value = serverDetail || error.message || '登录失败'
+    if (serverDetail) {
+      errorMsg.value = serverDetail
+    } else if (error?.response?.status >= 500) {
+      errorMsg.value = '服务器内部错误，请稍后重试或联系管理员'
+    } else if (error?.response?.status === 401) {
+      errorMsg.value = '用户名或密码错误'
+    } else if (error?.code === 'ERR_NETWORK' || !error?.response) {
+      errorMsg.value = '无法连接到服务器，请确认后端服务已启动'
+    } else {
+      errorMsg.value = error.message || '登录失败'
+    }
   } finally {
     loading.value = false
   }

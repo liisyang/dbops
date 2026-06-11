@@ -392,3 +392,174 @@ class BatchRunItemResponse(BaseModel):
 
 class RetryFailedRequest(BaseModel):
     scope: Literal["failed", "dispatch_failed"] = "failed"
+
+
+# ============================================================================
+# Phase 3.3A — Credential Profile schemas
+# ============================================================================
+
+
+class CredentialProfileCreate(BaseModel):
+    profile_code: str = Field(min_length=1, max_length=100)
+    profile_name: str = Field(min_length=1, max_length=200)
+    credential_type: Literal["ssh_password", "ssh_key", "db_password", "winrm_password", "api_token"]
+    awx_credential_id: Optional[int] = None
+    awx_credential_name: Optional[str] = Field(default=None, max_length=200)
+    binding_role: Literal["os_readonly", "db_readonly", "db_monitor", "db_owner", "db_admin"]
+    db_type_code: Optional[str] = Field(default=None, max_length=50)
+    os_family: Optional[str] = Field(default=None, max_length=50)
+    usage_scope: Optional[Literal["server", "db_instance"]] = None
+    network_zone: Optional[str] = Field(default=None, max_length=100)
+    environment: Optional[Literal["prod", "staging", "dev", "test"]] = None
+    extra_attrs: dict[str, Any] = Field(default_factory=dict)
+    is_enabled: bool = True
+    remark: Optional[str] = None
+
+
+class CredentialProfileUpdate(BaseModel):
+    profile_name: Optional[str] = Field(default=None, min_length=1, max_length=200)
+    credential_type: Optional[Literal["ssh_password", "ssh_key", "db_password", "winrm_password", "api_token"]] = None
+    awx_credential_id: Optional[int] = None
+    awx_credential_name: Optional[str] = Field(default=None, max_length=200)
+    binding_role: Optional[Literal["os_readonly", "db_readonly", "db_monitor", "db_owner", "db_admin"]] = None
+    db_type_code: Optional[str] = Field(default=None, max_length=50)
+    os_family: Optional[str] = Field(default=None, max_length=50)
+    usage_scope: Optional[Literal["server", "db_instance"]] = None
+    network_zone: Optional[str] = Field(default=None, max_length=100)
+    environment: Optional[Literal["prod", "staging", "dev", "test"]] = None
+    extra_attrs: Optional[dict[str, Any]] = None
+    is_enabled: Optional[bool] = None
+    remark: Optional[str] = None
+
+
+class CredentialProfileResponse(BaseModel):
+    id: int
+    profile_code: str
+    profile_name: str
+    credential_type: str
+    awx_credential_id: Optional[int] = None
+    awx_credential_name: Optional[str] = None
+    binding_role: str
+    db_type_code: Optional[str] = None
+    os_family: Optional[str] = None
+    usage_scope: Optional[str] = None
+    network_zone: Optional[str] = None
+    environment: Optional[str] = None
+    extra_attrs: dict[str, Any] = Field(default_factory=dict)
+    is_enabled: bool = True
+    remark: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+# ============================================================================
+# Phase 3.3A — Credential Binding schemas
+# ============================================================================
+
+
+class CredentialBindingCreate(BaseModel):
+    binding_code: str = Field(min_length=1, max_length=100)
+    credential_profile_id: int
+    target_type: Literal["server", "db_instance", "cluster", "business_system", "network_zone", "global"]
+    target_id: Optional[int] = None
+    network_zone: Optional[str] = Field(default=None, max_length=100)
+    binding_role: Optional[Literal["os_readonly", "db_readonly", "db_monitor", "db_owner", "db_admin"]] = None
+    priority: int = Field(default=100, ge=1, le=1000)
+    is_enabled: bool = True
+    extra_attrs: dict[str, Any] = Field(default_factory=dict)
+    remark: Optional[str] = None
+
+
+class CredentialBindingUpdate(BaseModel):
+    binding_code: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    credential_profile_id: Optional[int] = None
+    target_type: Optional[Literal["server", "db_instance", "cluster", "business_system", "network_zone", "global"]] = None
+    target_id: Optional[int] = None
+    network_zone: Optional[str] = Field(default=None, max_length=100)
+    binding_role: Optional[Literal["os_readonly", "db_readonly", "db_monitor", "db_owner", "db_admin"]] = None
+    priority: Optional[int] = Field(default=None, ge=1, le=1000)
+    is_enabled: Optional[bool] = None
+    extra_attrs: Optional[dict[str, Any]] = None
+    remark: Optional[str] = None
+
+
+class CredentialBindingResponse(BaseModel):
+    id: int
+    binding_code: str
+    credential_profile_id: int
+    target_type: str
+    target_id: Optional[int] = None
+    network_zone: Optional[str] = None
+    binding_role: Optional[str] = None
+    priority: int = 100
+    is_enabled: bool = True
+    extra_attrs: dict[str, Any] = Field(default_factory=dict)
+    remark: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+    profile: Optional[CredentialProfileResponse] = None
+
+
+# ============================================================================
+# Phase 3.3A — Asset Fact schemas
+# ============================================================================
+
+
+class AssetFactValueResponse(BaseModel):
+    id: int
+    snapshot_id: int
+    fact_key: str
+    fact_value: Any = None
+    fact_type: str = "string"
+    collected_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+
+
+class AssetFactSnapshotResponse(BaseModel):
+    id: int
+    snapshot_id: str
+    target_type: str
+    target_id: int
+    source_run_id: Optional[str] = None
+    source_item_key: Optional[str] = None
+    check_code: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    fact_count: int = 0
+    raw_payload: dict[str, Any] = Field(default_factory=dict)
+    created_at: Optional[datetime] = None
+    values: list[AssetFactValueResponse] = Field(default_factory=list)
+
+
+class AssetFactSnapshotSummary(BaseModel):
+    id: int
+    snapshot_id: str
+    target_type: str
+    target_id: int
+    source_run_id: Optional[str] = None
+    check_code: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    fact_count: int = 0
+    created_at: Optional[datetime] = None
+
+
+# ============================================================================
+# Phase 3.3A — Asset Drift schemas
+# ============================================================================
+
+
+class AssetDriftRecordResponse(BaseModel):
+    id: int
+    drift_code: str
+    snapshot_id: int
+    target_type: str
+    target_id: int
+    fact_key: str
+    expected_value: Any = None
+    actual_value: Any = None
+    drift_type: str = "mismatch"
+    severity: str = "warning"
+    proposal_id: Optional[int] = None
+    is_resolved: bool = False
+    resolved_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None

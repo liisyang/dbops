@@ -88,16 +88,34 @@ class AwxService:
         return AwxService._resolve_job_template(configured_id, configured_name)
 
     @staticmethod
-    def launch_job(extra_vars: dict[str, Any], template_id: int | None = None, template_name: str | None = None) -> dict[str, Any]:
+    def launch_job(
+        extra_vars: dict[str, Any],
+        template_id: int | None = None,
+        template_name: str | None = None,
+        credentials: list[int] | None = None,
+    ) -> dict[str, Any]:
+        """Launch an AWX job template.
+
+        Args:
+            extra_vars: Job extra_vars payload.
+            template_id: Optional job template ID.
+            template_name: Optional job template name (resolved if ID not given).
+            credentials: Optional list of AWX credential IDs to inject.
+                         AWX injects these as env vars globally per job.
+        """
         if template_id is None or template_name is None:
             resolved_template_id, resolved_template_name = AwxService.resolve_collector_job_template()
             template_id = resolved_template_id if template_id is None else template_id
             template_name = resolved_template_name if template_name is None else template_name
 
+        body: dict[str, Any] = {"extra_vars": extra_vars}
+        if credentials:
+            body["credentials"] = credentials
+
         launch_result = AwxService._request_json(
             "POST",
             f"/api/v2/job_templates/{template_id}/launch/",
-            {"extra_vars": extra_vars},
+            body,
         )
         awx_job_id = launch_result.get("job")
         awx_job_url = None

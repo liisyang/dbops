@@ -36,6 +36,15 @@ import type {
   BusinessSystemUpsertPayload,
   SystemDetail,
   SystemRow,
+  CredentialProfileRow,
+  CredentialProfileCreatePayload,
+  CredentialProfileUpdatePayload,
+  CredentialBindingRow,
+  CredentialBindingCreatePayload,
+  CredentialBindingUpdatePayload,
+  AssetFactSnapshotRow,
+  AssetFactSnapshotSummary,
+  AssetDriftRecordRow,
 } from '@/types/api'
 
 export const assetsApi = {
@@ -203,4 +212,62 @@ export const assetsApi = {
     data?: RetryFailedPayload
   ): Promise<any> =>
     request.post(`/v1/collector/batch-runs/${id}/retry-failed`, data || { scope: 'failed' }),
+
+  // Phase 3.3A — Credential profiles
+  listCredentialProfiles: (): Promise<CredentialProfileRow[]> =>
+    request.get('/v1/credentials/profiles'),
+  createCredentialProfile: (data: CredentialProfileCreatePayload): Promise<CredentialProfileRow> =>
+    request.post('/v1/credentials/profiles', data),
+  updateCredentialProfile: (id: number | string, data: CredentialProfileUpdatePayload): Promise<CredentialProfileRow> =>
+    request.put(`/v1/credentials/profiles/${id}`, data),
+
+  // Phase 3.3A — Credential bindings
+  listCredentialBindings: (params?: Record<string, any>): Promise<CredentialBindingRow[]> =>
+    request.get('/v1/credentials/bindings', { params }),
+  createCredentialBinding: (data: CredentialBindingCreatePayload): Promise<CredentialBindingRow> =>
+    request.post('/v1/credentials/bindings', data),
+  updateCredentialBinding: (id: number | string, data: CredentialBindingUpdatePayload): Promise<CredentialBindingRow> =>
+    request.put(`/v1/credentials/bindings/${id}`, data),
+  deleteCredentialBinding: (id: number | string): Promise<any> =>
+    request.delete(`/v1/credentials/bindings/${id}`),
+
+  // Phase 3.3A — Asset facts
+  getLatestAssetFacts: (
+    targetType: string,
+    targetId: number | string,
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<AssetFactSnapshotRow | null> =>
+    request.get(`/v1/assets/${targetType}/${targetId}/facts/latest`, {
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  getAssetFactHistory: (
+    targetType: string,
+    targetId: number | string,
+    params?: { limit?: number },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<AssetFactSnapshotSummary[]> =>
+    request.get(`/v1/assets/${targetType}/${targetId}/facts/history`, {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+
+  // Phase 3.3A — Asset drifts
+  getAssetDrifts: (
+    targetType: string,
+    targetId: number | string,
+    params?: { is_resolved?: boolean },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<AssetDriftRecordRow[]> =>
+    request.get(`/v1/assets/${targetType}/${targetId}/drifts`, {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
+  listAllAssetDrifts: (
+    params?: { target_type?: string; is_resolved?: boolean },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<AssetDriftRecordRow[]> =>
+    request.get('/v1/assets/drifts', {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
 }

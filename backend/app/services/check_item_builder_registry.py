@@ -25,6 +25,22 @@ class BaseCheckItemBuilder:
     ) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    @staticmethod
+    def _build_skipped_item(
+        *,
+        item: dict[str, Any],
+        reason: str,
+    ) -> dict[str, Any]:
+        skipped = dict(item)
+        skipped["status"] = "skipped"
+        skipped["result_status"] = None
+        skipped["result_message"] = reason
+        skipped["raw_result"] = {
+            "skip_reason": reason,
+            "skip_code": reason,
+        }
+        return skipped
+
 
 class CheckItemBuilderRegistry:
     """Registry that maps check_code → builder.
@@ -101,7 +117,7 @@ class _DbPortReachabilityBuilder(BaseCheckItemBuilder):
                     "check_code": "DB_PORT_REACHABILITY",
                     "target_scope": "db_instance",
                     "db_instance_id": instance_id,
-                    "server_id": int(server.id),
+                    "server_id": int(instance.server_id),
                     "target_host": target_host,
                     "target_port": target_port,
                     "protocol": "tcp",
@@ -231,7 +247,243 @@ class _PortCandidateReachabilityBuilder(BaseCheckItemBuilder):
         return items
 
 
+# ============================================================================
+# Phase 3.3A — Fact collection builders
+# ============================================================================
+
+
+class _OsBasicFactCollectionBuilder(BaseCheckItemBuilder):
+    """Generate items for OS_BASIC_FACT_COLLECTION.
+
+    For each server asset, resolves OS readonly credential and builds
+    an item targeting the server's SSH port.
+    """
+
+    def build(self, db, *, assets, options):
+        from app.models.dbops_assets import Server
+        from app.services.credential_resolver_service import CredentialResolverService
+
+        timeout_seconds = int(options.get("timeout_seconds") or 30)
+        items: list[dict[str, Any]] = []
+
+        for asset in assets:
+            target_scope = asset.get("target_scope", "server")
+            if target_scope != "server":
+                continue
+
+            server_id = int(asset["id"])
+            server = db.query(Server).filter(Server.id == server_id).first()
+            if not server:
+                continue
+
+            # Resolve credential
+            credential = CredentialResolverService.resolve_for_item(
+                db,
+                target_scope="server",
+                asset=asset,
+                check_code="OS_BASIC_FACT_COLLECTION",
+            )
+            if not credential:
+                items.append(
+                    self._build_skipped_item(
+                        item={
+                            "item_key": f"server:{server_id}:OS_BASIC_FACT_COLLECTION:{str(server.ip_address)}:{int(options.get('ssh_port') or (server.extra_attrs or {}).get('ssh_port') or 22)}",
+                            "check_code": "OS_BASIC_FACT_COLLECTION",
+                            "target_scope": "server",
+                            "server_id": server_id,
+                            "target_host": str(options.get("target_host") or str(server.ip_address)),
+                            "target_port": int(options.get("ssh_port") or (server.extra_attrs or {}).get("ssh_port") or 22),
+                            "protocol": "ssh",
+                            "endpoint_type": "OS_ADMIN_PORT",
+                            "port_source": "server_extra_attrs",
+                            "is_required": True,
+                            "timeout_seconds": timeout_seconds,
+                            "asset_name": server.hostname or server.server_code or str(server_id),
+                            "os_family": str((server.extra_attrs or {}).get("os_family") or "linux"),
+                            "credential_profile_id": None,
+                            "credential_code": None,
+                            "awx_credential_id": None,
+                            "credential_role": None,
+                            "credential_type": None,
+                        },
+                        reason="CREDENTIAL_MISSING",
+                    )
+                )
+                continue
+
+            target_host = str(options.get("target_host") or str(server.ip_address))
+            # SSH port: try options, then server extra_attrs, default 22
+            ssh_port = int(options.get("ssh_port") or (server.extra_attrs or {}).get("ssh_port") or 22)
+            os_family = str((server.extra_attrs or {}).get("os_family") or "linux")
+
+            item_key = f"server:{server_id}:OS_BASIC_FACT_COLLECTION:{target_host}:{ssh_port}"
+            items.append(
+                {
+                    "item_key": item_key,
+                    "check_code": "OS_BASIC_FACT_COLLECTION",
+                    "target_scope": "server",
+                    "server_id": server_id,
+                    "target_host": target_host,
+                    "target_port": ssh_port,
+                    "protocol": "ssh",
+                    "endpoint_type": "OS_ADMIN_PORT",
+                    "port_source": "server_extra_attrs",
+                    "is_required": True,
+                    "timeout_seconds": timeout_seconds,
+                    "asset_name": server.hostname or server.server_code or str(server_id),
+                    "os_family": os_family,
+                    "credential_profile_id": credential["credential_profile_id"],
+                    "credential_code": credential["profile_code"],
+                    "awx_credential_id": credential["awx_credential_id"],
+                    "credential_role": credential["binding_role"],
+                    "credential_type": credential["credential_type"],
+                }
+            )
+        return items
+
+
+class _DbFactCollectionBuilderBase(BaseCheckItemBuilder):
+    """Shared logic for DB fact collection builders.
+
+    Subclasses set `_check_code` to the specific check_code they handle.
+    """
+
+    _check_code: str = ""
+
+    @staticmethod
+    def _default_database(db_type_code: str) -> str:
+        """Return the default database name for initial connection."""
+        defaults = {
+            "mssql": "master",
+            "sqlserver": "master",
+            "postgresql": "postgres",
+            "postgres": "postgres",
+            "mysql": "mysql",
+        }
+        return defaults.get((db_type_code or "").lower(), "master")
+
+    def build(self, db, *, assets, options):
+        from app.models.dbops_assets import DbInstance, DbType, Server
+        from app.services.credential_resolver_service import CredentialResolverService
+
+        timeout_seconds = int(options.get("timeout_seconds") or 30)
+        items: list[dict[str, Any]] = []
+
+        for asset in assets:
+            target_scope = asset.get("target_scope", "db_instance")
+            if target_scope != "db_instance":
+                continue
+
+            instance_id = int(asset["id"])
+            instance = db.query(DbInstance).filter(DbInstance.id == instance_id).first()
+            if not instance:
+                continue
+
+            server = db.query(Server).filter(Server.id == instance.server_id).first()
+            if not server:
+                continue
+
+            db_type = db.query(DbType).filter(DbType.id == instance.db_type_id).first()
+            db_type_code = (db_type.type_code or "").lower() if db_type else ""
+            target_host = str(options.get("target_host") or str(server.ip_address))
+            target_port = int(options.get("target_port") or instance.port or 0)
+            database_name = str(options.get("database_name") or self._default_database(db_type_code))
+            service_name = instance.service_name or ""
+
+            # Resolve credential
+            credential = CredentialResolverService.resolve_for_item(
+                db,
+                target_scope="db_instance",
+                asset=asset,
+                check_code=self._check_code,
+            )
+            if not credential:
+                items.append(
+                    self._build_skipped_item(
+                        item={
+                            "item_key": f"db_instance:{instance_id}:{self._check_code}:{target_host}:{target_port}",
+                            "check_code": self._check_code,
+                            "target_scope": "db_instance",
+                            "db_instance_id": instance_id,
+                            "server_id": int(instance.server_id),
+                            "target_host": target_host,
+                            "target_port": target_port,
+                            "protocol": "tcp",
+                            "endpoint_type": "DB_SERVICE_PORT",
+                            "port_source": "db_instance_port",
+                            "is_required": True,
+                            "timeout_seconds": timeout_seconds,
+                            "asset_name": instance.instance_name or str(instance_id),
+                            "db_type_code": db_type_code,
+                            "database_name": database_name,
+                            "service_name": service_name if db_type_code in ("oracle",) else None,
+                            "credential_profile_id": None,
+                            "credential_code": None,
+                            "awx_credential_id": None,
+                            "credential_role": None,
+                            "credential_type": None,
+                        },
+                        reason="CREDENTIAL_MISSING",
+                    )
+                )
+                continue
+
+            if target_port < 1 or target_port > 65535:
+                continue
+
+            item_key = (
+                f"db_instance:{instance_id}:{self._check_code}:{target_host}:{target_port}"
+            )
+
+            item: dict[str, Any] = {
+                "item_key": item_key,
+                "check_code": self._check_code,
+                "target_scope": "db_instance",
+                "db_instance_id": instance_id,
+                "server_id": int(server.id),
+                "target_host": target_host,
+                "target_port": target_port,
+                "protocol": "tcp",
+                "endpoint_type": "DB_SERVICE_PORT",
+                "port_source": "db_instance_port",
+                "is_required": True,
+                "timeout_seconds": timeout_seconds,
+                "asset_name": instance.instance_name or str(instance_id),
+                "db_type_code": db_type_code,
+                "database_name": database_name,
+                "credential_profile_id": credential["credential_profile_id"],
+                "credential_code": credential["profile_code"],
+                "awx_credential_id": credential["awx_credential_id"],
+                "credential_role": credential["binding_role"],
+                "credential_type": credential["credential_type"],
+            }
+
+            # Oracle-specific: add service_name
+            if db_type_code in ("oracle",):
+                item["service_name"] = service_name
+
+            items.append(item)
+
+        return items
+
+
+class _DbBasicFactCollectionBuilder(_DbFactCollectionBuilderBase):
+    _check_code = "DB_BASIC_FACT_COLLECTION"
+
+
+class _DbVersionFactCollectionBuilder(_DbFactCollectionBuilderBase):
+    _check_code = "DB_VERSION_FACT_COLLECTION"
+
+
+class _DbRoleFactCollectionBuilder(_DbFactCollectionBuilderBase):
+    _check_code = "DB_ROLE_FACT_COLLECTION"
+
+
 # Register built-in builders
 CheckItemBuilderRegistry.register("DB_PORT_REACHABILITY", _DbPortReachabilityBuilder())
 CheckItemBuilderRegistry.register("SSH_PORT_REACHABILITY", _SshPortReachabilityBuilder())
 CheckItemBuilderRegistry.register("PORT_CANDIDATE_REACHABILITY", _PortCandidateReachabilityBuilder())
+CheckItemBuilderRegistry.register("OS_BASIC_FACT_COLLECTION", _OsBasicFactCollectionBuilder())
+CheckItemBuilderRegistry.register("DB_BASIC_FACT_COLLECTION", _DbBasicFactCollectionBuilder())
+CheckItemBuilderRegistry.register("DB_VERSION_FACT_COLLECTION", _DbVersionFactCollectionBuilder())
+CheckItemBuilderRegistry.register("DB_ROLE_FACT_COLLECTION", _DbRoleFactCollectionBuilder())

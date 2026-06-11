@@ -11,6 +11,9 @@ from app.config import get_settings
 from app.models.user import User
 from app.schemas.collector import (
     AssetChangeProposalResponse,
+    AssetDriftRecordResponse,
+    AssetFactSnapshotResponse,
+    AssetFactSnapshotSummary,
     AssetVerifyLaunchRequest,
     AssetVerifyLaunchResponse,
     BatchRunCreateRequest,
@@ -21,6 +24,12 @@ from app.schemas.collector import (
     CollectorCallbackRequest,
     CollectorCallbackResponse,
     CollectorEndpointResponse,
+    CredentialBindingCreate,
+    CredentialBindingResponse,
+    CredentialBindingUpdate,
+    CredentialProfileCreate,
+    CredentialProfileResponse,
+    CredentialProfileUpdate,
     DispatchRunResponse,
     PortProfileResponse,
     ProposalRejectRequest,
@@ -29,6 +38,13 @@ from app.schemas.collector import (
     CollectorRunCreateResponse,
     CollectorRunItemResponse,
     CollectorRunResponse,
+)
+from app.models.dbops_assets import (
+    AssetDriftRecord,
+    AssetFactSnapshot,
+    AssetFactValue,
+    CredentialBinding,
+    CredentialProfile,
 )
 from app.services.asset_proposal_service import AssetProposalService
 from app.services.batch_collector_service import BatchCollectorService
@@ -368,3 +384,287 @@ async def retry_failed_batch_items(
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
+
+
+# ============================================================================
+# Phase 3.3A — Credential Profile endpoints
+# ============================================================================
+
+
+@router.get("/credentials/profiles", response_model=List[CredentialProfileResponse])
+async def list_credential_profiles(
+    credential_type: Optional[str] = Query(default=None),
+    binding_role: Optional[str] = Query(default=None),
+    db_type_code: Optional[str] = Query(default=None),
+    is_enabled: Optional[bool] = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CredentialProfile)
+    if credential_type:
+        query = query.filter(CredentialProfile.credential_type == credential_type)
+    if binding_role:
+        query = query.filter(CredentialProfile.binding_role == binding_role)
+    if db_type_code:
+        query = query.filter(CredentialProfile.db_type_code == db_type_code)
+    if is_enabled is not None:
+        query = query.filter(CredentialProfile.is_enabled == is_enabled)
+    return query.order_by(CredentialProfile.id.desc()).all()
+
+
+@router.post("/credentials/profiles", response_model=CredentialProfileResponse, status_code=201)
+async def create_credential_profile(
+    payload: CredentialProfileCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    existing = db.query(CredentialProfile).filter(
+        CredentialProfile.profile_code == payload.profile_code
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"凭证 profile_code 已存在: {payload.profile_code}")
+
+    profile = CredentialProfile(
+        profile_code=payload.profile_code,
+        profile_name=payload.profile_name,
+        credential_type=payload.credential_type,
+        awx_credential_id=payload.awx_credential_id,
+        awx_credential_name=payload.awx_credential_name,
+        binding_role=payload.binding_role,
+        db_type_code=payload.db_type_code,
+        os_family=payload.os_family,
+        usage_scope=payload.usage_scope,
+        network_zone=payload.network_zone,
+        environment=payload.environment,
+        extra_attrs=payload.extra_attrs,
+        is_enabled=payload.is_enabled,
+        remark=payload.remark,
+    )
+    db.add(profile)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+@router.put("/credentials/profiles/{profile_id}", response_model=CredentialProfileResponse)
+async def update_credential_profile(
+    profile_id: int,
+    payload: CredentialProfileUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    profile = db.query(CredentialProfile).filter(CredentialProfile.id == profile_id).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"凭证 profile 不存在: {profile_id}")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(profile, key, value)
+    db.commit()
+    db.refresh(profile)
+    return profile
+
+
+# ============================================================================
+# Phase 3.3A — Credential Binding endpoints
+# ============================================================================
+
+
+@router.get("/credentials/bindings", response_model=List[CredentialBindingResponse])
+async def list_credential_bindings(
+    credential_profile_id: Optional[int] = Query(default=None),
+    target_type: Optional[str] = Query(default=None),
+    target_id: Optional[int] = Query(default=None),
+    is_enabled: Optional[bool] = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(CredentialBinding)
+    if credential_profile_id:
+        query = query.filter(CredentialBinding.credential_profile_id == credential_profile_id)
+    if target_type:
+        query = query.filter(CredentialBinding.target_type == target_type)
+    if target_id is not None:
+        query = query.filter(CredentialBinding.target_id == target_id)
+    if is_enabled is not None:
+        query = query.filter(CredentialBinding.is_enabled == is_enabled)
+    return query.order_by(CredentialBinding.priority.asc()).all()
+
+
+@router.post("/credentials/bindings", response_model=CredentialBindingResponse, status_code=201)
+async def create_credential_binding(
+    payload: CredentialBindingCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Verify profile exists
+    profile = db.query(CredentialProfile).filter(
+        CredentialProfile.id == payload.credential_profile_id
+    ).first()
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"凭证 profile 不存在: {payload.credential_profile_id}")
+
+    existing = db.query(CredentialBinding).filter(
+        CredentialBinding.binding_code == payload.binding_code
+    ).first()
+    if existing:
+        raise HTTPException(status_code=409, detail=f"绑定 binding_code 已存在: {payload.binding_code}")
+
+    binding = CredentialBinding(
+        binding_code=payload.binding_code,
+        credential_profile_id=payload.credential_profile_id,
+        target_type=payload.target_type,
+        target_id=payload.target_id,
+        network_zone=payload.network_zone,
+        binding_role=payload.binding_role,
+        priority=payload.priority,
+        is_enabled=payload.is_enabled,
+        extra_attrs=payload.extra_attrs,
+        remark=payload.remark,
+    )
+    db.add(binding)
+    db.commit()
+    db.refresh(binding)
+    return binding
+
+
+@router.put("/credentials/bindings/{binding_id}", response_model=CredentialBindingResponse)
+async def update_credential_binding(
+    binding_id: int,
+    payload: CredentialBindingUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    binding = db.query(CredentialBinding).filter(CredentialBinding.id == binding_id).first()
+    if not binding:
+        raise HTTPException(status_code=404, detail=f"绑定不存在: {binding_id}")
+
+    update_data = payload.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(binding, key, value)
+    db.commit()
+    db.refresh(binding)
+    return binding
+
+
+@router.delete("/credentials/bindings/{binding_id}")
+async def delete_credential_binding(
+    binding_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    binding = db.query(CredentialBinding).filter(CredentialBinding.id == binding_id).first()
+    if not binding:
+        raise HTTPException(status_code=404, detail=f"绑定不存在: {binding_id}")
+    db.delete(binding)
+    db.commit()
+    return {"detail": f"绑定 {binding_id} 已删除"}
+
+
+# ============================================================================
+# Phase 3.3A — Asset Fact endpoints
+# ============================================================================
+
+
+@router.get("/assets/{target_type}/{target_id}/facts/latest", response_model=Optional[AssetFactSnapshotResponse])
+async def get_latest_asset_facts(
+    target_type: str,
+    target_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if target_type not in ("server", "db_instance"):
+        raise HTTPException(status_code=400, detail=f"不支持的 target_type: {target_type}")
+
+    snapshot = (
+        db.query(AssetFactSnapshot)
+        .filter(
+            AssetFactSnapshot.target_type == target_type,
+            AssetFactSnapshot.target_id == target_id,
+        )
+        .order_by(AssetFactSnapshot.collected_at.desc())
+        .first()
+    )
+    if not snapshot:
+        return None
+
+    values = (
+        db.query(AssetFactValue)
+        .filter(AssetFactValue.snapshot_id == snapshot.id)
+        .order_by(AssetFactValue.fact_key)
+        .all()
+    )
+    snapshot.values = values
+    return snapshot
+
+
+@router.get("/assets/{target_type}/{target_id}/facts/history", response_model=List[AssetFactSnapshotSummary])
+async def get_asset_fact_history(
+    target_type: str,
+    target_id: int,
+    limit: int = Query(default=20, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if target_type not in ("server", "db_instance"):
+        raise HTTPException(status_code=400, detail=f"不支持的 target_type: {target_type}")
+
+    return (
+        db.query(AssetFactSnapshot)
+        .filter(
+            AssetFactSnapshot.target_type == target_type,
+            AssetFactSnapshot.target_id == target_id,
+        )
+        .order_by(AssetFactSnapshot.collected_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+# ============================================================================
+# Phase 3.3A — Asset Drift endpoints
+# ============================================================================
+
+
+@router.get("/assets/{target_type}/{target_id}/drifts", response_model=List[AssetDriftRecordResponse])
+async def get_asset_drifts(
+    target_type: str,
+    target_id: int,
+    is_resolved: Optional[bool] = Query(default=None),
+    severity: Optional[str] = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    if target_type not in ("server", "db_instance"):
+        raise HTTPException(status_code=400, detail=f"不支持的 target_type: {target_type}")
+
+    query = db.query(AssetDriftRecord).filter(
+        AssetDriftRecord.target_type == target_type,
+        AssetDriftRecord.target_id == target_id,
+    )
+    if is_resolved is not None:
+        query = query.filter(AssetDriftRecord.is_resolved == is_resolved)
+    if severity:
+        query = query.filter(AssetDriftRecord.severity == severity)
+    return query.order_by(AssetDriftRecord.created_at.desc()).all()
+
+
+@router.get("/assets/drifts", response_model=List[AssetDriftRecordResponse])
+async def list_all_asset_drifts(
+    target_type: Optional[str] = Query(default=None),
+    is_resolved: Optional[bool] = Query(default=None),
+    severity: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    query = db.query(AssetDriftRecord)
+    if target_type:
+        if target_type not in ("server", "db_instance"):
+            raise HTTPException(status_code=400, detail=f"不支持的 target_type: {target_type}")
+        query = query.filter(AssetDriftRecord.target_type == target_type)
+    if is_resolved is not None:
+        query = query.filter(AssetDriftRecord.is_resolved == is_resolved)
+    if severity:
+        query = query.filter(AssetDriftRecord.severity == severity)
+    return query.order_by(AssetDriftRecord.created_at.desc()).limit(limit).all()

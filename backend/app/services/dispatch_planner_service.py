@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -108,16 +109,18 @@ class DispatchPlannerService:
         items: list[dict[str, Any]],
         target_scope: str,
     ) -> dict[str, list[dict[str, Any]]]:
-        """Group a list of item dicts by (network_zone, awx_instance_group).
+        """Group a list of item dicts by (network_zone, awx_instance_group, credential_group_hash).
 
         Each item dict must have an 'asset_id' or 'db_instance_id'/'server_id'
         key so we can resolve its dispatch target.
 
-        Returns dict keyed by group_label like "NET_A|IG_NET_A".
+        Credential group hash ensures items with different AWX credential sets
+        are dispatched to separate AWX jobs (AWX injects credentials as env vars
+        globally per job).
+
+        Returns dict keyed by group_label like "NET_A|IG_NET_A|a1b2c3d4".
         """
         # Build a lookup of asset_id → (network_zone, awx_instance_group)
-        # from the items themselves. For efficiency we resolve each unique
-        # asset once and cache.
         asset_cache: dict[tuple[str, int], tuple[str, str]] = {}
 
         def _resolve(scope: str, asset_id: int) -> tuple[str, str]:
@@ -135,15 +138,38 @@ class DispatchPlannerService:
             item_scope = item.get("target_scope") or target_scope
             asset_id = item.get("db_instance_id") or item.get("server_id") or item.get("asset_id")
             if asset_id is None:
-                # Can't resolve — put in skipped bucket
                 group_key = "__skipped__"
             else:
                 nz, ig = _resolve(item_scope, int(asset_id))
                 if not ig:
                     group_key = "__skipped__"
                 else:
-                    group_key = f"{nz}|{ig}" if nz else ig
+                    cred_hash = cls._compute_credential_hash(item)
+                    base_key = f"{nz}|{ig}" if nz else ig
+                    group_key = f"{base_key}|{cred_hash}" if cred_hash else base_key
 
             grouped.setdefault(group_key, []).append(item)
 
         return grouped
+
+    @staticmethod
+    def _compute_credential_hash(item: dict[str, Any]) -> str:
+        """Compute a stable hash from an item's credential reference.
+
+        Uses awx_credential_id, credential_role, and credential_type.
+        Items without credential info produce an empty hash.
+
+        This ensures items requiring different AWX credentials are dispatched
+        to separate AWX jobs (AWX injects credentials globally per job).
+        """
+        awx_cred_id = item.get("awx_credential_id")
+        cred_role = item.get("credential_role") or item.get("binding_role") or ""
+        cred_type = item.get("credential_type") or ""
+
+        if awx_cred_id is None:
+            return ""
+
+        # Build a stable string: sort credential components
+        parts = [str(int(awx_cred_id)), str(cred_type), str(cred_role)]
+        payload = "|".join(parts)
+        return hashlib.sha256(payload.encode()).hexdigest()[:16]

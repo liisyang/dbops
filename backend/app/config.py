@@ -56,6 +56,8 @@ class Settings(BaseSettings):
 
     # AWX 批量调度
     AWX_DEFAULT_INSTANCE_GROUP: str = "default"
+    # AWX Job Template 已绑定的 credential ID 列表（逗号分隔），launch 时必须保留
+    AWX_PREBOUND_CREDENTIAL_IDS: str = ""
 
     class Config:
         env_file = os.path.join(BASE_DIR, '.env')

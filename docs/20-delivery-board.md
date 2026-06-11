@@ -82,6 +82,7 @@
 - `LD_LIBRARY_PATH: /usr/lib64:/opt/microsoft/msodbcsql18/lib64` — Ansible command 任务不继承容器环境，需显式传入 ODBC 库路径（`ansible-playbooks/playbooks/roles/db_fact_collect/tasks/main.yml`）
 - `TrustServerCertificate=yes` — ODBC Driver 18 默认强制 SSL 验证，内网自签名证书需跳过（`files/collector_client/db_connectors/mssql.py`）
 - `argv:` 替代 `cmd:` — 避免 JSON 中特殊字符破坏 shell 参数解析
+- `AWX_PREBOUND_CREDENTIAL_IDS` 会与事实采集凭证合并，即使某个 dispatch 没有事实凭证也会保留预绑定 credential IDs，避免 AWX launch 校验失败
 
 ## 8. 需现场确认
 

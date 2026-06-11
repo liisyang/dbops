@@ -2,6 +2,8 @@
 
 import re
 from datetime import datetime
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 from app.models.dbops_assets import (
     AssetEndpoint,
@@ -17,8 +19,12 @@ from app.models.dbops_assets import (
     Site,
 )
 from app.schemas.collector import BatchRunCreateRequest, RetryFailedRequest
+from app.services import awx_service as awx_service_module
+from app.services import batch_collector_service as batch_collector_service_module
+from app.services.awx_service import AwxService
 from app.services.batch_collector_service import BatchCollectorService
 from app.services.check_item_builder_registry import CheckItemBuilderRegistry
+from app.services.credential_resolver_service import CredentialResolverService
 from app.services.dispatch_planner_service import DispatchPlannerService
 
 
@@ -239,3 +245,91 @@ def test_run_id_format():
     run_id = BatchCollectorService._generate_run_id(0)
     assert run_id.startswith("RUN-")
     assert run_id.endswith(run_id.split("-")[-1])  # ends with random suffix
+
+
+def test_extract_credential_ids_merges_prebound_credentials(monkeypatch):
+    settings = SimpleNamespace(AWX_PREBOUND_CREDENTIAL_IDS="7, 11")
+    monkeypatch.setattr(batch_collector_service_module, "get_settings", lambda: settings)
+
+    result = BatchCollectorService._extract_credential_ids(
+        {"items": [{"awx_credential_id": 3}, {"awx_credential_id": 3}]}
+    )
+
+    assert result == [3, 7, 11]
+
+
+def test_extract_credential_ids_keeps_prebound_credentials_without_fact_ids(monkeypatch):
+    settings = SimpleNamespace(AWX_PREBOUND_CREDENTIAL_IDS="7,11")
+    monkeypatch.setattr(batch_collector_service_module, "get_settings", lambda: settings)
+
+    result = BatchCollectorService._extract_credential_ids({"items": []})
+
+    assert result == [7, 11]
+
+
+def test_awx_launch_job_includes_credentials(monkeypatch):
+    settings = SimpleNamespace(
+        AWX_URL="http://awx.example",
+        AWX_USER="admin",
+        AWX_PASSWORD="secret",
+        AWX_REQUEST_TIMEOUT=30,
+    )
+    monkeypatch.setattr(awx_service_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(AwxService, "resolve_collector_job_template", staticmethod(lambda: (10, "JT_DBOPS_COLLECTOR_GENERIC")))
+
+    captured = {}
+
+    def fake_request_json(method, path, payload=None):
+        captured["method"] = method
+        captured["path"] = path
+        captured["payload"] = payload
+        return {"job": 123}
+
+    monkeypatch.setattr(AwxService, "_request_json", staticmethod(fake_request_json))
+
+    result = AwxService.launch_job(
+        extra_vars={"items": []},
+        credentials=[5, 9],
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["path"] == "/api/v2/job_templates/10/launch/"
+    assert captured["payload"]["credentials"] == [5, 9]
+    assert result["awx_job_id"] == 123
+    assert result["awx_job_url"] == "http://awx.example/#/jobs/playbook/123"
+
+
+def test_db_fact_builder_emits_skipped_item_when_credential_missing(monkeypatch):
+    db = MagicMock()
+
+    instance = SimpleNamespace(server_id=2, db_type_id=3, port=1521, service_name="ORCLPDB1", instance_name="ora1")
+    server = SimpleNamespace(ip_address="10.0.0.10", extra_attrs={"os_family": "linux"})
+    db_type = SimpleNamespace(type_code="oracle")
+
+    def query_side_effect(model):
+        query = MagicMock()
+        if model is DbInstance:
+            query.filter.return_value.first.return_value = instance
+        elif model is Server:
+            query.filter.return_value.first.return_value = server
+        elif model is DbType:
+            query.filter.return_value.first.return_value = db_type
+        else:
+            query.filter.return_value.first.return_value = None
+        return query
+
+    db.query.side_effect = query_side_effect
+    monkeypatch.setattr(CredentialResolverService, "resolve_for_item", staticmethod(lambda *args, **kwargs: None))
+
+    items = CheckItemBuilderRegistry.build_items(
+        db,
+        "DB_BASIC_FACT_COLLECTION",
+        [{"id": 1, "target_scope": "db_instance"}],
+        {"timeout_seconds": 30},
+    )
+
+    assert len(items) == 1
+    assert items[0]["status"] == "skipped"
+    assert items[0]["result_message"] == "CREDENTIAL_MISSING"
+    assert items[0]["server_id"] == 2
+    assert items[0]["raw_result"]["skip_reason"] == "CREDENTIAL_MISSING"

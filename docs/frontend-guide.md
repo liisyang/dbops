@@ -66,6 +66,7 @@ src/
 3. 列表页固定结构：`OpsStatGrid` → 图表区（可折叠）→ `OpsFilterBar` → `OpsTableShell`（内含 `<table>`）。
 4. 详情页使用 `OpsSectionCard` 分块展示信息。
 5. 实例详情页（`InstanceDetail.vue`）已扩展"资产校验状态""最近执行记录""执行项明细""端点状态""变更建议"卡片；支持"校验资产"和"端口校准"双入口，其中端口校准调用 `POST /api/v1/collector/runs`（`run_type=port_calibration`），默认会带上 `include_related_server=true`，执行项会展示独立 `candidate_state` 列，并提供 proposal 同意/拒绝/应用操作；资产校验状态卡片提供手动刷新按钮，且 submitLaunch/launchPortCalibration 成功后会自动重新拉取实例详情以展示最新 trust_status/reachability_status 等字段。状态类字段（trust/reachability/run/result/endpoint/proposal）统一使用条件 Badge 样式；时间字段统一调用本地 `formatTime()`（内部走 `formatInTz`）。
+6. 批量校验页 `BatchVerify.vue` 会优先展示结果摘要、分发明细、执行项明细和单项详情；执行项详情区直接渲染 `raw_result.facts` 和 `raw_result` 原文，跳过项会显示计数和原因提示，变更建议仅在相关批次中展示。
 
 **代码依据：** `src/views/Servers.vue:2-6` (页面结构), `src/views/Instances.vue:2-6`, `src/views/Assets.vue:2-6`。
 

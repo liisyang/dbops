@@ -909,6 +909,9 @@ class CollectorDispatchRun(DbopsAssetBase):
     failed_item_count = Column(Integer, nullable=False, server_default=text("0"))
     request_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     error_message = Column(Text)
+    credential_strategy = Column(String(50))
+    credential_profile_ids = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    credential_group_hash = Column(String(100))
     launched_at = Column(DateTime)
     finished_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -926,6 +929,184 @@ class CollectorDispatchRun(DbopsAssetBase):
         Index("idx_collector_dispatch_status", "status"),
         Index("idx_collector_dispatch_awx_job", "awx_job_id"),
         Index("idx_collector_dispatch_group", "network_zone", "awx_instance_group"),
+    )
+
+
+class CredentialProfile(DbopsAssetBase):
+    """凭证引用 — 只存 AWX credential ID，永不存密码/私钥/Token"""
+    __tablename__ = "credential_profile"
+
+    id = Column(BigInteger, primary_key=True)
+    profile_code = Column(String(100), nullable=False, unique=True)
+    profile_name = Column(String(200), nullable=False)
+    credential_type = Column(String(50), nullable=False)
+    awx_credential_id = Column(BigInteger)
+    awx_credential_name = Column(String(200))
+    binding_role = Column(String(50), nullable=False)
+    db_type_code = Column(String(50))
+    os_family = Column(String(50))
+    usage_scope = Column(String(50))
+    network_zone = Column(String(100))
+    environment = Column(String(50))
+    extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    bindings = relationship("CredentialBinding", back_populates="profile", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(
+            "credential_type IN ('ssh_password', 'ssh_key', 'db_password', 'winrm_password', 'api_token')",
+            name="chk_credential_profile_type",
+        ),
+        CheckConstraint(
+            "binding_role IN ('os_readonly', 'db_readonly', 'db_monitor', 'db_owner', 'db_admin')",
+            name="chk_credential_profile_role",
+        ),
+        Index("idx_credential_profile_type", "credential_type"),
+        Index("idx_credential_profile_role", "binding_role"),
+        Index("idx_credential_profile_db_type", "db_type_code"),
+        Index("idx_credential_profile_awx_id", "awx_credential_id"),
+        Index("idx_credential_profile_enabled", "is_enabled"),
+    )
+
+
+class CredentialBinding(DbopsAssetBase):
+    """凭证绑定 — profile → asset 映射，支持优先级解析"""
+    __tablename__ = "credential_binding"
+
+    id = Column(BigInteger, primary_key=True)
+    binding_code = Column(String(100), nullable=False, unique=True)
+    credential_profile_id = Column(BigInteger, ForeignKey("credential_profile.id", ondelete="CASCADE"), nullable=False)
+    target_type = Column(String(50), nullable=False)
+    target_id = Column(BigInteger)
+    network_zone = Column(String(100))
+    binding_role = Column(String(50))
+    priority = Column(Integer, nullable=False, server_default=text("100"))
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    remark = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    profile = relationship("CredentialProfile", back_populates="bindings")
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance', 'cluster', 'business_system', 'network_zone', 'global')",
+            name="chk_credential_binding_target_type",
+        ),
+        CheckConstraint(
+            "priority >= 1 AND priority <= 1000",
+            name="chk_credential_binding_priority",
+        ),
+        Index("idx_credential_binding_profile", "credential_profile_id"),
+        Index("idx_credential_binding_target", "target_type", "target_id"),
+        Index("idx_credential_binding_zone", "network_zone"),
+        Index("idx_credential_binding_enabled", "is_enabled"),
+        Index("idx_credential_binding_priority", "priority"),
+    )
+
+
+class AssetFactSnapshot(DbopsAssetBase):
+    """资产事实快照 — 一次采集事件一行"""
+    __tablename__ = "asset_fact_snapshot"
+
+    id = Column(BigInteger, primary_key=True)
+    snapshot_id = Column(String(64), nullable=False, unique=True)
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    source_run_id = Column(String(64))
+    source_item_key = Column(String(255))
+    check_code = Column(String(100))
+    collected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    fact_count = Column(Integer, nullable=False, server_default=text("0"))
+    raw_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    values = relationship("AssetFactValue", back_populates="snapshot", cascade="all, delete-orphan")
+    drifts = relationship("AssetDriftRecord", back_populates="snapshot", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance')",
+            name="chk_asset_fact_snapshot_target_type",
+        ),
+        Index("idx_fact_snapshot_target_time", "target_type", "target_id", collected_at.desc()),
+        Index("idx_fact_snapshot_source_run", "source_run_id"),
+        Index("idx_fact_snapshot_check_code", "check_code"),
+        Index("idx_fact_snapshot_collected_at", collected_at.desc()),
+    )
+
+
+class AssetFactValue(DbopsAssetBase):
+    """单个事实键值 — FK → snapshot"""
+    __tablename__ = "asset_fact_value"
+
+    id = Column(BigInteger, primary_key=True)
+    snapshot_id = Column(BigInteger, ForeignKey("asset_fact_snapshot.id", ondelete="CASCADE"), nullable=False)
+    fact_key = Column(String(255), nullable=False)
+    fact_value = Column(JSONB)
+    fact_type = Column(String(50), nullable=False, server_default=text("'string'"))
+    collected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    snapshot = relationship("AssetFactSnapshot", back_populates="values")
+
+    __table_args__ = (
+        UniqueConstraint("snapshot_id", "fact_key", name="uq_asset_fact_value_snapshot_key"),
+        CheckConstraint(
+            "fact_type IN ('string', 'integer', 'float', 'boolean', 'json')",
+            name="chk_asset_fact_value_type",
+        ),
+        Index("idx_fact_value_snapshot", "snapshot_id"),
+        Index("idx_fact_value_key", "fact_key"),
+    )
+
+
+class AssetDriftRecord(DbopsAssetBase):
+    """漂移检测记录 — 事实 vs 正式资产字段偏差"""
+    __tablename__ = "asset_drift_record"
+
+    id = Column(BigInteger, primary_key=True)
+    drift_code = Column(String(100), nullable=False, unique=True)
+    snapshot_id = Column(BigInteger, ForeignKey("asset_fact_snapshot.id", ondelete="CASCADE"), nullable=False)
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    fact_key = Column(String(255), nullable=False)
+    expected_value = Column(JSONB)
+    actual_value = Column(JSONB)
+    drift_type = Column(String(50), nullable=False, server_default=text("'mismatch'"))
+    severity = Column(String(50), nullable=False, server_default=text("'warning'"))
+    proposal_id = Column(BigInteger, ForeignKey("asset_change_proposal.id", ondelete="SET NULL"))
+    is_resolved = Column(Boolean, nullable=False, server_default=text("false"))
+    resolved_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    snapshot = relationship("AssetFactSnapshot", back_populates="drifts")
+    proposal = relationship("AssetChangeProposal", foreign_keys=[proposal_id])
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance')",
+            name="chk_asset_drift_record_target_type",
+        ),
+        CheckConstraint(
+            "drift_type IN ('mismatch', 'missing', 'extra')",
+            name="chk_asset_drift_record_drift_type",
+        ),
+        CheckConstraint(
+            "severity IN ('critical', 'warning', 'info')",
+            name="chk_asset_drift_record_severity",
+        ),
+        Index("idx_asset_drift_target_time", "target_type", "target_id", created_at.desc()),
+        Index("idx_asset_drift_snapshot", "snapshot_id"),
+        Index("idx_asset_drift_proposal", "proposal_id"),
+        Index("idx_asset_drift_resolved", "is_resolved"),
+        Index("idx_asset_drift_severity", "severity"),
     )
 
 
@@ -965,4 +1146,9 @@ __all__ = [
     "BizScoreResult",
     "BizScoreResultDetail",
     "StagingExcelImport",
+    "CredentialProfile",
+    "CredentialBinding",
+    "AssetFactSnapshot",
+    "AssetFactValue",
+    "AssetDriftRecord",
 ]

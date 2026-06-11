@@ -620,6 +620,161 @@ export interface BatchRunItemRow extends CollectorRunItemRow {
   awx_instance_group?: string | null
 }
 
+// Phase 3.3A — Credential Profile
+export interface CredentialProfileRow {
+  id: number
+  profile_code: string
+  profile_name: string
+  credential_type: string
+  awx_credential_id?: number | null
+  awx_credential_name?: string | null
+  binding_role: string
+  db_type_code?: string | null
+  os_family?: string | null
+  usage_scope?: string | null
+  network_zone?: string | null
+  environment?: string | null
+  extra_attrs?: Record<string, any>
+  is_enabled: boolean
+  remark?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface CredentialProfileCreatePayload {
+  profile_code: string
+  profile_name: string
+  credential_type: string
+  awx_credential_id?: number | null
+  awx_credential_name?: string | null
+  binding_role: string
+  db_type_code?: string | null
+  os_family?: string | null
+  usage_scope?: string | null
+  network_zone?: string | null
+  environment?: string | null
+  extra_attrs?: Record<string, any>
+  is_enabled?: boolean
+  remark?: string | null
+}
+
+export interface CredentialProfileUpdatePayload {
+  profile_name?: string | null
+  credential_type?: string | null
+  awx_credential_id?: number | null
+  awx_credential_name?: string | null
+  binding_role?: string | null
+  db_type_code?: string | null
+  os_family?: string | null
+  usage_scope?: string | null
+  network_zone?: string | null
+  environment?: string | null
+  extra_attrs?: Record<string, any>
+  is_enabled?: boolean
+  remark?: string | null
+}
+
+// Phase 3.3A — Credential Binding
+export interface CredentialBindingRow {
+  id: number
+  binding_code: string
+  credential_profile_id: number
+  target_type: string
+  target_id?: number | null
+  network_zone?: string | null
+  binding_role?: string | null
+  priority: number
+  is_enabled: boolean
+  extra_attrs?: Record<string, any>
+  remark?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+  profile?: CredentialProfileRow | null
+}
+
+export interface CredentialBindingCreatePayload {
+  binding_code: string
+  credential_profile_id: number
+  target_type: string
+  target_id?: number | null
+  network_zone?: string | null
+  binding_role?: string | null
+  priority?: number
+  is_enabled?: boolean
+  extra_attrs?: Record<string, any>
+  remark?: string | null
+}
+
+export interface CredentialBindingUpdatePayload {
+  binding_code?: string | null
+  credential_profile_id?: number | null
+  target_type?: string | null
+  target_id?: number | null
+  network_zone?: string | null
+  binding_role?: string | null
+  priority?: number | null
+  is_enabled?: boolean | null
+  extra_attrs?: Record<string, any>
+  remark?: string | null
+}
+
+// Phase 3.3A — Asset Facts
+export interface AssetFactValueRow {
+  id: number
+  snapshot_id: number
+  fact_key: string
+  fact_value?: any
+  fact_type: string
+  collected_at?: string | null
+  created_at?: string | null
+}
+
+export interface AssetFactSnapshotRow {
+  id: number
+  snapshot_id: string
+  target_type: string
+  target_id: number
+  source_run_id?: string | null
+  source_item_key?: string | null
+  check_code?: string | null
+  collected_at?: string | null
+  fact_count: number
+  raw_payload?: Record<string, any>
+  created_at?: string | null
+  values?: AssetFactValueRow[]
+}
+
+export interface AssetFactSnapshotSummary {
+  id: number
+  snapshot_id: string
+  target_type: string
+  target_id: number
+  source_run_id?: string | null
+  check_code?: string | null
+  collected_at?: string | null
+  fact_count: number
+  created_at?: string | null
+}
+
+// Phase 3.3A — Asset Drifts
+export interface AssetDriftRecordRow {
+  id: number
+  drift_code: string
+  snapshot_id: number
+  target_type: string
+  target_id: number
+  fact_key: string
+  expected_value?: any
+  actual_value?: any
+  drift_type: string
+  severity: string
+  proposal_id?: number | null
+  is_resolved: boolean
+  resolved_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
 export interface RetryFailedPayload {
   scope: 'failed' | 'dispatch_failed'
 }

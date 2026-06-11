@@ -28,6 +28,8 @@ from app.schemas.collector import (
     CollectorRunResponse,
     CollectorRunResultResponse,
 )
+from app.services.fact_snapshot_service import FactSnapshotService
+from app.services.drift_detection_service import DriftDetectionService
 from app.services.asset_event_history_service import record_event
 from app.services.asset_proposal_service import AssetProposalService
 from app.services.awx_service import AwxService, AwxServiceError
@@ -115,6 +117,30 @@ class CollectorService:
                 "target_scope": "db_instance",
                 "task_type": "PORT_CHECK",
                 "default_timeout_seconds": 3,
+            },
+            "OS_BASIC_FACT_COLLECTION": {
+                "check_name": "OS Basic Fact Collection",
+                "target_scope": "server",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 60,
+            },
+            "DB_BASIC_FACT_COLLECTION": {
+                "check_name": "DB Basic Fact Collection",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 60,
+            },
+            "DB_VERSION_FACT_COLLECTION": {
+                "check_name": "DB Version Fact Collection",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 60,
+            },
+            "DB_ROLE_FACT_COLLECTION": {
+                "check_name": "DB Role Fact Collection",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 60,
             },
         }
         return defaults.get(
@@ -1069,6 +1095,22 @@ class CollectorService:
                     )
 
             processed_count += 1
+
+            # Phase 3.3A: Fact snapshot + drift detection for fact collection items
+            if FactSnapshotService.is_fact_collection(run_item.check_code or ""):
+                try:
+                    snapshot = FactSnapshotService.create_from_collector_result(
+                        db,
+                        run_item=run_item,
+                        raw_result=raw_result,
+                    )
+                    if snapshot:
+                        DriftDetectionService.detect_for_snapshot(db, snapshot)
+                except Exception:
+                    # Fact/drift processing failure MUST NOT break the callback.
+                    # Errors are logged implicitly by not updating facts.
+                    pass
+
             if (run.request_payload or {}).get("run_type") == "port_calibration":
                 calibration_results.append(
                     {

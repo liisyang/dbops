@@ -204,16 +204,16 @@ const routes: RouteRecordRaw[] = [
       },
       // 凭证中心
       {
-        path: 'credentials/ssh',
-        name: 'CredentialsSsh',
-        component: () => import('@/views/credentials/Ssh.vue'),
-        meta: { title: 'SSH凭证', parent: '凭证中心' }
+        path: 'credentials/profiles',
+        name: 'CredentialsProfiles',
+        component: () => import('@/views/credentials/Profiles.vue'),
+        meta: { title: '凭证引用管理', parent: '凭证中心' }
       },
       {
-        path: 'credentials/db',
-        name: 'CredentialsDb',
-        component: () => import('@/views/credentials/Db.vue'),
-        meta: { title: '数据库凭证', parent: '凭证中心' }
+        path: 'credentials/bindings',
+        name: 'CredentialsBindings',
+        component: () => import('@/views/credentials/Bindings.vue'),
+        meta: { title: '凭证绑定管理', parent: '凭证中心' }
       },
       {
         path: 'knowledge',

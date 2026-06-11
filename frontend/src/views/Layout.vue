@@ -197,8 +197,8 @@ const menuItems = [
     icon: 'key',
     label: '凭证中心',
     children: [
-      { icon: 'terminal', label: 'SSH凭证', path: '/credentials/ssh' },
-      { icon: 'lock', label: '数据库凭证', path: '/credentials/db' },
+      { icon: 'description', label: '凭证引用', path: '/credentials/profiles' },
+      { icon: 'link', label: '凭证绑定', path: '/credentials/bindings' },
     ]
   },
   { key: 'knowledge', icon: 'menu_book', label: '知识库', path: '/knowledge' },
@@ -214,7 +214,7 @@ const topTabs = [
   { key: 'sql', label: 'SQL分析', path: '/sql/audit', match: ['/sql'] },
   { key: 'inspection', label: '巡检与健康', path: '/inspection/reports', match: ['/inspection'] },
   { key: 'audit', label: '审计与安全', path: '/audit/operations', match: ['/audit'] },
-  { key: 'credentials', label: '凭证中心', path: '/credentials/ssh', match: ['/credentials'] },
+  { key: 'credentials', label: '凭证中心', path: '/credentials/profiles', match: ['/credentials'] },
   { key: 'knowledge', label: '知识库', path: '/knowledge', match: ['/knowledge'] },
 ] as const
 

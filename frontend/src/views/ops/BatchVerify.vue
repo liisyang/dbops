@@ -180,7 +180,7 @@
     <div v-if="batchDetail" class="mt-6 space-y-6">
       <!-- Results Summary -->
       <OpsSectionCard title="结果摘要" icon="analytics">
-        <div class="grid gap-3 sm:grid-cols-5">
+        <div class="grid gap-3 sm:grid-cols-6">
           <div class="field-card text-center">
             <div class="field-value text-2xl font-bold">{{ batchDetail.total_asset_count }}</div>
             <div class="field-label">总资产数</div>
@@ -201,6 +201,16 @@
             <div class="field-value text-2xl font-bold" :class="successRateClass">{{ successRate }}%</div>
             <div class="field-label">成功率</div>
           </div>
+          <div v-if="(batchDetail.skipped_item_count || 0) > 0" class="field-card text-center">
+            <div class="field-value text-2xl font-bold text-slate-300">{{ batchDetail.skipped_item_count }}</div>
+            <div class="field-label">跳过</div>
+          </div>
+        </div>
+        <div
+          v-if="(batchDetail.skipped_item_count || 0) > 0"
+          class="mt-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-100"
+        >
+          本批次有 {{ batchDetail.skipped_item_count }} 项被跳过，常见原因是目标类型未绑定可用凭证，或该项不适用当前批次。
         </div>
       </OpsSectionCard>
 
@@ -278,26 +288,36 @@
                 <th class="whitespace-nowrap px-4 py-3">Item Key</th>
                 <th class="whitespace-nowrap px-4 py-3">检查项</th>
                 <th class="whitespace-nowrap px-4 py-3">目标</th>
-                <th class="whitespace-nowrap px-4 py-3">端口</th>
                 <th class="whitespace-nowrap px-4 py-3">状态</th>
                 <th class="whitespace-nowrap px-4 py-3">结果</th>
+                <th class="whitespace-nowrap px-4 py-3">事实数</th>
                 <th class="whitespace-nowrap px-4 py-3">消息</th>
+                <th class="whitespace-nowrap px-4 py-3">操作</th>
               </tr>
             </thead>
             <tbody>
-              <tr v-for="item in items" :key="item.id" class="border-t border-outline-variant/30 transition-colors hover:bg-surface-container-high">
+              <tr
+                v-for="item in items"
+                :key="item.id"
+                class="cursor-pointer border-t border-outline-variant/30 transition-colors hover:bg-surface-container-high"
+                :class="selectedItemId === item.id ? 'bg-surface-container-high' : ''"
+                @click="selectItem(item)"
+              >
                 <td class="whitespace-nowrap px-4 py-3 font-mono text-xs max-w-[200px] truncate" :title="item.item_key">{{ item.item_key }}</td>
                 <td class="whitespace-nowrap px-4 py-3">{{ item.check_code }}</td>
                 <td class="whitespace-nowrap px-4 py-3">{{ item.target_host }}:{{ item.target_port }}</td>
-                <td class="whitespace-nowrap px-4 py-3">{{ item.target_port }}</td>
                 <td class="whitespace-nowrap px-4 py-3">
                   <span
                     class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium"
                     :class="getItemStatusBadgeClass(item.status)"
-                  >{{ item.status }}</span>
+                  >{{ formatItemStatusLabel(item.status) }}</span>
                 </td>
-                <td class="whitespace-nowrap px-4 py-3">{{ item.result_status || item.candidate_state || '-' }}</td>
-                <td class="whitespace-nowrap px-4 py-3 max-w-[200px] truncate text-xs" :title="item.result_message || ''">{{ item.result_message || '-' }}</td>
+                <td class="whitespace-nowrap px-4 py-3">{{ formatItemResult(item) }}</td>
+                <td class="whitespace-nowrap px-4 py-3">{{ getItemFactsCount(item) }}</td>
+                <td class="max-w-[200px] truncate px-4 py-3 text-xs" :title="formatItemMessage(item)">{{ formatItemMessage(item) }}</td>
+                <td class="whitespace-nowrap px-4 py-3">
+                  <button class="text-xs text-primary transition-colors hover:text-primary/80" @click.stop="selectItem(item)">详情</button>
+                </td>
               </tr>
             </tbody>
           </table>
@@ -305,8 +325,7 @@
         <OpsEmptyState v-else state="empty" title="暂无执行项" description="选择状态或检查项筛选" />
       </OpsSectionCard>
 
-      <!-- Change Proposals -->
-      <OpsSectionCard title="变更建议" icon="rule">
+      <OpsSectionCard v-if="batchDetail && (batchDetail.run_type === 'port_calibration' || batchProposals.length > 0)" title="变更建议" icon="rule">
         <OpsEmptyState v-if="proposalsLoading" state="loading" title="正在加载变更建议" description="请稍候。" />
         <OpsEmptyState v-else-if="proposalsError" state="error" title="变更建议加载失败" :description="proposalsError" />
         <OpsEmptyState v-else-if="!batchProposals.length" state="empty" title="暂无待处理建议" description="端口校准后若识别到可疑漂移或端口补齐场景，会在此生成建议。" />
@@ -349,6 +368,49 @@
           </table>
         </div>
       </OpsSectionCard>
+
+      <OpsSectionCard v-if="selectedItem" title="执行项详情" icon="description">
+        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div class="field-card">
+            <div class="field-label">状态</div>
+            <div class="field-value">{{ formatItemStatusLabel(selectedItem.status) }}</div>
+          </div>
+          <div class="field-card">
+            <div class="field-label">结果</div>
+            <div class="field-value">{{ formatItemResult(selectedItem) }}</div>
+          </div>
+          <div class="field-card">
+            <div class="field-label">消息</div>
+            <div class="field-value truncate">{{ formatItemMessage(selectedItem) }}</div>
+          </div>
+          <div class="field-card">
+            <div class="field-label">事实数</div>
+            <div class="field-value">{{ getItemFactsCount(selectedItem) }}</div>
+          </div>
+        </div>
+
+        <div class="mt-4 grid gap-4 xl:grid-cols-2">
+          <div class="rounded-2xl border border-outline-variant/40 bg-surface-container-high/60 p-4">
+            <div class="mb-3 text-sm font-medium text-on-surface">事实列表</div>
+            <div v-if="selectedFacts.length > 0" class="space-y-2">
+              <div
+                v-for="fact in selectedFacts"
+                :key="fact.fact_key"
+                class="rounded-xl border border-outline-variant/30 bg-surface-container px-3 py-2 text-sm"
+              >
+                <div class="font-mono text-xs text-primary">{{ fact.fact_key }}</div>
+                <div class="mt-1 break-words text-on-surface-variant">{{ formatDisplayValue(fact.fact_value) }}</div>
+              </div>
+            </div>
+            <OpsEmptyState v-else state="empty" title="暂无事实内容" description="该项可能是跳过或未采集到 facts。" />
+          </div>
+
+          <div class="rounded-2xl border border-outline-variant/40 bg-surface-container-high/60 p-4">
+            <div class="mb-3 text-sm font-medium text-on-surface">原始返回</div>
+            <pre class="max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-surface-container px-3 py-2 text-xs text-on-surface-variant">{{ formatJson(selectedItem.raw_result) }}</pre>
+          </div>
+        </div>
+      </OpsSectionCard>
     </div>
   </OpsPage>
 </template>
@@ -379,11 +441,16 @@ const dbTypes = ref<DbTypeRow[]>([])
 const batchProposals = ref<AssetChangeProposalRow[]>([])
 const proposalsLoading = ref(false)
 const proposalsError = ref('')
+const selectedItemId = ref<number | null>(null)
 
 const checkCodeOptions = [
   { value: 'DB_PORT_REACHABILITY', label: 'DB 端口连通性' },
   { value: 'SSH_PORT_REACHABILITY', label: 'SSH 端口连通性' },
   { value: 'PORT_CANDIDATE_REACHABILITY', label: '候选端口探测' },
+  { value: 'DB_BASIC_FACT_COLLECTION', label: 'DB 基础事实采集' },
+  { value: 'DB_VERSION_FACT_COLLECTION', label: 'DB 版本事实采集' },
+  { value: 'DB_ROLE_FACT_COLLECTION', label: 'DB 角色事实采集' },
+  { value: 'OS_BASIC_FACT_COLLECTION', label: 'OS 基础事实采集' },
 ]
 
 const form = reactive({
@@ -413,6 +480,12 @@ const successRateClass = computed(() => {
   return 'text-red-400'
 })
 
+const selectedItem = computed(() => items.value.find((item) => item.id === selectedItemId.value) || null)
+const selectedFacts = computed(() => {
+  const facts = selectedItem.value?.raw_result?.facts
+  return Array.isArray(facts) ? facts : []
+})
+
 function formatTime(val: any): string {
   return val ? formatInTz(val) : '-'
 }
@@ -421,6 +494,14 @@ function formatDisplayValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)
   return String(value)
+}
+
+function formatJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, null, 2)
+  } catch {
+    return String(value)
+  }
 }
 
 // ── Status badge helpers ────────────────────────────────────────────────
@@ -453,9 +534,43 @@ function getItemStatusBadgeClass(status: string | null | undefined): string {
   const s = (status || '').toLowerCase()
   if (s === 'success') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
   if (s === 'failed' || s === 'timeout') return 'border-red-400/30 bg-red-400/10 text-red-200'
+  if (s === 'skipped') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
   if (s === 'running') return 'border-sky-400/30 bg-sky-400/10 text-sky-200'
   if (s === 'pending') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
   return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
+}
+
+function formatItemStatusLabel(status: string | null | undefined): string {
+  const s = (status || '').toLowerCase()
+  if (s === 'success') return '成功'
+  if (s === 'failed') return '失败'
+  if (s === 'skipped') return '跳过'
+  if (s === 'pending') return '等待中'
+  if (s === 'running') return '执行中'
+  if (s === 'timeout') return '超时'
+  return status || '-'
+}
+
+function formatItemResult(item: BatchRunItemRow): string {
+  const raw = item.raw_result || {}
+  if ((item.status || '').toLowerCase() === 'skipped') {
+    return raw.skip_reason || item.result_message || 'skipped'
+  }
+  return item.result_status || item.candidate_state || raw.error_code || item.status
+}
+
+function formatItemMessage(item: BatchRunItemRow): string {
+  const raw = item.raw_result || {}
+  return item.result_message || raw.skip_reason || raw.error_message || '-'
+}
+
+function getItemFactsCount(item: BatchRunItemRow): number {
+  const facts = item.raw_result?.facts
+  return Array.isArray(facts) ? facts.length : 0
+}
+
+function selectItem(item: BatchRunItemRow) {
+  selectedItemId.value = item.id
 }
 
 function formatProposalStatusLabel(status: string | null | undefined): string {
@@ -551,8 +666,15 @@ async function loadItems() {
     if (itemFilters.status) params.status = itemFilters.status
     if (itemFilters.check_code) params.check_code = itemFilters.check_code
     items.value = await assetsApi.listBatchItems(selectedBatchId.value, params, { suppressErrorToast: true })
+    if (items.value.length > 0) {
+      const current = selectedItem.value
+      selectedItemId.value = current ? current.id : items.value[0].id
+    } else {
+      selectedItemId.value = null
+    }
   } catch {
     items.value = []
+    selectedItemId.value = null
   }
 }
 
