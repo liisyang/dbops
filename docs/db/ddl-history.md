@@ -1049,3 +1049,86 @@ COMMIT;
 ```
 
 - **状态**：已在 10.134.185.85:5432/dbops 执行；DDL 改后重跑验证为 idempotent（全部 `NOTICE: already exists, skipping`，无 ERROR）；`docs/db/schema-snapshot.md` 9 节"需现场确认"中"inspection_result 重名 FK"项可移除（已解决）。
+
+## 5. Phase1→3.4 漏记字段排查
+
+> 2026-06-13 第三轮收尾：通过 `information_schema.columns` 对比仓库 DDL 文件，发现 `inspection_item` 与 `inspection_result` 真表上存在 9 个**仓库无 DDL 来源**的字段（git 全历史 `git log --all -p -- 'backend/db/*.sql'` 无任何 ALTER ADD COLUMN 痕迹）。AI 不擅自 DROP/ALTER，仅记录现状 + 治理建议，待人工确认后由后续 phase 处理。
+
+### 5.1 漏记字段清单
+
+| 表 | 字段 | 类型 | Nullable | Default | 疑似来源 | 与之重叠的有效字段 |
+|---|---|---|---|---|---|---|
+| `inspection_item` | `target_type` | varchar(50) | YES | | V5/phase1 早期设计遗留 | `target_scope` (phase3_4) |
+| `inspection_item` | `threshold_config` | jsonb | NO | `'{}'` | V5 archive `threshold_rule` 概念演化版 | `rule_config` (phase3_4) |
+| `inspection_item` | `status` | varchar(20) | NO | `'enabled'` | V5/phase1 早期设计遗留 | `enabled` (phase3_4) |
+| `inspection_result` | `dispatch_run_id` | bigint | YES | | 疑似 Phase 3.2 batch verify 风格补字段（未沉淀） | — |
+| `inspection_result` | `server_id` | bigint | YES | | 疑似 Phase 3.2 风格补字段，与 `collector_run.server_id` 对齐（未沉淀） | — |
+| `inspection_result` | `db_instance_id` | bigint | YES | | 疑似 Phase 3.2 风格补字段（未沉淀） | — |
+| `inspection_result` | `status` | varchar(30) | YES | | V5 archive `status` 概念遗留 | `result_status` (phase3_4) |
+| `inspection_result` | `actual_value` | jsonb | YES | | V5 archive `result_value` 的 jsonb 版本（疑似） | `result_value` (phase1, text) |
+| `inspection_result` | `details` | text | YES | | V5/phase1 早期设计遗留 | `message` (phase3_4) |
+
+### 5.2 排查依据
+
+```bash
+# 1) 拉真表全字段
+psql -h 10.134.185.85 -p 5432 -U dbops -d dbops -c "
+  SELECT column_name, data_type, is_nullable, column_default
+  FROM information_schema.columns
+  WHERE table_schema='dbops' AND table_name IN ('inspection_item','inspection_result')
+  ORDER BY table_name, ordinal_position;"
+
+# 2) 仓库 DDL 文件检索
+grep -n "threshold_config\|actual_value\|dispatch_run_id" backend/db/*.sql backend/db/archive/*.sql
+# threshold_config / actual_value / status('enabled') / details / target_type / dispatch_run_id：
+#   无任何 ADD COLUMN 命中（dispatch_run_id 仅在 collector_run / collector_run_item 出现）
+
+# 3) git 全历史检索
+git log --all -p -- 'backend/db/*.sql' | grep -B 2 -A 1 "ADD COLUMN.*\(threshold_config\|actual_value\|details\)"
+# 全部为空
+```
+
+### 5.3 治理建议（未来 phase 决策）
+
+按 CLAUDE.md「真实代码优先 + 不确定标注需现场确认」，AI 不自动处理，列出 3 条候选路径供人工选择：
+
+**路径 A：DROP 漏记字段（推荐）** — 如果业务代码确认无引用：
+
+```sql
+-- 需先验证 0 行非默认值数据，再人工执行
+BEGIN;
+SET search_path TO dbops, public;
+
+ALTER TABLE dbops.inspection_item
+    DROP COLUMN IF EXISTS target_type,
+    DROP COLUMN IF EXISTS threshold_config,
+    DROP COLUMN IF EXISTS status;
+
+ALTER TABLE dbops.inspection_result
+    DROP COLUMN IF EXISTS dispatch_run_id,
+    DROP COLUMN IF EXISTS server_id,
+    DROP COLUMN IF EXISTS db_instance_id,
+    DROP COLUMN IF EXISTS status,
+    DROP COLUMN IF EXISTS actual_value,
+    DROP COLUMN IF EXISTS details;
+
+COMMIT;
+```
+
+**路径 B：保留并补 DDL** — 如果业务代码确认有引用（需 grep 验证）：在 `backend/db/dbops_phase1_25_tables.sql` 末尾追加 idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，把这 9 个字段补到 DDL 文件；并在 schema-snapshot.md 7.20 / 7.22 移除"漏记字段"标注。
+
+**路径 C：保留并 deprecate** — 折中方案：保留字段 + 在 ORM model 上加注释 `# DEPRECATED: use rule_config` 等；DDL 文件不补；后续业务慢慢迁移至新字段。
+
+### 5.4 验证 grep 命令（执行前 DBA 务必跑）
+
+```bash
+# 任何漏记字段被 ORM/Service/Schema/前端引用 → 走路径 B 或 C，不能 A
+grep -rE "(threshold_config|actual_value|dispatch_run_id|details|target_type)" \
+  backend/app/ frontend/src/ 2>/dev/null | grep -v "node_modules\|__pycache__\|target_type_id"
+# 当前（2026-06-13）：threshold_config / actual_value / details 均无 ORM 字段；
+# target_type 在 inspection_result 应用代码有用（但那是 phase3_4 有效字段，不是漏记的 inspection_item.target_type）。
+# 待 DBA 复核后再决定路径。
+```
+
+- **状态**：记录中，未执行任何 DDL 变更；DROP 决策需 DBA + 业务方共同确认；后续 phase 3.5 起新任务"漏记字段治理"统一处理。
+

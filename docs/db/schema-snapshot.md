@@ -463,11 +463,16 @@ ORDER BY event_object_table, trigger_name;
 | remark | text | YES | | |
 | created_at | timestamp | YES | now() | |
 | updated_at | timestamp | YES | now() | |
+| target_type | varchar(50) | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；疑似 phase1→3.4 演化过渡字段，与新 `target_scope` 语义重叠；需现场确认 |
+| description | text | YES | | Phase 3.4：描述 |
+| threshold_config | jsonb | NO | '{}'::jsonb | **漏记字段**：真表存在但仓库无 DDL 来源；疑似旧设计阈值字段，与新 `rule_config` 语义重叠；需现场确认 |
+| status | varchar(20) | NO | 'enabled' | **漏记字段**：真表存在但仓库无 DDL 来源；疑似旧设计状态字段，与新 `enabled` boolean 语义重叠；需现场确认 |
 | check_code | varchar(100) | NO | | Phase 3.4：检查项编码（与 collector_check_definition.check_code 对齐） |
 | target_scope | varchar(32) | NO | 'db_instance' | Phase 3.4：目标范围 server/db_instance |
 | enabled | boolean | NO | true | Phase 3.4：是否启用 |
-| description | text | YES | | Phase 3.4：描述 |
 | rule_config | jsonb | NO | '{}'::jsonb | Phase 3.4：规则配置（status_ok/status_abnormal/match 等） |
+
+> **说明**：上表 16 列与 `information_schema.columns` 一致。其中 3 个"漏记字段"在仓库 `.sql` 文件和 git 历史中均无 ALTER 痕迹，疑似手工 ALTER 引入，详见 [ddl-history.md §5](./ddl-history.md#5-phase14-漏记字段排查) 治理建议。
 
 ### 7.21 inspection_task
 
@@ -509,14 +514,22 @@ ORDER BY event_object_table, trigger_name;
 | extra_attrs | jsonb | YES | '{}'::jsonb | 巡检结果扩展信息 |
 | created_at | timestamp | YES | now() | |
 | batch_run_id | bigint | YES | | Phase 3.4：FK → collector_batch_run |
-| collector_run_id | bigint | YES | | Phase 3.4：FK → collector_run |
+| dispatch_run_id | bigint | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；疑似 Phase 3.2 batch verify 引入风格的补字段，未沉淀；需现场确认 |
 | collector_run_item_id | bigint | YES | | Phase 3.4：FK → collector_run_item |
+| server_id | bigint | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；疑似 Phase 3.2 风格补字段（与 collector_run.server_id 对齐），未沉淀；需现场确认 |
+| db_instance_id | bigint | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；疑似 Phase 3.2 风格补字段，未沉淀；需现场确认 |
+| status | varchar(30) | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；与新 `result_status` 语义重叠（V5 早期设计字段）；需现场确认 |
+| actual_value | jsonb | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；与 `result_value` 语义重叠（疑似 jsonb 版本）；需现场确认 |
+| details | text | YES | | **漏记字段**：真表存在但仓库无 DDL 来源；与新 `message` 语义重叠；需现场确认 |
+| updated_at | timestamp | YES | CURRENT_TIMESTAMP | Phase 3.4：自动更新 |
+| collector_run_id | bigint | YES | | Phase 3.4：FK → collector_run |
 | result_code | varchar(100) | NO | | Phase 3.4：结果编码（与 item_code 对齐） |
 | severity | varchar(20) | NO | 'warning' | Phase 3.4：info/warning/critical |
 | message | text | YES | | Phase 3.4：结果描述 |
 | evidence | jsonb | NO | '{}'::jsonb | Phase 3.4：证据数据 |
 | detected_at | timestamp | NO | now() | Phase 3.4：检测时间 |
-| updated_at | timestamp | YES | CURRENT_TIMESTAMP | Phase 3.4：自动更新 |
+
+> **说明**：上表 24 列与 `information_schema.columns` 一致。其中 6 个"漏记字段"在仓库 `.sql` 文件和 git 历史中均无 ALTER 痕迹，疑似手工 ALTER 引入，详见 [ddl-history.md §5](./ddl-history.md#5-phase14-漏记字段排查) 治理建议。
 
 ### 7.23 biz_score_rule
 
@@ -896,3 +909,8 @@ ORDER BY event_object_table, trigger_name;
   - `inspection_item` / `inspection_task` / `inspection_result` 扩展字段
   - 收尾 DROP 旧约束 `chk_inspection_result_target`（已确认历史数据 0 行 `business_system`/`cluster` 旧值）
   - 收尾清理 3 对重名 FK（`fk_inspection_result_batch_run` / `fk_inspection_result_collector_run_item` / `fk_inspection_task_batch_run` → 改用 PG 默认名 `<table>_<col>_fkey`，DDL 已同步改写为 idempotent；详见 `docs/db/ddl-history.md` 4.4.1）
+- 2026-06-13 **phase1→3.4 漏记字段排查**：`inspection_item` 真表 16 列、`inspection_result` 真表 24 列，其中 9 个字段在仓库 `.sql` 文件和 git 全历史中均无 ALTER 痕迹（疑似手工 ALTER 引入）：
+  - `inspection_item`：`target_type` / `threshold_config` / `status`（3 个）
+  - `inspection_result`：`dispatch_run_id` / `server_id` / `db_instance_id` / `status` / `actual_value` / `details`（6 个）
+  - 大部分与 phase3_4 新设计字段（`target_scope` / `rule_config` / `enabled` / `result_status` / `result_value` / `message`）语义重叠，疑似 V5/phase1 早期遗留或 phase3_2 风格补字段未沉淀
+  - 治理决策（DROP/补 DDL/deprecate）详见 [`ddl-history.md §5`](./ddl-history.md#5-phase14-漏记字段排查)；AI 不擅自处理，需 DBA + 业务方确认
