@@ -1,7 +1,7 @@
 # DB DDL History / Baseline
 
 > 文档状态：AI 自动维护
-> 最近更新：2026-05-21
+> 最近更新：2026-06-13
 > 依据来源：真实代码 / SQL 文件 / ORM Model / Service 查询
 > 注意：本文件只记录 DDL 和结构 baseline，不记录业务数据。
 
@@ -976,3 +976,47 @@ ALTER TABLE IF EXISTS dbops.collector_run_item
 DROP TABLE IF EXISTS dbops.port_profile;
 COMMIT;
 ```
+
+### 4.4 2026-06-13 — Phase 3.4 基础巡检中心
+
+- **变更类型**：增量 DDL（可重复执行，`IF NOT EXISTS`）
+- **DDL 文件**：`backend/db/dbops_phase3_4.sql`
+- **变更摘要**：
+  1. 新增 `inspection_schedule`（周期计划）
+  2. 扩展 `inspection_item`：`check_code/target_scope/severity/enabled/rule_config` 等字段
+  3. 扩展 `inspection_task`：`batch_run_id/schedule_id/run_type/check_codes/item_codes/asset_ids` 等字段（status CHECK 同步增加 `partial_success`）
+  4. 扩展 `inspection_result`：`result_code/result_status/severity/evidence/collector_run*` 等字段
+  5. 初始化首批 8 个基础巡检项（CONNECTIVITY_PORT_REACHABLE 等）
+  6. **收尾**：`DROP CONSTRAINT chk_inspection_result_target`（旧约束 target_type 集合含 `business_system`/`cluster`/`db_instance`/`server`，与 Phase 3.4 收窄后的 `chk_inspection_result_target_type` 共存冗余；DROP 不影响历史数据，应用层自 Phase 3.4 起只写 `server`/`db_instance`）
+
+- **回滚建议（需人工确认后执行）**：
+
+```sql
+BEGIN;
+SET search_path TO dbops, public;
+ALTER TABLE IF EXISTS dbops.inspection_result
+    DROP COLUMN IF EXISTS batch_run_id,
+    DROP COLUMN IF EXISTS collector_run_id,
+    DROP COLUMN IF EXISTS collector_run_item_id,
+    DROP COLUMN IF EXISTS result_code,
+    DROP COLUMN IF EXISTS message,
+    DROP COLUMN IF EXISTS evidence,
+    DROP COLUMN IF EXISTS detected_at;
+ALTER TABLE IF EXISTS dbops.inspection_task
+    DROP COLUMN IF EXISTS schedule_id,
+    DROP COLUMN IF EXISTS batch_run_id,
+    DROP COLUMN IF EXISTS run_type,
+    DROP COLUMN IF EXISTS check_codes,
+    DROP COLUMN IF EXISTS item_codes,
+    DROP COLUMN IF EXISTS asset_ids,
+    DROP COLUMN IF EXISTS request_payload;
+ALTER TABLE IF EXISTS dbops.inspection_item
+    DROP COLUMN IF EXISTS check_code,
+    DROP COLUMN IF EXISTS target_scope,
+    DROP COLUMN IF EXISTS enabled,
+    DROP COLUMN IF EXISTS rule_config;
+DROP TABLE IF EXISTS dbops.inspection_schedule;
+COMMIT;
+```
+
+- **状态**：DDL 脚本已入库；目标环境是否已执行需现场确认。

@@ -115,6 +115,18 @@ class CollectorCallbackItem(BaseModel):
     raw_result: dict[str, Any] = Field(default_factory=dict)
 
 
+class CollectorInspectionCallbackItem(BaseModel):
+    item_code: str = Field(min_length=1, max_length=100)
+    result_status: Literal["normal", "abnormal", "warning", "unknown"]
+    target_scope: Literal["db_instance", "server"]
+    asset_id: int
+    severity: Literal["info", "warning", "critical"] = "warning"
+    result_code: Optional[str] = None
+    check_code: Optional[str] = None
+    message: Optional[str] = None
+    evidence: dict[str, Any] = Field(default_factory=dict)
+
+
 class CollectorCallbackRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     run_id: str = Field(min_length=1)
@@ -122,6 +134,7 @@ class CollectorCallbackRequest(BaseModel):
     checked_by: Optional[str] = "awx"
     checked_at: Optional[datetime] = None
     items: list[CollectorCallbackItem] | None = None
+    inspection_results: list[CollectorInspectionCallbackItem] | None = None
 
     # 兼容旧单结果协议：新 callback 未到位时仍可先回写单条结果。
     asset_id: Optional[int] = None

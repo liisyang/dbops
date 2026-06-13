@@ -89,3 +89,23 @@ export function formatContactTypeLabel(contactType: string): string {
   if (contactType === 'DBA_OWNER') return 'DBA负责人'
   return contactType || '联系人'
 }
+
+/**
+ * Inspection task/result status badge classes.
+ * Centralizes the palette so phase-3.4 inspection views stay consistent.
+ */
+export function getInspectionStatusClass(status: Status): string {
+  const normalized = (status || '').trim().toLowerCase()
+  if (normalized === 'success') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+  if (normalized === 'partial_success') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+  if (normalized === 'failed' || normalized === 'callback_failed' || normalized === 'timeout') {
+    return 'border-red-400/30 bg-red-400/10 text-red-200'
+  }
+  if (normalized === 'running' || normalized === 'launched' || normalized === 'pending') {
+    return 'border-sky-400/30 bg-sky-400/10 text-sky-200'
+  }
+  if (normalized === 'cancelled' || normalized === 'canceled') {
+    return 'border-slate-400/30 bg-slate-400/10 text-slate-200'
+  }
+  return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
+}

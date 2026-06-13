@@ -1,7 +1,7 @@
 # 交付看板
 
 > 文档状态：已校准
-> 最近校准：2026-06-11
+> 最近校准：2026-06-13
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -20,7 +20,8 @@
 4. **异步运维框架已就绪但暂缓启用**：Celery + Redis + WebSocket 架构完整，当前阶段有意不启动 worker。
 5. **AWX 资产校验已进入 Phase 3.1**：在原 run/item/callback 底座上新增 `port_profile`、`run_type=port_calibration`、端点候选探测、`asset_change_proposal` 审批/应用流程（仅人工 apply 后更新正式端口字段）；后续 refactor 已将候选收敛到 `host+port+protocol`，并支持 `include_related_server`。
 6. **Phase 3.3A — DB 事实采集已完成收尾**：凭证中心（Profiles + Bindings）、CredentialResolverService、CheckItemBuilder、credential_group_hash 分发、AwxService 凭证注入、EE Collector Client、AWX Playbook 角色路由、Callback Fact Snapshots + Drift Detection、前端批量校验扩展均已实现。最新全资产批次（batch_run 91）中 2 台 SQL Server 的 `DB_BASIC/DB_VERSION/DB_ROLE` 全成功；Oracle 已进入调度执行，不再丢失 item，但 3 项返回 `ORA-01017`（凭证内容错误）。
-7. **扩展模块待排期**：备份恢复、SQL 分析、巡检健康、审计安全、知识库共多个前端页面，在 Phase 3.3A 收尾后统一排期。
+7. **Phase 3.4 — 基础巡检中心已落地**：新增巡检项管理、巡检任务创建/列表、巡检报告查询；`run_type=inspection` 复用 `CollectorBatchRun` + AWX 分发 + callback 闭环，callback 支持 `inspection_results` 扩展并写入 `inspection_result`。
+8. **扩展模块待排期**：备份恢复、SQL 分析、健康检查页、审计安全、知识库共多个前端页面仍待后续排期。
 
 ## 3. 当前阻塞项
 
@@ -28,7 +29,7 @@
 |---|---|---|---|---|
 | P0 | SECRET_KEY 和数据库密码在代码中有硬编码默认值 | 部署到生产时存在安全风险 | 生产部署前通过环境变量覆盖 | `backend/app/config.py:10,14` |
 | P0 | SSH_PASSWORD 未配置 | 无法通过密码方式 SSH 连接 | 确认是否仅使用密钥认证 | `.env` 中 SSH_PASSWORD 为空 |
-| P1 | Oracle 事实采集凭证认证失败（ORA-01017） | Oracle 三类事实项均失败 | 修正 AWX 凭证 `cred-db-oracle-ro-prod(id=6)` 的用户名/密码（及 service_name）后回归 | batch_run `91` + AWX job `259` |
+| ~~P1~~ | ~~Oracle 事实采集凭证认证失败（ORA-01017）~~ | ~~Oracle 三类事实项均失败~~ | ✅ 已修复：AWX 凭证 `cred-db-oracle-ro-prod(id=6)` 已修正 | batch_run `91` + AWX job `259` |
 | P1 | 16 个前端页面无后端支撑 | 用户点击后看到空页面 | 核心资产管理收尾后排期 | `frontend/src/router/index.ts` |
 
 ## 4. 部分完成事项
@@ -38,9 +39,9 @@
 | 异步账号操作 | API 层完整 + Celery task 定义 + WebSocket 推送 + TaskState Redis 存储 | Celery worker 有意暂缓启用 | 后续需要时恢复 `backend/run.py` 中 worker 启动代码 | `backend/run.py:63` |
 | 审计日志 | 前端 3 个页面已就绪 | 后端返回空数组，无数据源 | 核心资产管理收尾后实现 | `backend/app/api/logs.py:15` |
 | AWX 资产校验闭环 | `collector/runs` 主入口 + AWX service + collector service + 实例详情“校验资产/端口校准”入口已完成；callback URL 未显式配置时自动回退到当前请求基址 | Phase 3.1 已支持端口画像驱动候选探测、endpoint 元数据回写、proposal approve/reject/apply；候选失败会通过 `candidate_state` 区分，不会直接当成资产 missing；禁止自动修改正式资产字段 | 在开发库执行 `backend/db/dbops_port_profile_phase3_1.sql` 并联调 AWX callback | `backend/app/api/collector.py`, `backend/app/services/collector_service.py`, `backend/app/services/port_calibration_service.py`, `backend/app/services/asset_proposal_service.py`, `frontend/src/views/InstanceDetail.vue` |
-| 巡检模块 | InspectionItem/Task/Result 表已定义 | 无 API，前端占位 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:371-393` |
+| 巡检模块 | Inspection API + Service + 前端 Items/Tasks/Reports 已实现，复用 batch collector 闭环 | 健康检查页仍为占位 | 后续补充健康检查专项 API 与规则 | `backend/app/api/inspection.py` + `backend/app/services/inspection_service.py` + `frontend/src/views/inspection/{Items,Tasks,Reports}.vue` |
 | 业务评分 | BizScoreRule/Result/Detail 表已定义 | 无 API，无前端页面 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:395-416` |
-| 凭证管理 | Profiles + Bindings 页面、后端 API、解析与分发链路已落地 | Oracle 凭证内容需修正后再做多库回归 | 先修正 AWX Oracle 凭证，再跑全资产批次 | `frontend/src/views/credentials/*.vue` + `backend/app/api/collector.py` + `backend/app/services/credential_resolver_service.py` |
+| 凭证管理 | Profiles + Bindings 页面、后端 API、解析与分发链路已落地 | Oracle 凭证已修正，待全资产回归 | 对 Oracle 资产重新触发 fact_collection batch run | `frontend/src/views/credentials/*.vue` + `backend/app/api/collector.py` + `backend/app/services/credential_resolver_service.py` |
 
 ## 5. 下个迭代建议
 
@@ -53,6 +54,7 @@
 | 5 | Phase 10: 单元测试补全 | Phase 3.3A 测试未做，需补 CredentialResolverService、CheckItemBuilder、AwxService 凭证注入、Callback Fact Snapshot、Drift Detection 的 pytest | `cd backend && pytest tests/` |
 | 6 | AWX 多网段执行节点扩展 | 当前只有 IG_LOCAL_LH_TEST 一个 instance group，生产需按网段分组分发 | 需现场确认各网段执行节点 IP 和 SSH 免密配置 |
 | 7 | Phase 3.3B: PostgreSQL / MySQL 联调 + Oracle 凭证修复回归 | Oracle 已进入执行链路但当前被凭证错误阻塞；PG/MySQL 仍需实测 | 修正 Oracle 凭证后对 Oracle/PG/MySQL 各触发 batch run 并核验 item 明细 |
+| 8 | Phase 3.4 回归测试补齐 | 新增 inspection API/页面/callback 扩展，需要在联调环境走完整巡检批次回归 | `bash scripts/ai/verify.sh` + 巡检任务端到端执行 |
 
 ## 6. Phase 3.2 交付物
 

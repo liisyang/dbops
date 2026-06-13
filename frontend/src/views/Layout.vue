@@ -178,6 +178,8 @@ const menuItems = [
     icon: 'health_and_safety',
     label: '巡检与健康',
     children: [
+      { icon: 'rule', label: '巡检项', path: '/inspection/items' },
+      { icon: 'playlist_add_check', label: '巡检任务', path: '/inspection/tasks' },
       { icon: 'description', label: '巡检报告', path: '/inspection/reports' },
       { icon: 'favorite', label: '健康检查', path: '/inspection/health' },
     ]

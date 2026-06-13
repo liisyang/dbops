@@ -1,7 +1,7 @@
 # 前端开发约定
 
 > 文档状态：已校准
-> 最近校准：2026-05-22
+> 最近校准：2026-06-13
 > 依据来源：frontend/src 全部源码
 
 ## 1. 技术栈
@@ -67,6 +67,7 @@ src/
 4. 详情页使用 `OpsSectionCard` 分块展示信息。
 5. 实例详情页（`InstanceDetail.vue`）已扩展"资产校验状态""最近执行记录""执行项明细""端点状态""变更建议"卡片；支持"校验资产"和"端口校准"双入口，其中端口校准调用 `POST /api/v1/collector/runs`（`run_type=port_calibration`），默认会带上 `include_related_server=true`，执行项会展示独立 `candidate_state` 列，并提供 proposal 同意/拒绝/应用操作；资产校验状态卡片提供手动刷新按钮，且 submitLaunch/launchPortCalibration 成功后会自动重新拉取实例详情以展示最新 trust_status/reachability_status 等字段。状态类字段（trust/reachability/run/result/endpoint/proposal）统一使用条件 Badge 样式；时间字段统一调用本地 `formatTime()`（内部走 `formatInTz`）。
 6. 批量校验页 `BatchVerify.vue` 会优先展示结果摘要、分发明细、执行项明细和单项详情；执行项详情区直接渲染 `raw_result.facts` 和 `raw_result` 原文，跳过项会显示计数和原因提示，变更建议仅在相关批次中展示。
+7. 巡检中心页面遵循同一 Ops 结构：`inspection/Items.vue`（项管理）使用 `OpsFilterBar + OpsTableShell + OpsModal`，`inspection/Tasks.vue`（任务创建/列表）使用 `OpsSectionCard` 分段表单 + 列表表格，`inspection/Reports.vue`（报告）使用筛选卡片 + 结果摘要 + 结果明细表。
 
 **代码依据：** `src/views/Servers.vue:2-6` (页面结构), `src/views/Instances.vue:2-6`, `src/views/Assets.vue:2-6`。
 
@@ -93,8 +94,9 @@ src/
 1. 弹窗使用 `<OpsModal>`，支持 `size` 属性控制宽度（sm/md/lg/xl）。
 2. 抽屉使用 `<OpsDrawer>`，从右侧滑入。
 3. 弹窗/抽屉均通过 `open` prop 控制显隐，`@close` 事件关闭。
+4. 危险/确认型弹窗使用 `<OpsConfirmDialog>`（基于 `OpsModal` + danger 按钮），事件为 `@close`（取消）和 `@confirm`（确认），props：`open`/`title?`/`subtitle?`/`message`/`confirmLabel?`/`isLoading?`。取消按钮文案固定为"取消"，确认按钮文案由 `confirmLabel` 控制（默认"确认"）。
 
-**代码依据：** `src/components/ops/OpsModal.vue`, `src/components/ops/OpsDrawer.vue`。
+**代码依据：** `src/components/ops/OpsModal.vue`, `src/components/ops/OpsDrawer.vue`, `src/components/ops/OpsConfirmDialog.vue`。
 
 ### 3.6 空态与加载态
 
@@ -115,10 +117,10 @@ src/
 ### 3.8 状态展示
 
 1. 状态 Badge 使用条件 class 绑定，不硬编码颜色。
-2. **状态格式化函数已统一**：使用 `useStatusFormatters` composable 中的 `formatStatusLabel()`、`getStatusBadgeClass()`、`formatStatusTransition()`、`formatContactTypeLabel()`。
+2. **状态格式化函数已统一**：使用 `useStatusFormatters` composable 中的 `formatStatusLabel()`、`getStatusBadgeClass()`、`formatStatusTransition()`、`formatContactTypeLabel()`、`getInspectionStatusClass()`。其中 `getInspectionStatusClass()` 是 Phase 3.4 巡检中心专用色板（覆盖 `success`/`partial_success`/`failed|callback_failed|timeout`/`running|launched|pending`/`cancelled`/默认），inspection/Tasks.vue 与 inspection/Reports.vue 必须使用它，不得自行写条件 class。
 3. 所有资产管理视图（Assets.vue、BusinessSystemDetail.vue 等）均使用统一的状态展示逻辑。
 
-**代码依据：** `src/composables/useStatusFormatters.ts`, `src/views/Assets.vue:200-201`, `src/views/BusinessSystemDetail.vue:375-377`.
+**代码依据：** `src/composables/useStatusFormatters.ts`, `src/views/Assets.vue:200-201`, `src/views/BusinessSystemDetail.vue:375-377`, `src/views/inspection/Tasks.vue`（任务状态列）、`src/views/inspection/Reports.vue`（结果状态列）。
 
 ### 3.9 图标
 
@@ -163,7 +165,7 @@ src/
 | 列显隐管理 | `useColumnVisibility` | `src/composables/useColumnVisibility.ts` |
 | 页面统计指标 | `useAssetPageMetrics` + `assetPageMetric` | `src/composables/useAssetPageMetrics.ts` |
 | 图表分组统计 | `useAssetStatBuckets` | `src/composables/useAssetStatBuckets.ts` |
-| 状态展示格式化 | `useStatusFormatters` (formatStatusLabel / getStatusBadgeClass / formatStatusTransition / formatContactTypeLabel) | `src/composables/useStatusFormatters.ts` |
+| 状态展示格式化 | `useStatusFormatters` (formatStatusLabel / getStatusBadgeClass / formatStatusTransition / formatContactTypeLabel / getInspectionStatusClass) | `src/composables/useStatusFormatters.ts` |
 | 用户状态 | `useUserStore` | `src/stores/user.ts` |
 | 时间格式化 | `$formatTime` (全局) | `src/main.ts:36-38` |
 | 前端筛选逻辑 | 参考 Servers.vue / Instances.vue 的 draft+applied 双变量模式 | — |

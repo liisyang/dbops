@@ -172,6 +172,18 @@ const routes: RouteRecordRaw[] = [
       },
       // 巡检与健康
       {
+        path: 'inspection/items',
+        name: 'InspectionItems',
+        component: () => import('@/views/inspection/Items.vue'),
+        meta: { title: '巡检项', parent: '巡检与健康' }
+      },
+      {
+        path: 'inspection/tasks',
+        name: 'InspectionTasks',
+        component: () => import('@/views/inspection/Tasks.vue'),
+        meta: { title: '巡检任务', parent: '巡检与健康' }
+      },
+      {
         path: 'inspection/reports',
         name: 'InspectionReports',
         component: () => import('@/views/inspection/Reports.vue'),

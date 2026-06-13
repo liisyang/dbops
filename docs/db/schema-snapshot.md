@@ -1,7 +1,7 @@
 # DB Schema Snapshot
 
 > 文档状态：AI 自动生成（基于实时数据库元数据查询）
-> 最近扫描：2026-06-06
+> 最近扫描：2026-06-13
 > 依据来源：PostgreSQL 17.9 @ 10.134.185.85:5432/dbops — 只读元数据 SQL 查询
 > 注意：本文件只记录数据库结构元数据，不记录业务数据。
 
@@ -22,6 +22,14 @@ PostgreSQL 17.9 on x86_64-pc-linux-gnu, compiled by gcc (GCC) 11.5.0 20240719 (R
 5. 不记录业务数据。
 6. 不记录账号、密码、连接串、Token。
 7. 字段注释如可能包含敏感信息，默认不记录。
+
+## 3.1 增量变更提示
+
+- **Phase 3.4** `backend/db/dbops_phase3_4.sql` 已于 2026-06-13 在 10.134.185.85:5432/dbops 执行（idempotent，零错误）：
+  - 新表：`inspection_schedule`（10 字段 + PK + UNIQUE + 1 FK + 1 触发器）
+  - `inspection_item`：`check_code`/`target_scope`/`severity`/`enabled`/`description`/`rule_config` 等字段 + `chk_inspection_item_target_scope` CHECK
+  - `inspection_task`：`schedule_id`/`batch_run_id`/`run_type`/`target_scope`/`check_codes`/`item_codes`/`asset_ids`/`request_payload`/`created_by`/`error_message`/`started_at`/`finished_at` + `chk_inspection_task_target_scope` CHECK + 更新 `chk_inspection_task_status` 增加 `partial_success`
+  - `inspection_result`：`batch_run_id`/`collector_run_id`/`collector_run_item_id`/`result_code`/`result_status`/`severity`/`message`/`evidence`/`detected_at` + `chk_inspection_result_target_type` CHECK（收窄到 `server`/`db_instance`）+ 收尾 DROP 旧 `chk_inspection_result_target`（历史数据已校验 0 行）
 
 ## 4. 本次执行的只读元数据 SQL
 
@@ -96,7 +104,7 @@ ORDER BY event_object_table, trigger_name;
 
 | Schema | 说明 |
 |---|---|
-| dbops | DBOps 主业务 schema（32 表 + 4 视图 + 1 自定义函数 + 18 触发器 + 31 序列） |
+| dbops | DBOps 主业务 schema（33 表 + 4 视图 + 1 自定义函数 + 19 触发器 + 32 序列） |
 | public | PostgreSQL 默认 schema |
 
 ## 6. 表清单
@@ -125,6 +133,7 @@ ORDER BY event_object_table, trigger_name;
 | dbops | inspection_item | BASE TABLE | 巡检项定义表 |
 | dbops | inspection_task | BASE TABLE | 巡检任务表 |
 | dbops | inspection_result | BASE TABLE | 巡检结果表 |
+| dbops | inspection_schedule | BASE TABLE | 巡检周期计划表（Phase 3.4 新增） |
 | dbops | biz_score_rule | BASE TABLE | 业务架构评分规则表 |
 | dbops | biz_score_result | BASE TABLE | 业务架构评分结果表 |
 | dbops | biz_score_result_detail | BASE TABLE | 业务架构评分扣分明细表 |
@@ -454,6 +463,11 @@ ORDER BY event_object_table, trigger_name;
 | remark | text | YES | | |
 | created_at | timestamp | YES | now() | |
 | updated_at | timestamp | YES | now() | |
+| check_code | varchar(100) | NO | | Phase 3.4：检查项编码（与 collector_check_definition.check_code 对齐） |
+| target_scope | varchar(32) | NO | 'db_instance' | Phase 3.4：目标范围 server/db_instance |
+| enabled | boolean | NO | true | Phase 3.4：是否启用 |
+| description | text | YES | | Phase 3.4：描述 |
+| rule_config | jsonb | NO | '{}'::jsonb | Phase 3.4：规则配置（status_ok/status_abnormal/match 等） |
 
 ### 7.21 inspection_task
 
@@ -462,14 +476,24 @@ ORDER BY event_object_table, trigger_name;
 | id | bigint (BIGSERIAL) | NO | nextval | |
 | task_code | varchar(100) | NO | | |
 | task_name | varchar(200) | NO | | |
-| scope_type | varchar(50) | YES | | 巡检范围类型 |
+| scope_type | varchar(50) | YES | | 巡检范围类型（保留字段，Phase 3.4 改用 target_scope） |
 | scope_id | bigint | YES | | 巡检范围ID，根据scope_type解释 |
-| status | varchar(20) | YES | 'pending' | |
+| status | varchar(20) | YES | 'pending' | 状态机值含 partial_success（Phase 3.4） |
 | started_at | timestamp | YES | | |
 | finished_at | timestamp | YES | | |
 | remark | text | YES | | |
 | created_at | timestamp | YES | now() | |
 | updated_at | timestamp | YES | now() | |
+| schedule_id | bigint | YES | | Phase 3.4：所属周期计划（FK → inspection_schedule） |
+| batch_run_id | bigint | YES | | Phase 3.4：对应 collector_batch_run（FK → collector_batch_run） |
+| run_type | varchar(50) | NO | 'inspection' | Phase 3.4：默认 inspection |
+| target_scope | varchar(32) | NO | 'db_instance' | Phase 3.4：目标范围 server/db_instance |
+| check_codes | jsonb | NO | '[]'::jsonb | Phase 3.4：实际执行的 check_code 列表 |
+| item_codes | jsonb | NO | '[]'::jsonb | Phase 3.4：用户选择的 item_code 列表 |
+| asset_ids | jsonb | NO | '[]'::jsonb | Phase 3.4：用户选择的资产 ID 列表 |
+| request_payload | jsonb | NO | '{}'::jsonb | Phase 3.4：原始请求 payload 快照 |
+| created_by | varchar(100) | YES | | Phase 3.4：创建人 |
+| error_message | text | YES | | Phase 3.4：错误信息 |
 
 ### 7.22 inspection_result
 
@@ -477,13 +501,22 @@ ORDER BY event_object_table, trigger_name;
 |---|---|---|---|---|
 | id | bigint (BIGSERIAL) | NO | nextval | |
 | task_id | bigint | NO | | |
-| item_id | bigint | NO | | |
-| target_type | varchar(50) | NO | | |
+| item_id | bigint | YES | | Phase 3.4：放宽为 nullable（item_codes 不一定对得上已注册的 item） |
+| target_type | varchar(50) | NO | | Phase 3.4 收窄到 server/db_instance（旧值 business_system/cluster 已迁移/清理） |
 | target_id | bigint | NO | | |
-| result_status | varchar(20) | NO | | |
+| result_status | varchar(20) | NO | 'unknown' | Phase 3.4 取值 normal/abnormal/warning/unknown（替代旧 ok/warning/failed/unknown） |
 | result_value | text | YES | | |
 | extra_attrs | jsonb | YES | '{}'::jsonb | 巡检结果扩展信息 |
 | created_at | timestamp | YES | now() | |
+| batch_run_id | bigint | YES | | Phase 3.4：FK → collector_batch_run |
+| collector_run_id | bigint | YES | | Phase 3.4：FK → collector_run |
+| collector_run_item_id | bigint | YES | | Phase 3.4：FK → collector_run_item |
+| result_code | varchar(100) | NO | | Phase 3.4：结果编码（与 item_code 对齐） |
+| severity | varchar(20) | NO | 'warning' | Phase 3.4：info/warning/critical |
+| message | text | YES | | Phase 3.4：结果描述 |
+| evidence | jsonb | NO | '{}'::jsonb | Phase 3.4：证据数据 |
+| detected_at | timestamp | NO | now() | Phase 3.4：检测时间 |
+| updated_at | timestamp | YES | CURRENT_TIMESTAMP | Phase 3.4：自动更新 |
 
 ### 7.23 biz_score_rule
 
@@ -539,6 +572,24 @@ ORDER BY event_object_table, trigger_name;
 | imported_at | timestamp | YES | now() | |
 
 > 完整 64 列清单见 `docs/db/ddl-history.md` 3.4.26 节或数据库实时查询 `information_schema.columns WHERE table_name = 'staging_excel_import'`。
+
+### 7.27 inspection_schedule
+
+| Column | Type | Nullable | Default | Comment |
+|---|---|---|---|---|
+| id | bigint (BIGSERIAL) | NO | nextval | |
+| schedule_code | varchar(100) | NO | | 计划编码（UNIQUE） |
+| schedule_name | varchar(200) | NO | | 计划名称 |
+| cron_expr | varchar(100) | NO | | Cron 表达式 |
+| timezone | varchar(50) | NO | 'Asia/Shanghai' | 时区 |
+| is_enabled | boolean | NO | true | 是否启用 |
+| next_run_at | timestamp | YES | | 下次执行时间 |
+| last_run_at | timestamp | YES | | 上次执行时间 |
+| last_task_id | bigint | YES | | 上次执行产生的 task_id（FK → inspection_task） |
+| options | jsonb | NO | '{}'::jsonb | 计划选项 |
+| created_by | varchar(100) | YES | | 创建人 |
+| created_at | timestamp | YES | now() | |
+| updated_at | timestamp | YES | now() | |
 
 ## 8. 索引清单
 
@@ -623,12 +674,25 @@ ORDER BY event_object_table, trigger_name;
 | | uq_instance_backup_policy | UNIQUE | (instance_id, policy_id) |
 | | idx_ibp_instance | INDEX | (instance_id) |
 | | idx_ibp_policy | INDEX | (policy_id) |
-| **inspection_item** (2) | inspection_item_pkey | PK UNIQUE | (id) |
+| **inspection_item** (4) | inspection_item_pkey | PK UNIQUE | (id) |
 | | inspection_item_item_code_key | UNIQUE | (item_code) |
-| **inspection_task** (3) | inspection_task_pkey | PK UNIQUE | (id) |
+| | idx_inspection_item_check_code | INDEX | (check_code) |
+| | idx_inspection_item_enabled | INDEX | (enabled) |
+| **inspection_schedule** (4) | inspection_schedule_pkey | PK UNIQUE | (id) |
+| | uq_inspection_schedule_code | UNIQUE | (schedule_code) |
+| | idx_inspection_schedule_enabled | INDEX | (is_enabled) |
+| | idx_inspection_schedule_next_run | INDEX | (next_run_at DESC) |
+| **inspection_task** (5) | inspection_task_pkey | PK UNIQUE | (id) |
 | | inspection_task_task_code_key | UNIQUE | (task_code) |
 | | idx_inspection_task_status | INDEX | (status) |
-| **inspection_result** (4) | inspection_result_pkey | PK UNIQUE | (id) |
+| | idx_inspection_task_batch_run | INDEX | (batch_run_id) |
+| | idx_inspection_task_created_at | INDEX | (created_at DESC) |
+| **inspection_result** (9) | inspection_result_pkey | PK UNIQUE | (id) |
+| | idx_inspection_result_task | INDEX | (task_id) |
+| | idx_inspection_result_item | INDEX | (item_id) |
+| | idx_inspection_result_target | INDEX | (target_type, target_id) |
+| | idx_inspection_result_status | INDEX | (result_status) |
+| | idx_inspection_result_detected_at | INDEX | (detected_at DESC) |
 | | idx_ir_task | INDEX | (task_id) |
 | | idx_ir_target | INDEX | (target_type, target_id) |
 | | idx_ir_status | INDEX | (result_status) |
@@ -662,10 +726,13 @@ ORDER BY event_object_table, trigger_name;
 | db_instance | chk_node_role | node_role IN ('primary','standby','member','single','unknown') |
 | resource_tag | chk_resource_tag_type | resource_type IN (4 types) |
 | inspection_item | chk_inspection_item_severity | severity IN ('info','warning','critical') |
-| inspection_task | chk_inspection_task_status | status IN ('pending','running','success','failed','cancelled') |
+| inspection_item | chk_inspection_item_target_scope | target_scope IN ('server','db_instance') |
+| inspection_task | chk_inspection_task_status | status IN ('pending','running','success','partial_success','failed','cancelled') |
 | inspection_task | chk_inspection_task_scope | scope_type IN (4 types) OR NULL |
-| inspection_result | chk_inspection_result_target | target_type IN (4 types) |
-| inspection_result | chk_inspection_result_status | result_status IN ('ok','warning','failed','unknown') |
+| inspection_task | chk_inspection_task_target_scope | target_scope IN ('server','db_instance') |
+| inspection_result | chk_inspection_result_target_type | target_type IN ('server','db_instance') |
+| inspection_result | chk_inspection_result_status | result_status IN ('normal','abnormal','warning','unknown') |
+| inspection_result | chk_inspection_result_severity | severity IN ('info','warning','critical') |
 
 > PostgreSQL 17 自动为 NOT NULL 列生成 `<oid>_<ord>_not_null` CHECK 约束（如上查询结果中 18667_* 系列），此处省略。完整的 195 条约束（含 NOT NULL、PK、FK、UNIQUE、CHECK）已从数据库实时查询获取。
 
@@ -694,6 +761,12 @@ ORDER BY event_object_table, trigger_name;
 | instance_backup_policy | *policy_id_fkey | policy_id | backup_policy(id) |
 | inspection_result | inspection_result_task_id_fkey | task_id | inspection_task(id) ON DELETE CASCADE |
 | inspection_result | inspection_result_item_id_fkey | item_id | inspection_item(id) |
+| inspection_result | fk_inspection_result_batch_run | batch_run_id | collector_batch_run(id) ON DELETE SET NULL |
+| inspection_result | fk_inspection_result_collector_run | collector_run_id | collector_run(id) ON DELETE SET NULL |
+| inspection_result | fk_inspection_result_collector_run_item | collector_run_item_id | collector_run_item(id) ON DELETE SET NULL |
+| inspection_task | fk_inspection_task_schedule | schedule_id | inspection_schedule(id) ON DELETE SET NULL |
+| inspection_task | fk_inspection_task_batch_run | batch_run_id | collector_batch_run(id) ON DELETE SET NULL |
+| inspection_schedule | fk_inspection_schedule_last_task | last_task_id | inspection_task(id) ON DELETE SET NULL |
 | biz_score_result | biz_score_result_business_system_id_fkey | business_system_id | business_system(id) ON DELETE CASCADE |
 | biz_score_result_detail | *result_id_fkey | result_id | biz_score_result(id) ON DELETE CASCADE |
 | biz_score_result_detail | *rule_id_fkey | rule_id | biz_score_rule(id) |
@@ -728,6 +801,7 @@ ORDER BY event_object_table, trigger_name;
 | backup_policy | backup_policy_policy_code_key | (policy_code) |
 | instance_backup_policy | uq_instance_backup_policy | (instance_id, policy_id) |
 | inspection_item | inspection_item_item_code_key | (item_code) |
+| inspection_schedule | uq_inspection_schedule_code | (schedule_code) |
 | inspection_task | inspection_task_task_code_key | (task_code) |
 | biz_score_rule | biz_score_rule_rule_code_key | (rule_code) |
 
@@ -742,9 +816,9 @@ ORDER BY event_object_table, trigger_name;
 
 ## 11. 序列清单
 
-25 个 BIGSERIAL 序列（BIGINT 类型，start=1, max=9223372036854775807, increment=1）：
+26 个 BIGSERIAL 序列（BIGINT 类型，start=1, max=9223372036854775807, increment=1）：
 
-`asset_event_history_id_seq`, `backup_policy_id_seq`, `biz_score_result_detail_id_seq`, `biz_score_result_id_seq`, `biz_score_rule_id_seq`, `business_system_contact_id_seq`, `business_system_id_seq`, `cluster_id_seq`, `cluster_vip_id_seq`, `contact_id_seq`, `db_instance_id_seq`, `db_type_id_seq`, `db_version_id_seq`, `inspection_item_id_seq`, `inspection_result_id_seq`, `inspection_task_id_seq`, `instance_backup_policy_id_seq`, `os_version_id_seq`, `resource_tag_id_seq`, `server_id_seq`, `site_id_seq`, `staging_excel_import_id_seq`, `system_group_id_seq`, `tag_id_seq`, `topology_relation_id_seq`
+`asset_event_history_id_seq`, `backup_policy_id_seq`, `biz_score_result_detail_id_seq`, `biz_score_result_id_seq`, `biz_score_rule_id_seq`, `business_system_contact_id_seq`, `business_system_id_seq`, `cluster_id_seq`, `cluster_vip_id_seq`, `contact_id_seq`, `db_instance_id_seq`, `db_type_id_seq`, `db_version_id_seq`, `inspection_item_id_seq`, `inspection_result_id_seq`, `inspection_schedule_id_seq`, `inspection_task_id_seq`, `instance_backup_policy_id_seq`, `os_version_id_seq`, `resource_tag_id_seq`, `server_id_seq`, `site_id_seq`, `staging_excel_import_id_seq`, `system_group_id_seq`, `tag_id_seq`, `topology_relation_id_seq`
 
 > users 表使用 UUID 主键（gen_random_uuid()），无序列。
 
@@ -769,7 +843,7 @@ ORDER BY event_object_table, trigger_name;
 
 ## 13. 触发器清单
 
-17 个 BEFORE UPDATE 触发器，均调用 `dbops.set_updated_at()`：
+18 个 BEFORE UPDATE 触发器，均调用 `dbops.set_updated_at()`：
 
 | Trigger | Table |
 |---|---|
@@ -788,6 +862,7 @@ ORDER BY event_object_table, trigger_name;
 | trg_tag_updated_at | tag |
 | trg_backup_policy_updated_at | backup_policy |
 | trg_inspection_item_updated_at | inspection_item |
+| trg_inspection_schedule_updated_at | inspection_schedule |
 | trg_inspection_task_updated_at | inspection_task |
 | trg_biz_score_rule_updated_at | biz_score_rule |
 
@@ -802,8 +877,8 @@ ORDER BY event_object_table, trigger_name;
 
 | 差异项 | DDL 文件描述 | 实际数据库 | 影响 |
 |---|---|---|---|
-| 一致 | — | 32 表 + 4 视图完全匹配 | DDL 文件与实际库一致 |
-| 一致 | — | 126 个索引与 DDL 预期匹配 | |
+| 一致 | — | 33 表 + 4 视图完全匹配（Phase 3.4 增量已执行） | DDL 文件与实际库一致 |
+| 一致 | — | 193 个索引（Phase 3.4 增量：inspection_item ×2 / inspection_schedule ×2 / inspection_task ×2 / inspection_result ×3） | |
 | pgcrypto 安装位置 | 预期在 public | 实际在 dbops schema | pgcrypto 函数注册在 dbops namespace 下，不影响使用 |
 
 ## 16. 需现场确认
@@ -816,3 +891,8 @@ ORDER BY event_object_table, trigger_name;
 - 2026-06-06 已在开发库执行 AWX 资产校验第二阶段 DDL（`backend/db/dbops_awx_collector_phase2_refactor.sql`），新增 `collector_run_item` / `asset_endpoint` / `asset_change_proposal` / `collector_check_definition`；本快照已按当前数据库状态刷新。
 - 2026-06-08 已新增 Phase 3.1 DDL（`backend/db/dbops_port_profile_phase3_1.sql`），新增 `port_profile` 并增强 `collector_run_item` / `collector_run_result` / `asset_endpoint` / `asset_change_proposal` 字段用于端口校准与提案审批。
 - 2026-06-08 端口校准 refactor 仅调整候选去重、`include_related_server` 与候选失败语义，不修改 schema 结构。
+- 2026-06-13 已执行 Phase 3.4 DDL（`backend/db/dbops_phase3_4.sql`）到开发库 10.134.185.85:5432/dbops，本快照已按当前数据库状态刷新：
+  - 新表 `inspection_schedule`（10 字段 + 4 索引 + 1 触发器）
+  - `inspection_item` / `inspection_task` / `inspection_result` 扩展字段
+  - 收尾 DROP 旧约束 `chk_inspection_result_target`（已确认历史数据 0 行 `business_system`/`cluster` 旧值）
+- 需现场确认：`inspection_result` 表存在 4 对重名 FK（短名 `fk_inspection_result_*` 与默认名 `inspection_result_*_fkey` 同时存在），是 phase3_4 DDL 命名与历史 ALTER 引入的默认命名冲突，PostgreSQL 允许重名 FK 但需后续清理冗余约束。

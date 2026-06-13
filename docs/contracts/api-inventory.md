@@ -1,7 +1,7 @@
 # API Inventory
 
 > 文档状态：已校准
-> 最近校准：2026-05-21
+> 最近校准：2026-06-13
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -160,6 +160,26 @@
 | GET | `/api/v1/collector/batch-runs/{batch_run_id}/items` | `api/collector.py` | BatchCollectorService | JWT | 已实现（Phase 3.2） | `backend/app/api/collector.py` |
 | POST | `/api/v1/collector/batch-runs/{batch_run_id}/retry-failed` | `api/collector.py` | BatchCollectorService | JWT | 已实现（Phase 3.2） | `backend/app/api/collector.py` |
 
+### 2.15 巡检中心（Phase 3.4, prefix: `/api/v1/inspection`）
+
+| 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
+|---|---|---|---|---|---|---|
+| GET | `/api/v1/inspection/items` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
+| POST | `/api/v1/inspection/items` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
+| PUT | `/api/v1/inspection/items/{item_id}` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
+| GET | `/api/v1/inspection/tasks` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
+| POST | `/api/v1/inspection/tasks` | `api/inspection.py` | InspectionService + BatchCollectorService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` + `backend/app/services/inspection_service.py` |
+| GET | `/api/v1/inspection/tasks/{task_id}` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
+| GET | `/api/v1/inspection/results` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
+
+> `POST /api/v1/collector/callback/` 兼容扩展 `inspection_results[]`，用于显式回写巡检结果；未传时由后端根据 callback `items[]` 派生基础巡检结论。
+
+#### 2.15.1 关键字段
+
+| 接口 | 字段 | 类型 | 默认 | 含义 | 代码依据 |
+|---|---|---|---|---|---|
+| `POST /api/v1/inspection/tasks` | `confirm_fleet_scan` | bool | `false` | 任务请求里 `asset_ids` 和 `db_type_code` 都为空时，后端会回退到"全量扫描该 scope 下所有资产"；调用方必须显式置 `true` 二次确认，否则后端 raise 422。用于防止误触发大规模 dispatch。 | `backend/app/schemas/inspection.py:58`、`backend/app/services/inspection_service.py` (create_task guard) |
+
 ## 3. 前端 API 封装清单
 
 ### 3.1 assets.ts（baseURL: `/api`，封装 `/v1/servers/*`）
@@ -218,6 +238,13 @@
 | assetsApi.previewImport | POST | `/api/v1/servers/imports/preview` | Import.vue | 已实现 | `frontend/src/api/assets.ts:101-104` |
 | assetsApi.executeImport | POST | `/api/v1/servers/imports/execute` | Import.vue | 已实现 | `frontend/src/api/assets.ts:105-108` |
 | assetsApi.getImportBatches | GET | `/api/v1/servers/imports/batches` | Import.vue | 已实现 | `frontend/src/api/assets.ts:109-110` |
+| assetsApi.listInspectionItems | GET | `/api/v1/inspection/items` | inspection/Items.vue, inspection/Tasks.vue | 已实现（Phase 3.4） | `frontend/src/api/assets.ts` |
+| assetsApi.createInspectionItem | POST | `/api/v1/inspection/items` | inspection/Items.vue | 已实现（Phase 3.4） | `frontend/src/api/assets.ts` |
+| assetsApi.updateInspectionItem | PUT | `/api/v1/inspection/items/{id}` | inspection/Items.vue | 已实现（Phase 3.4） | `frontend/src/api/assets.ts` |
+| assetsApi.listInspectionTasks | GET | `/api/v1/inspection/tasks` | inspection/Tasks.vue, inspection/Reports.vue | 已实现（Phase 3.4） | `frontend/src/api/assets.ts` |
+| assetsApi.getInspectionTask | GET | `/api/v1/inspection/tasks/{id}` | inspection/Tasks.vue（可扩展） | 已实现（Phase 3.4） | `frontend/src/api/assets.ts` |
+| assetsApi.createInspectionTask | POST | `/api/v1/inspection/tasks` | inspection/Tasks.vue | 已实现（Phase 3.4；支持 `confirm_fleet_scan`） | `frontend/src/api/assets.ts` |
+| assetsApi.listInspectionResults | GET | `/api/v1/inspection/results` | inspection/Reports.vue | 已实现（Phase 3.4） | `frontend/src/api/assets.ts` |
 
 ### 3.2 auth.ts（baseURL: `/api`，封装 `/auth/*`）
 

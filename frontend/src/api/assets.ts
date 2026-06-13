@@ -45,6 +45,13 @@ import type {
   AssetFactSnapshotRow,
   AssetFactSnapshotSummary,
   AssetDriftRecordRow,
+  InspectionItemRow,
+  InspectionItemCreatePayload,
+  InspectionItemUpdatePayload,
+  InspectionTaskRow,
+  InspectionTaskCreatePayload,
+  InspectionTaskCreateResponse,
+  InspectionResultRow,
 } from '@/types/api'
 
 export const assetsApi = {
@@ -270,4 +277,28 @@ export const assetsApi = {
       params,
       suppressErrorToast: options?.suppressErrorToast,
     }),
+
+  // Phase 3.4 — Inspection center
+  listInspectionItems: (params?: { enabled?: boolean }): Promise<InspectionItemRow[]> =>
+    request.get('/v1/inspection/items', { params }),
+  createInspectionItem: (data: InspectionItemCreatePayload): Promise<InspectionItemRow> =>
+    request.post('/v1/inspection/items', data),
+  updateInspectionItem: (id: number | string, data: InspectionItemUpdatePayload): Promise<InspectionItemRow> =>
+    request.put(`/v1/inspection/items/${id}`, data),
+  listInspectionTasks: (params?: { limit?: number }): Promise<InspectionTaskRow[]> =>
+    request.get('/v1/inspection/tasks', { params }),
+  getInspectionTask: (id: number | string): Promise<InspectionTaskRow> =>
+    request.get(`/v1/inspection/tasks/${id}`),
+  createInspectionTask: (data: InspectionTaskCreatePayload): Promise<InspectionTaskCreateResponse> =>
+    request.post('/v1/inspection/tasks', data),
+  listInspectionResults: (
+    params?: {
+      task_id?: number
+      target_type?: 'db_instance' | 'server'
+      target_id?: number
+      result_status?: string
+      limit?: number
+    }
+  ): Promise<InspectionResultRow[]> =>
+    request.get('/v1/inspection/results', { params }),
 }

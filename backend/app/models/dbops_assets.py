@@ -739,6 +739,54 @@ class InspectionItem(DbopsAssetBase):
     id = Column(BigInteger, primary_key=True)
     item_code = Column(String(100), nullable=False, unique=True)
     item_name = Column(String(200), nullable=False)
+    check_code = Column(String(100), nullable=False)
+    target_scope = Column(String(32), nullable=False, server_default=text("'db_instance'"))
+    severity = Column(String(20), nullable=False, server_default=text("'warning'"))
+    enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    description = Column(Text)
+    rule_config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    results = relationship("InspectionResult", back_populates="item")
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_inspection_item_target_scope",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="chk_inspection_item_severity",
+        ),
+        Index("idx_inspection_item_enabled", "enabled"),
+        Index("idx_inspection_item_check_code", "check_code"),
+    )
+
+
+class InspectionSchedule(DbopsAssetBase):
+    __tablename__ = "inspection_schedule"
+
+    id = Column(BigInteger, primary_key=True)
+    schedule_code = Column(String(100), nullable=False, unique=True)
+    schedule_name = Column(String(200), nullable=False)
+    cron_expr = Column(String(100), nullable=False)
+    timezone = Column(String(50), nullable=False, server_default=text("'Asia/Shanghai'"))
+    is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
+    next_run_at = Column(DateTime)
+    last_run_at = Column(DateTime)
+    last_task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="SET NULL"))
+    options = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_by = Column(String(100))
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    tasks = relationship("InspectionTask", back_populates="schedule", foreign_keys="InspectionTask.schedule_id")
+
+    __table_args__ = (
+        Index("idx_inspection_schedule_enabled", "is_enabled"),
+        Index("idx_inspection_schedule_next_run", next_run_at.desc()),
+    )
 
 
 class InspectionTask(DbopsAssetBase):
@@ -747,6 +795,39 @@ class InspectionTask(DbopsAssetBase):
     id = Column(BigInteger, primary_key=True)
     task_code = Column(String(100), nullable=False, unique=True)
     task_name = Column(String(200), nullable=False)
+    schedule_id = Column(BigInteger, ForeignKey("inspection_schedule.id", ondelete="SET NULL"))
+    batch_run_id = Column(BigInteger, ForeignKey("collector_batch_run.id", ondelete="SET NULL"))
+    run_type = Column(String(50), nullable=False, server_default=text("'inspection'"))
+    target_scope = Column(String(32), nullable=False, server_default=text("'db_instance'"))
+    status = Column(String(32), nullable=False, server_default=text("'pending'"))
+    check_codes = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    item_codes = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    asset_ids = Column(JSONB, nullable=False, server_default=text("'[]'::jsonb"))
+    request_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    created_by = Column(String(100))
+    error_message = Column(Text)
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    schedule = relationship("InspectionSchedule", back_populates="tasks", foreign_keys=[schedule_id])
+    batch_run = relationship("CollectorBatchRun", foreign_keys=[batch_run_id])
+    results = relationship("InspectionResult", back_populates="task", cascade="all, delete-orphan")
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_scope IN ('server', 'db_instance')",
+            name="chk_inspection_task_target_scope",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'success', 'partial_success', 'failed', 'cancelled')",
+            name="chk_inspection_task_status",
+        ),
+        Index("idx_inspection_task_status", "status"),
+        Index("idx_inspection_task_batch_run", "batch_run_id"),
+        Index("idx_inspection_task_created_at", created_at.desc()),
+    )
 
 
 class InspectionResult(DbopsAssetBase):
@@ -754,7 +835,46 @@ class InspectionResult(DbopsAssetBase):
 
     id = Column(BigInteger, primary_key=True)
     task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="CASCADE"), nullable=False)
-    item_id = Column(BigInteger, ForeignKey("inspection_item.id"), nullable=False)
+    item_id = Column(BigInteger, ForeignKey("inspection_item.id", ondelete="SET NULL"))
+    batch_run_id = Column(BigInteger, ForeignKey("collector_batch_run.id", ondelete="SET NULL"))
+    collector_run_id = Column(BigInteger, ForeignKey("collector_run.id", ondelete="SET NULL"))
+    collector_run_item_id = Column(BigInteger, ForeignKey("collector_run_item.id", ondelete="SET NULL"))
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    result_code = Column(String(100), nullable=False)
+    result_status = Column(String(32), nullable=False)
+    severity = Column(String(20), nullable=False, server_default=text("'warning'"))
+    message = Column(Text)
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow)
+
+    task = relationship("InspectionTask", back_populates="results")
+    item = relationship("InspectionItem", back_populates="results")
+    batch_run = relationship("CollectorBatchRun", foreign_keys=[batch_run_id])
+    collector_run = relationship("CollectorRun", foreign_keys=[collector_run_id])
+    collector_run_item = relationship("CollectorRunItem", foreign_keys=[collector_run_item_id])
+
+    __table_args__ = (
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance')",
+            name="chk_inspection_result_target_type",
+        ),
+        CheckConstraint(
+            "result_status IN ('normal', 'abnormal', 'warning', 'unknown')",
+            name="chk_inspection_result_status",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="chk_inspection_result_severity",
+        ),
+        Index("idx_inspection_result_task", "task_id"),
+        Index("idx_inspection_result_item", "item_id"),
+        Index("idx_inspection_result_target", "target_type", "target_id"),
+        Index("idx_inspection_result_status", "result_status"),
+        Index("idx_inspection_result_detected_at", detected_at.desc()),
+    )
 
 
 class BizScoreRule(DbopsAssetBase):
@@ -1140,6 +1260,7 @@ __all__ = [
     "BackupPolicy",
     "InstanceBackupPolicy",
     "InspectionItem",
+    "InspectionSchedule",
     "InspectionTask",
     "InspectionResult",
     "BizScoreRule",

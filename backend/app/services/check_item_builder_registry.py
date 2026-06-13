@@ -50,6 +50,78 @@ class CheckItemBuilderRegistry:
     """
 
     _builders: dict[str, BaseCheckItemBuilder] = {}
+    _inspection_item_templates: dict[str, dict[str, Any]] = {
+        "CONNECTIVITY_PORT_REACHABLE": {
+            "item_name": "端口连通性可达",
+            "check_code": "DB_PORT_REACHABILITY",
+            "target_scope": "db_instance",
+            "severity": "critical",
+        },
+        "DB_VERSION_COLLECTED": {
+            "item_name": "数据库版本已采集",
+            "check_code": "DB_VERSION_FACT_COLLECTION",
+            "target_scope": "db_instance",
+            "severity": "warning",
+        },
+        "DB_ROLE_COLLECTED": {
+            "item_name": "数据库角色已采集",
+            "check_code": "DB_ROLE_FACT_COLLECTION",
+            "target_scope": "db_instance",
+            "severity": "warning",
+        },
+        "DB_ROLE_CHANGED": {
+            "item_name": "数据库角色发生变化",
+            "check_code": "DB_ROLE_FACT_COLLECTION",
+            "target_scope": "db_instance",
+            "severity": "critical",
+        },
+        "INSTANCE_PORT_DRIFT": {
+            "item_name": "实例端口漂移",
+            "check_code": "PORT_CANDIDATE_REACHABILITY",
+            "target_scope": "db_instance",
+            "severity": "critical",
+        },
+        "FACT_COLLECTION_FAILED": {
+            "item_name": "事实采集失败",
+            "check_code": "DB_BASIC_FACT_COLLECTION",
+            "target_scope": "db_instance",
+            "severity": "critical",
+        },
+        "CREDENTIAL_AUTH_FAILED": {
+            "item_name": "凭证认证失败",
+            "check_code": "DB_BASIC_FACT_COLLECTION",
+            "target_scope": "db_instance",
+            "severity": "critical",
+        },
+        "SERVER_OS_COLLECTED": {
+            "item_name": "服务器OS事实已采集",
+            "check_code": "OS_BASIC_FACT_COLLECTION",
+            "target_scope": "server",
+            "severity": "warning",
+        },
+    }
+    _checkcode_to_inspection_items: dict[str, list[str]] = {
+        "DB_PORT_REACHABILITY": ["CONNECTIVITY_PORT_REACHABLE", "INSTANCE_PORT_DRIFT"],
+        "SSH_PORT_REACHABILITY": ["CONNECTIVITY_PORT_REACHABLE"],
+        "PORT_CANDIDATE_REACHABILITY": ["CONNECTIVITY_PORT_REACHABLE", "INSTANCE_PORT_DRIFT"],
+        "DB_BASIC_FACT_COLLECTION": ["FACT_COLLECTION_FAILED", "CREDENTIAL_AUTH_FAILED"],
+        "DB_VERSION_FACT_COLLECTION": [
+            "DB_VERSION_COLLECTED",
+            "FACT_COLLECTION_FAILED",
+            "CREDENTIAL_AUTH_FAILED",
+        ],
+        "DB_ROLE_FACT_COLLECTION": [
+            "DB_ROLE_COLLECTED",
+            "DB_ROLE_CHANGED",
+            "FACT_COLLECTION_FAILED",
+            "CREDENTIAL_AUTH_FAILED",
+        ],
+        "OS_BASIC_FACT_COLLECTION": [
+            "SERVER_OS_COLLECTED",
+            "FACT_COLLECTION_FAILED",
+            "CREDENTIAL_AUTH_FAILED",
+        ],
+    }
 
     @classmethod
     def register(cls, check_code: str, builder: BaseCheckItemBuilder) -> None:
@@ -71,6 +143,183 @@ class CheckItemBuilderRegistry:
     @classmethod
     def supported_codes(cls) -> list[str]:
         return sorted(cls._builders.keys())
+
+    @classmethod
+    def inspection_item_templates(cls) -> dict[str, dict[str, Any]]:
+        return dict(cls._inspection_item_templates)
+
+    @classmethod
+    def inspection_item_codes(cls) -> list[str]:
+        return sorted(cls._inspection_item_templates.keys())
+
+    @classmethod
+    def inspection_defaults(cls, item_codes: list[str] | None = None) -> list[dict[str, Any]]:
+        selected = set(item_codes or cls.inspection_item_codes())
+        rows: list[dict[str, Any]] = []
+        for item_code, template in cls._inspection_item_templates.items():
+            if item_code not in selected:
+                continue
+            rows.append(
+                {
+                    "item_code": item_code,
+                    "item_name": template["item_name"],
+                    "check_code": template["check_code"],
+                    "target_scope": template["target_scope"],
+                    "severity": template["severity"],
+                    "enabled": True,
+                    "rule_config": {},
+                }
+            )
+        return rows
+
+    @classmethod
+    def resolve_check_codes_for_inspection_items(cls, item_codes: list[str]) -> list[str]:
+        code_set = set(item_codes)
+        check_codes: list[str] = []
+        for check_code, mapped_items in cls._checkcode_to_inspection_items.items():
+            if code_set.intersection(mapped_items):
+                check_codes.append(check_code)
+        return sorted(set(check_codes))
+
+    @staticmethod
+    def _facts_from_raw(raw_result: dict[str, Any]) -> dict[str, Any]:
+        facts = raw_result.get("facts")
+        if isinstance(facts, dict):
+            return facts
+        if isinstance(facts, list):
+            converted: dict[str, Any] = {}
+            for row in facts:
+                if isinstance(row, dict) and row.get("fact_key"):
+                    converted[str(row["fact_key"])] = row.get("fact_value")
+            return converted
+        return {}
+
+    @staticmethod
+    def _contains_auth_failed(message: str, raw_result: dict[str, Any]) -> bool:
+        error_code = str(raw_result.get("error_code") or "").upper()
+        error_message = str(raw_result.get("error_message") or message or "").upper()
+        if error_code in {"AUTHENTICATION_FAILED", "INVALID_CREDENTIAL"}:
+            return True
+        return (
+            "ORA-01017" in error_message
+            or "AUTHENTICATION_FAILED" in error_message
+            or "LOGIN FAILED" in error_message
+            or "PASSWORD" in error_message and "INVALID" in error_message
+        )
+
+    @classmethod
+    def build_inspection_results_from_callback(
+        cls,
+        *,
+        check_code: str,
+        status: str,
+        target_scope: str,
+        asset_id: int,
+        item_key: str | None,
+        message: str | None,
+        raw_result: dict[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        normalized_check_code = (check_code or "").strip().upper()
+        normalized_status = (status or "").strip().lower()
+        payload = dict(raw_result or {})
+        facts = cls._facts_from_raw(payload)
+        candidates = cls._checkcode_to_inspection_items.get(normalized_check_code, [])
+        rows: list[dict[str, Any]] = []
+
+        for item_code in candidates:
+            template = cls._inspection_item_templates.get(item_code)
+            if not template:
+                continue
+
+            result_status = "unknown"
+            result_message = message
+            result_code = item_code
+
+            if item_code == "CONNECTIVITY_PORT_REACHABLE":
+                if normalized_status in {"verified", "collected"}:
+                    result_status = "normal"
+                elif normalized_status in {"missing", "failed", "drifted"}:
+                    result_status = "abnormal"
+                else:
+                    result_status = "unknown"
+            elif item_code == "DB_VERSION_COLLECTED":
+                has_version_fact = "db_version" in facts or "version" in facts
+                if normalized_status in {"verified", "collected"} and has_version_fact:
+                    result_status = "normal"
+                else:
+                    result_status = "abnormal"
+                    result_message = result_message or "DB_VERSION_MISSING"
+            elif item_code == "DB_ROLE_COLLECTED":
+                has_role_fact = "db_role" in facts or "role" in facts
+                if normalized_status in {"verified", "collected"} and has_role_fact:
+                    result_status = "normal"
+                else:
+                    result_status = "abnormal"
+                    result_message = result_message or "DB_ROLE_MISSING"
+            elif item_code == "DB_ROLE_CHANGED":
+                changed = bool(
+                    facts.get("db_role_changed")
+                    or payload.get("db_role_changed")
+                    or (
+                        facts.get("previous_role") is not None
+                        and facts.get("current_role") is not None
+                        and facts.get("previous_role") != facts.get("current_role")
+                    )
+                )
+                if changed:
+                    result_status = "abnormal"
+                    result_message = result_message or "DB_ROLE_CHANGED"
+                else:
+                    result_status = "normal"
+            elif item_code == "INSTANCE_PORT_DRIFT":
+                if normalized_status == "drifted":
+                    result_status = "abnormal"
+                    result_message = result_message or "INSTANCE_PORT_DRIFT"
+                elif normalized_status in {"verified", "collected"}:
+                    result_status = "normal"
+                else:
+                    result_status = "warning"
+            elif item_code == "FACT_COLLECTION_FAILED":
+                if normalized_status in {"failed", "missing"}:
+                    result_status = "abnormal"
+                    result_message = result_message or "FACT_COLLECTION_FAILED"
+                elif normalized_status in {"verified", "collected"}:
+                    result_status = "normal"
+                else:
+                    result_status = "warning"
+            elif item_code == "CREDENTIAL_AUTH_FAILED":
+                if cls._contains_auth_failed(result_message or "", payload):
+                    result_status = "abnormal"
+                    result_message = result_message or "CREDENTIAL_AUTH_FAILED"
+                else:
+                    result_status = "normal"
+            elif item_code == "SERVER_OS_COLLECTED":
+                has_os_fact = any(key.startswith("os_") for key in facts.keys()) or "hostname" in facts
+                if normalized_status in {"verified", "collected"} and has_os_fact:
+                    result_status = "normal"
+                else:
+                    result_status = "abnormal"
+                    result_message = result_message or "OS_FACT_MISSING"
+
+            rows.append(
+                {
+                    "item_code": item_code,
+                    "item_name": template["item_name"],
+                    "check_code": normalized_check_code,
+                    "target_scope": target_scope,
+                    "asset_id": int(asset_id),
+                    "result_code": result_code,
+                    "result_status": result_status,
+                    "severity": template["severity"],
+                    "message": result_message,
+                    "evidence": {
+                        "collector_item_key": item_key,
+                        "raw_result": payload,
+                    },
+                }
+            )
+
+        return rows
 
 
 # ============================================================================

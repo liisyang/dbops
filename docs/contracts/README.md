@@ -1,7 +1,7 @@
 # API 契约附录
 
 > 文档状态：已校准
-> 最近校准：2026-05-21
+> 最近校准：2026-06-13
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -201,6 +201,23 @@ callback 协议升级为 `items[]` 数组；旧 `/automation/asset-verify/{insta
 - callback `items[]` 透传并回写 `endpoint_type / protocol / port_source / is_required`。
 - 对于校准候选失败，响应会通过 `candidate_state` 区分 `candidate_unreachable`，不会直接等同于资产 missing。
 - 仅生成 proposal，不自动修改 `db_instance.port`；`apply` 且状态为 `approved` 时才更新正式资产字段。
+
+### 2026-06-13：Phase 3.4 基础巡检中心
+
+新增后端接口：
+
+1. `GET /api/v1/inspection/items`
+2. `POST /api/v1/inspection/items`
+3. `PUT /api/v1/inspection/items/{item_id}`
+4. `GET /api/v1/inspection/tasks`
+5. `POST /api/v1/inspection/tasks`
+6. `GET /api/v1/inspection/tasks/{task_id}`
+7. `GET /api/v1/inspection/results`
+
+契约扩展：
+
+1. `POST /api/v1/collector/callback/` 在保留现有 `items[]` 协议基础上，新增可选 `inspection_results[]` 字段。
+2. `run_type=inspection` 复用现有 BatchCollector/AWX 分发链路；后端按巡检项映射到已有 check_code 执行，不新增独立 callback URL。
 
 ## 5. 第三方对接
 

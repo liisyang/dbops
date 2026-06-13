@@ -69,7 +69,8 @@ class BatchCollectorService:
             return BatchCollectorService._resolve_by_ids(db, target_scope, asset_ids)
         if filters is not None:
             return BatchCollectorService._resolve_by_filters(db, target_scope, filters)
-        raise ValueError("必须提供 asset_ids 或 filters")
+        # Neither asset_ids nor filters given → resolve all assets by scope
+        return BatchCollectorService._resolve_by_filters(db, target_scope, {})
 
     @staticmethod
     def _resolve_by_ids(

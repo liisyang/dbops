@@ -35,6 +35,7 @@ from app.services.asset_proposal_service import AssetProposalService
 from app.services.awx_service import AwxService, AwxServiceError
 from app.services.batch_collector_service import BatchCollectorService
 from app.services.port_calibration_service import PortCalibrationService
+from app.services.inspection_service import InspectionService
 
 
 class CollectorService:
@@ -1134,6 +1135,14 @@ class CollectorService:
                 db,
                 run=run,
                 callback_items=calibration_results,
+            )
+
+        if run_type == "inspection" or payload.inspection_results:
+            InspectionService.save_callback_results(
+                db,
+                run=run,
+                callback_items=callback_items,
+                explicit_results=payload.inspection_results,
             )
 
         run.status = CollectorService._summarize_run_status(

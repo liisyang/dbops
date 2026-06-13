@@ -1,7 +1,7 @@
 # 模块图
 
 > 文档状态：已校准
-> 最近校准：2026-06-11
+> 最近校准：2026-06-13
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -36,7 +36,7 @@
 | 凭证中心 | 已实现（Phase 3.3A） | 凭证档案（Profiles）+ 凭证绑定（Bindings）：管理 DB/OS 凭证与资产的绑定关系，供 AWX 采集任务自动解析注入 | `backend/app/api/collector.py`（凭证相关端点）+ `frontend/src/views/credentials/Profiles.vue` + `frontend/src/views/credentials/Bindings.vue` |
 | 备份与恢复 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/backup/*.vue` |
 | SQL 分析 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/sql/*.vue` |
-| 巡检与健康 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/inspection/*.vue` |
+| 巡检与健康 | 已实现（Phase 3.4 基础巡检中心） | 已落地巡检项管理、巡检任务创建/列表、巡检报告查询；复用 collector batch + callback 闭环，健康检查页仍为占位 | `backend/app/api/inspection.py` + `backend/app/services/inspection_service.py` + `frontend/src/views/inspection/{Items,Tasks,Reports}.vue` |
 | 审计与安全 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/audit/*.vue` |
 | 知识库 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/knowledge/Index.vue` |
 | WebSocket | 已实现 | 任务实时输出推送 | `backend/app/api/websocket.py` |
@@ -56,6 +56,7 @@
 | 联系人 | Contacts.vue | assets.ts → `/v1/servers/contacts` | `api/servers.py:299-343` | DbopsContactService | Contact (dbops) | contact | 已实现 |
 | 导入 | Import.vue | assets.ts → `/v1/servers/imports/*` | `api/servers.py:704-774` | DbopsImportService | StagingExcelImport | staging_excel_import | 已实现 |
 | AWX 资产校验 | InstanceDetail.vue | assets.ts → `/v1/collector/runs`（主入口）+ `/v1/automation/asset-verify/{id}/launch`（兼容包装）+ `/v1/collector/proposals*` | `api/collector.py` | CollectorService + PortProfileService + PortCalibrationService + AssetProposalService + AwxService（callback URL 优先配置值，未配置时回退请求基址） | CollectorRun / CollectorRunItem / CollectorRunResult / CollectorCheckDefinition / PortProfile / AssetEndpoint / AssetChangeProposal / DbInstance / Server | collector_run / collector_run_item / collector_run_result / collector_check_definition / port_profile / asset_endpoint / asset_change_proposal / db_instance / asset_event_history | 已实现（Phase 3.1：支持 run_type=port_calibration 与提案审批/应用） |
+| 巡检中心 | inspection/Items.vue + inspection/Tasks.vue + inspection/Reports.vue | assets.ts → `/v1/inspection/items*` + `/v1/inspection/tasks*` + `/v1/inspection/results` | `api/inspection.py` + `/collector/callback` 扩展 `inspection_results` | InspectionService + BatchCollectorService + CheckItemBuilderRegistry + CollectorService | InspectionItem / InspectionSchedule / InspectionTask / InspectionResult | inspection_item / inspection_schedule / inspection_task / inspection_result（关联 collector_batch_run） | 已实现（Phase 3.4：run_type=inspection 复用 AWX 分发和 callback） |
 | 统计 | Stats.vue | stats.ts → `/v1/servers/stats/*` | `api/servers.py:489-561` | DbopsStatsService | - | (聚合查询) | 已实现 |
 | 账号操作 | Tasks.vue | `/users/add\|check\|chpasswd` | `api/account_ops.py` | account_tasks (Celery) | TaskState (Redis) | (Redis) | 部分实现 |
 | 主机清单 | Inventory.vue | 需现场确认 | 需现场确认 | Ansible inventory | - | (Ansible) | 部分实现 |
@@ -70,7 +71,6 @@
 | SQL 审计 | sql/Audit.vue | /sql/audit | 无后端 |
 | 慢查询 | sql/SlowQuery.vue | /sql/slow | 无后端 |
 | TOP SQL | sql/TopSql.vue | /sql/top | 无后端 |
-| 巡检报告 | inspection/Reports.vue | /inspection/reports | dbops schema 有 inspection 表定义，无 API |
 | 健康检查 | inspection/Health.vue | /inspection/health | 无后端 |
 | 操作日志 | audit/Operations.vue | /audit/operations | `/api/logs/list` 返回 [] |
 | 登录日志 | audit/LoginLogs.vue | /audit/login | 无后端 |
@@ -161,7 +161,7 @@ Page (InstanceDetail.vue)
 | 审计日志 | `/api/logs/list` 硬编码返回 [] | 操作日志/登录日志/敏感操作三个页面无数据 | 核心资产管理收尾后实现 | `backend/app/api/logs.py:15` |
 | 备份恢复 | 前端有 3 个页面，后端无 API | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `frontend/src/views/backup/*.vue` |
 | SQL 分析 | 前端有 3 个页面，后端无 API | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `frontend/src/views/sql/*.vue` |
-| 巡检健康 | 模型表已定义但无 API | 页面无法展示任何数据 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:371-393` |
+| 健康检查 | 健康检查页仍为占位 | 页面无法展示任何数据 | 后续按排期补全健康专项 API | `frontend/src/views/inspection/Health.vue` |
 | 知识库 | 仅前端占位页面 | 页面无内容 | 核心资产管理收尾后排期 | `frontend/src/views/knowledge/Index.vue` |
 | 业务评分 | BizScoreRule/Result/Detail 表已定义但无 API | 无法使用 | 核心资产管理收尾后排期 | `backend/app/models/dbops_assets.py:395-416` |
 

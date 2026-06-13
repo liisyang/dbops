@@ -1,7 +1,7 @@
 # DB 附录
 
 > 文档状态：AI 自动维护
-> 最近校准：2026-05-22
+> 最近校准：2026-06-13
 > 依据来源：真实代码 / DDL baseline / ORM Model / Service 查询 / 实时数据库元数据扫描（PostgreSQL 17.9）
 
 ## 1. 维护定位
@@ -40,7 +40,7 @@
 
 | Schema | 用途 | 依据 | 备注 |
 |---|---|---|---|
-| dbops | DBOps 平台主 schema，当前 baseline 为 26 张业务表；2026-06-04 增量新增 collector_run / collector_run_result（执行后共 28 表）；2026-06-06 phase2 refactor 已在开发库落库（32 表）；2026-06-08 Phase 3.1 新增 port_profile 并增强 endpoint/proposal 字段（33 表）；2026-06-08 端口校准 refactor 仅调整候选去重与语义，不新增表结构 | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/db/dbops_awx_collector_phase1.sql` + `backend/db/dbops_awx_collector_phase2_refactor.sql` + `backend/db/dbops_port_profile_phase3_1.sql` + `backend/app/database.py:18` | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
+| dbops | DBOps 平台主 schema，当前 baseline 为 26 张业务表；2026-06-04 增量新增 collector_run / collector_run_result（执行后共 28 表）；2026-06-06 phase2 refactor 已在开发库落库（32 表）；2026-06-08 Phase 3.1 新增 port_profile 并增强 endpoint/proposal 字段（33 表）；2026-06-13 Phase 3.4 新增 inspection_schedule 并扩展 inspection_* 结构（34 表） | `backend/db/dbops_phase1_25_tables.sql:8` + `backend/db/dbops_awx_collector_phase1.sql` + `backend/db/dbops_awx_collector_phase2_refactor.sql` + `backend/db/dbops_port_profile_phase3_1.sql` + `backend/db/dbops_phase3_4.sql` + `backend/app/database.py:18` | search_path=dbops,public；pgcrypto 扩展安装在 dbops schema |
 | public | PostgreSQL 默认 schema | — | plpgsql 扩展所在 |
 
 ## 5. 核心表摘要
@@ -69,9 +69,10 @@
 | 标签 | resource_tag | 资源标签关系（多态） | resource_type, resource_id, tag_id | ORM 模型 |
 | 备份 | backup_policy | 备份策略 | policy_code, backup_type, retention_days | ORM 模型 |
 | 备份 | instance_backup_policy | 实例-策略关系 | instance_id, policy_id | ORM 模型 |
-| 巡检 | inspection_item | 巡检项定义 | item_code, category, severity | ORM 模型 |
-| 巡检 | inspection_task | 巡检任务 | task_code, scope_type, status | ORM 模型 |
-| 巡检 | inspection_result | 巡检结果 | target_type, result_status | ORM 模型 |
+| 巡检 | inspection_item | 巡检项定义 | item_code, check_code, target_scope, severity, enabled | `backend/app/models/dbops_assets.py` + `backend/db/dbops_phase3_4.sql` |
+| 巡检 | inspection_schedule | 巡检周期计划 | schedule_code, cron_expr, is_enabled, next_run_at | `backend/app/models/dbops_assets.py` + `backend/db/dbops_phase3_4.sql` |
+| 巡检 | inspection_task | 巡检任务（关联 collector_batch_run） | task_code, run_type, target_scope, status, batch_run_id | `backend/app/models/dbops_assets.py` + `backend/db/dbops_phase3_4.sql` |
+| 巡检 | inspection_result | 巡检结果（标准化结论） | task_id, item_id, target_type, target_id, result_code, result_status | `backend/app/models/dbops_assets.py` + `backend/db/dbops_phase3_4.sql` |
 | 评分 | biz_score_rule | 评分规则 | rule_code, deduct_score | ORM 模型 |
 | 评分 | biz_score_result | 评分结果 | final_score, score_batch | ORM 模型 |
 | 评分 | biz_score_result_detail | 评分明细 | evidence (JSONB) | ORM 模型 |
@@ -108,7 +109,7 @@
 |---|---|---|---|
 | staging_excel_import 存明文密码 | db_password_raw / os_password_raw 字段 | `SELECT count(*) FROM dbops.staging_excel_import WHERE db_password_raw IS NOT NULL;` | 定期清理暂存表或脱敏处理 |
 | resource_tag 无外键约束 | resource_id 可能指向不存在的资源 | 应用层校验 | 后续可加触发器或定期清理孤记录 |
-| backup_policy / inspection_item 等表无 API | 表结构已存在但无后端 API | 确认前端模块排期 | 10-module-map 已标注为"规划中" |
+| backup_policy 等表无 API | 表结构已存在但无后端 API | 确认前端模块排期 | 10-module-map 已标注为"规划中" |
 | AWX callback 依赖网络可达性与 token 一致性 | 回调失败会导致状态无法回写 | 使用 curl 从 AWX 网络侧校验 callback URL 与 token | `backend/app/api/collector.py` |
 
 ## 9. 需现场确认

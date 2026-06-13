@@ -778,3 +778,108 @@ export interface AssetDriftRecordRow {
 export interface RetryFailedPayload {
   scope: 'failed' | 'dispatch_failed'
 }
+
+// Phase 3.4 — Inspection Center
+export interface InspectionItemRow {
+  id: number
+  item_code: string
+  item_name: string
+  check_code: string
+  target_scope: 'db_instance' | 'server'
+  severity: 'info' | 'warning' | 'critical'
+  enabled: boolean
+  description?: string | null
+  rule_config?: Record<string, any>
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface InspectionItemCreatePayload {
+  item_code: string
+  item_name: string
+  check_code: string
+  target_scope: 'db_instance' | 'server'
+  severity: 'info' | 'warning' | 'critical'
+  enabled?: boolean
+  description?: string | null
+  rule_config?: Record<string, any>
+}
+
+export interface InspectionItemUpdatePayload {
+  item_name?: string
+  check_code?: string
+  target_scope?: 'db_instance' | 'server'
+  severity?: 'info' | 'warning' | 'critical'
+  enabled?: boolean
+  description?: string | null
+  rule_config?: Record<string, any>
+}
+
+export interface InspectionTaskRow {
+  id: number
+  task_code: string
+  task_name: string
+  run_type: string
+  target_scope: 'db_instance' | 'server'
+  status: string
+  schedule_id?: number | null
+  batch_run_id?: number | null
+  check_codes: string[]
+  item_codes: string[]
+  asset_ids: number[]
+  request_payload?: Record<string, any>
+  created_by?: string | null
+  error_message?: string | null
+  started_at?: string | null
+  finished_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}
+
+export interface InspectionTaskCreatePayload {
+  task_name: string
+  target_scope: 'db_instance' | 'server'
+  asset_ids?: number[]
+  db_type_code?: string
+  item_codes: string[]
+  include_related_server?: boolean
+  max_items_per_dispatch?: number
+  timeout_seconds?: number
+  schedule_id?: number | null
+  // Phase 3.4 fleet-scan footgun guard:
+  // empty asset_ids + no db_type_code triggers a fleet-wide scan; the caller
+  // must explicitly opt in by setting this to true.
+  confirm_fleet_scan?: boolean
+  request_payload?: Record<string, any>
+}
+
+export interface InspectionTaskCreateResponse {
+  detail: string
+  task_id: number
+  task_code: string
+  batch_run_id: number
+  status: string
+  dispatch_count: number
+  total_item_count: number
+}
+
+export interface InspectionResultRow {
+  id: number
+  task_id: number
+  item_id?: number | null
+  item_code?: string | null
+  item_name?: string | null
+  batch_run_id?: number | null
+  collector_run_id?: number | null
+  collector_run_item_id?: number | null
+  target_type: 'db_instance' | 'server'
+  target_id: number
+  result_code: string
+  result_status: 'normal' | 'abnormal' | 'warning' | 'unknown' | string
+  severity: 'info' | 'warning' | 'critical' | string
+  message?: string | null
+  evidence?: Record<string, any>
+  detected_at?: string | null
+  created_at?: string | null
+  updated_at?: string | null
+}

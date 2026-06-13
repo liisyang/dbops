@@ -1,7 +1,7 @@
 <template>
   <OpsModal
     :open="open"
-    title="确认操作"
+    :title="title || '确认操作'"
     :subtitle="subtitle"
     icon="warning"
     size="sm"
@@ -41,6 +41,7 @@ import { OpsModal } from '@/components/ops'
 
 defineProps<{
   open: boolean
+  title?: string
   subtitle?: string
   message: string
   confirmLabel?: string
