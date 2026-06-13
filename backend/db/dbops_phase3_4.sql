@@ -155,14 +155,17 @@ BEGIN
     END IF;
 END $$;
 
+-- Use the PG default constraint name (inspection_task_batch_run_id_fkey)
+-- to avoid collision with legacy ALTER-introduced default-name FK on the
+-- same column. See docs/db/ddl-history.md 4.4 follow-up.
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'fk_inspection_task_batch_run'
+        WHERE conname = 'inspection_task_batch_run_id_fkey'
     ) THEN
         ALTER TABLE dbops.inspection_task
-        ADD CONSTRAINT fk_inspection_task_batch_run
+        ADD CONSTRAINT inspection_task_batch_run_id_fkey
         FOREIGN KEY (batch_run_id) REFERENCES dbops.collector_batch_run(id) ON DELETE SET NULL;
     END IF;
 END $$;
@@ -253,14 +256,17 @@ WHERE result_code IS NULL OR trim(result_code) = '';
 ALTER TABLE dbops.inspection_result
     ALTER COLUMN result_code SET NOT NULL;
 
+-- Use the PG default constraint name (inspection_result_batch_run_id_fkey)
+-- to avoid collision with legacy ALTER-introduced default-name FK on the
+-- same column. See docs/db/ddl-history.md 4.4 follow-up.
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'fk_inspection_result_batch_run'
+        WHERE conname = 'inspection_result_batch_run_id_fkey'
     ) THEN
         ALTER TABLE dbops.inspection_result
-        ADD CONSTRAINT fk_inspection_result_batch_run
+        ADD CONSTRAINT inspection_result_batch_run_id_fkey
         FOREIGN KEY (batch_run_id) REFERENCES dbops.collector_batch_run(id) ON DELETE SET NULL;
     END IF;
 END $$;
@@ -277,14 +283,17 @@ BEGIN
     END IF;
 END $$;
 
+-- Use the PG default constraint name (inspection_result_collector_run_item_id_fkey)
+-- to avoid collision with legacy ALTER-introduced default-name FK on the
+-- same column. See docs/db/ddl-history.md 4.4 follow-up.
 DO $$
 BEGIN
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
-        WHERE conname = 'fk_inspection_result_collector_run_item'
+        WHERE conname = 'inspection_result_collector_run_item_id_fkey'
     ) THEN
         ALTER TABLE dbops.inspection_result
-        ADD CONSTRAINT fk_inspection_result_collector_run_item
+        ADD CONSTRAINT inspection_result_collector_run_item_id_fkey
         FOREIGN KEY (collector_run_item_id) REFERENCES dbops.collector_run_item(id) ON DELETE SET NULL;
     END IF;
 END $$;

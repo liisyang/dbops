@@ -593,7 +593,7 @@ ORDER BY event_object_table, trigger_name;
 
 ## 8. 索引清单
 
-共 98 个索引。以下按表分组（含 PK/UNIQUE 索引和业务索引）：
+共 193 个索引。以下按表分组（含 PK/UNIQUE 索引和业务索引）：
 
 | Table | Index | Type | Definition |
 |---|---|---|---|
@@ -895,4 +895,4 @@ ORDER BY event_object_table, trigger_name;
   - 新表 `inspection_schedule`（10 字段 + 4 索引 + 1 触发器）
   - `inspection_item` / `inspection_task` / `inspection_result` 扩展字段
   - 收尾 DROP 旧约束 `chk_inspection_result_target`（已确认历史数据 0 行 `business_system`/`cluster` 旧值）
-- 需现场确认：`inspection_result` 表存在 4 对重名 FK（短名 `fk_inspection_result_*` 与默认名 `inspection_result_*_fkey` 同时存在），是 phase3_4 DDL 命名与历史 ALTER 引入的默认命名冲突，PostgreSQL 允许重名 FK 但需后续清理冗余约束。
+  - 收尾清理 3 对重名 FK（`fk_inspection_result_batch_run` / `fk_inspection_result_collector_run_item` / `fk_inspection_task_batch_run` → 改用 PG 默认名 `<table>_<col>_fkey`，DDL 已同步改写为 idempotent；详见 `docs/db/ddl-history.md` 4.4.1）

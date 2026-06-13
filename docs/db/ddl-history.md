@@ -1020,3 +1020,32 @@ COMMIT;
 ```
 
 - **状态**：DDL 脚本已入库；目标环境是否已执行需现场确认。
+
+### 4.4.1 2026-06-13 — Phase 3.4 重名 FK 收尾
+
+- **变更类型**：约束命名修正（删除冗余短名 FK，DDL 同步改用 PG 默认名）
+- **DDL 文件**：`backend/db/dbops_phase3_4.sql`（3 处 DO 块：`fk_inspection_task_batch_run` / `fk_inspection_result_batch_run` / `fk_inspection_result_collector_run_item` → `<table>_<col>_fkey`）
+- **变更摘要**：
+  1. `dbops.inspection_result.batch_run_id`：DROP `fk_inspection_result_batch_run`，保留 `inspection_result_batch_run_id_fkey`
+  2. `dbops.inspection_result.collector_run_item_id`：DROP `fk_inspection_result_collector_run_item`，保留 `inspection_result_collector_run_item_id_fkey`
+  3. `dbops.inspection_task.batch_run_id`：DROP `fk_inspection_task_batch_run`，保留 `inspection_task_batch_run_id_fkey`
+  4. 改 DDL：3 处 DO 块的条件查询与 `ADD CONSTRAINT` 都改用 PG 默认名，避免下次重跑脚本时再次产生重名
+- **风险面**：DROP 前已 grep 应用层代码无任何短名 FK 引用；真表上默认名 FK 已存在，DROP 短名不影响引用完整性；完全可逆（重跑改后的 DDL 幂等 no-op）
+- **回滚建议（需人工确认后执行）**：
+
+```sql
+BEGIN;
+SET search_path TO dbops, public;
+-- 重新 ADD 短名 FK（与默认名共存，回到重名状态，仅用于应急回退）
+ALTER TABLE dbops.inspection_result
+    ADD CONSTRAINT fk_inspection_result_batch_run
+    FOREIGN KEY (batch_run_id) REFERENCES dbops.collector_batch_run(id) ON DELETE SET NULL,
+    ADD CONSTRAINT fk_inspection_result_collector_run_item
+    FOREIGN KEY (collector_run_item_id) REFERENCES dbops.collector_run_item(id) ON DELETE SET NULL;
+ALTER TABLE dbops.inspection_task
+    ADD CONSTRAINT fk_inspection_task_batch_run
+    FOREIGN KEY (batch_run_id) REFERENCES dbops.collector_batch_run(id) ON DELETE SET NULL;
+COMMIT;
+```
+
+- **状态**：已在 10.134.185.85:5432/dbops 执行；DDL 改后重跑验证为 idempotent（全部 `NOTICE: already exists, skipping`，无 ERROR）；`docs/db/schema-snapshot.md` 9 节"需现场确认"中"inspection_result 重名 FK"项可移除（已解决）。
