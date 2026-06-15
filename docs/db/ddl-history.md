@@ -1050,11 +1050,13 @@ COMMIT;
 
 - **状态**：已在 10.134.185.85:5432/dbops 执行；DDL 改后重跑验证为 idempotent（全部 `NOTICE: already exists, skipping`，无 ERROR）；`docs/db/schema-snapshot.md` 9 节"需现场确认"中"inspection_result 重名 FK"项可移除（已解决）。
 
-## 5. Phase1→3.4 漏记字段排查
+## 5. Phase1→3.4 漏记字段治理（已选 A 路径）
 
-> 2026-06-13 第三轮收尾：通过 `information_schema.columns` 对比仓库 DDL 文件，发现 `inspection_item` 与 `inspection_result` 真表上存在 9 个**仓库无 DDL 来源**的字段（git 全历史 `git log --all -p -- 'backend/db/*.sql'` 无任何 ALTER ADD COLUMN 痕迹）。AI 不擅自 DROP/ALTER，仅记录现状 + 治理建议，待人工确认后由后续 phase 处理。
+> 2026-06-15 通过 A 路径全部 DROP：第 1 批 9 字段 + 第 2 批 2 字段（执行第 1 批时发现 ORM 漏声明）。治理前所有字段均已通过 `COUNT(*) WHERE <>default` 聚合确认 0 行非默认数据；DROP 后 `inspection_item` 13 列、`inspection_result` 16 列，与 ORM 完全对齐。
 
-### 5.1 漏记字段清单
+### 5.1 漏记字段清单（共 11 个，已全部 DROP）
+
+**第 1 批（9 个，2026-06-15 排查发现）** — 仓库 `.sql` 文件和 git 全历史均无 ALTER 痕迹，疑似手工 ALTER 引入：
 
 | 表 | 字段 | 类型 | Nullable | Default | 疑似来源 | 与之重叠的有效字段 |
 |---|---|---|---|---|---|---|
@@ -1068,6 +1070,13 @@ COMMIT;
 | `inspection_result` | `actual_value` | jsonb | YES | | V5 archive `result_value` 的 jsonb 版本（疑似） | `result_value` (phase1, text) |
 | `inspection_result` | `details` | text | YES | | V5/phase1 早期设计遗留 | `message` (phase3_4) |
 
+**第 2 批（2 个，DROP 第 1 批后字段数比对 ORM 发现）** — phase1 原生字段但 ORM 漏声明，验证 25 行全为 NULL/默认空对象后一并 DROP：
+
+| 表 | 字段 | 类型 | Nullable | Default | 来源追溯 | 备注 |
+|---|---|---|---|---|---|---|
+| `inspection_result` | `result_value` | text | YES | | `backend/db/dbops_phase1_25_tables.sql:867` | ORM 漏声明，应用 0 引用 |
+| `inspection_result` | `extra_attrs` | jsonb | YES | `'{}'` | `backend/db/dbops_phase1_25_tables.sql:868` | ORM 漏声明，grep 命中均不在 inspection_result 上下文 |
+
 ### 5.2 排查依据
 
 ```bash
@@ -1080,30 +1089,61 @@ psql -h 10.134.185.85 -p 5432 -U dbops -d dbops -c "
 
 # 2) 仓库 DDL 文件检索
 grep -n "threshold_config\|actual_value\|dispatch_run_id" backend/db/*.sql backend/db/archive/*.sql
-# threshold_config / actual_value / status('enabled') / details / target_type / dispatch_run_id：
-#   无任何 ADD COLUMN 命中（dispatch_run_id 仅在 collector_run / collector_run_item 出现）
+# 第 1 批 9 字段：无任何 ADD COLUMN 命中
 
 # 3) git 全历史检索
 git log --all -p -- 'backend/db/*.sql' | grep -B 2 -A 1 "ADD COLUMN.*\(threshold_config\|actual_value\|details\)"
 # 全部为空
+
+# 4) FK 引用保险
+psql -c "
+  SELECT * FROM information_schema.table_constraints
+  WHERE constraint_type='FOREIGN KEY'
+    AND table_name IN ('inspection_item','inspection_result')
+    AND ... ;"
+# 0 行：9 字段无任何 FK 引用
+
+# 5) 应用层引用 grep（验证 ORM/Service/Schema/前端不读不写）
+grep -rE "\b(threshold_config|actual_value|details|dispatch_run_id|server_id|db_instance_id)\b" \
+  backend/app/ frontend/src/ 2>/dev/null | grep -v "node_modules\|__pycache__"
+# 命中分析：3 个看似命中（dispatch_run_id / actual_value）实际属于其他表
+#   - api.ts:542 dispatch_run_id → DispatchRunSummary（collector_dispatch_run）
+#   - api.ts:618 dispatch_run_id → BatchRunItemRow（collector batch verify）
+#   - api.ts:768 actual_value → AssetDriftRecordRow（phase3_3A 漂移检测）
+# 这 3 个均不在 inspection_result 上下文
 ```
 
-### 5.3 治理建议（未来 phase 决策）
+### 5.3 A 路径 DROP 执行（2026-06-15）
 
-按 CLAUDE.md「真实代码优先 + 不确定标注需现场确认」，AI 不自动处理，列出 3 条候选路径供人工选择：
-
-**路径 A：DROP 漏记字段（推荐）** — 如果业务代码确认无引用：
+**前置安全校验（必跑）**：
 
 ```sql
--- 需先验证 0 行非默认值数据，再人工执行
+-- 验证 9 字段 0 行非默认数据
+SELECT
+  (SELECT COUNT(*) FROM dbops.inspection_item WHERE target_type IS NOT NULL) AS item_target_type_nonnull,
+  (SELECT COUNT(*) FROM dbops.inspection_item WHERE threshold_config <> '{}'::jsonb) AS item_threshold_config_nondefault,
+  (SELECT COUNT(*) FROM dbops.inspection_item WHERE status <> 'enabled') AS item_status_nondefault,
+  (SELECT COUNT(*) FROM dbops.inspection_result WHERE dispatch_run_id IS NOT NULL) AS result_dispatch_run_id_nonnull,
+  (SELECT COUNT(*) FROM dbops.inspection_result WHERE server_id IS NOT NULL) AS result_server_id_nonnull,
+  (SELECT COUNT(*) FROM dbops.inspection_result WHERE db_instance_id IS NOT NULL) AS result_db_instance_id_nonnull,
+  (SELECT COUNT(*) FROM dbops.inspection_result WHERE status IS NOT NULL) AS result_status_nonnull,
+  (SELECT COUNT(*) FROM dbops.inspection_result WHERE actual_value IS NOT NULL) AS result_actual_value_nonnull,
+  (SELECT COUNT(*) FROM dbops.inspection_result WHERE details IS NOT NULL) AS result_details_nonnull;
+-- 结果：仅 inspection_item.target_type 8 行非空（值域 {mixed, os}）
+--      业务方决策：选 A1 直接 DROP（8 个 mixed/os 分类标签值丢弃）
+```
+
+**DROP 执行 SQL（已跑）**：
+
+```sql
 BEGIN;
 SET search_path TO dbops, public;
 
+-- 第 1 批 9 字段
 ALTER TABLE dbops.inspection_item
     DROP COLUMN IF EXISTS target_type,
     DROP COLUMN IF EXISTS threshold_config,
     DROP COLUMN IF EXISTS status;
-
 ALTER TABLE dbops.inspection_result
     DROP COLUMN IF EXISTS dispatch_run_id,
     DROP COLUMN IF EXISTS server_id,
@@ -1112,23 +1152,33 @@ ALTER TABLE dbops.inspection_result
     DROP COLUMN IF EXISTS actual_value,
     DROP COLUMN IF EXISTS details;
 
+-- 第 2 批 2 字段（DROP 第 1 批后字段数比对 ORM 发现）
+ALTER TABLE dbops.inspection_result
+    DROP COLUMN IF EXISTS result_value,
+    DROP COLUMN IF EXISTS extra_attrs;
+
 COMMIT;
 ```
 
-**路径 B：保留并补 DDL** — 如果业务代码确认有引用（需 grep 验证）：在 `backend/db/dbops_phase1_25_tables.sql` 末尾追加 idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`，把这 9 个字段补到 DDL 文件；并在 schema-snapshot.md 7.20 / 7.22 移除"漏记字段"标注。
+**DROP 后验证**：
 
-**路径 C：保留并 deprecate** — 折中方案：保留字段 + 在 ORM model 上加注释 `# DEPRECATED: use rule_config` 等；DDL 文件不补；后续业务慢慢迁移至新字段。
-
-### 5.4 验证 grep 命令（执行前 DBA 务必跑）
-
-```bash
-# 任何漏记字段被 ORM/Service/Schema/前端引用 → 走路径 B 或 C，不能 A
-grep -rE "(threshold_config|actual_value|dispatch_run_id|details|target_type)" \
-  backend/app/ frontend/src/ 2>/dev/null | grep -v "node_modules\|__pycache__\|target_type_id"
-# 当前（2026-06-13）：threshold_config / actual_value / details 均无 ORM 字段；
-# target_type 在 inspection_result 应用代码有用（但那是 phase3_4 有效字段，不是漏记的 inspection_item.target_type）。
-# 待 DBA 复核后再决定路径。
+```sql
+SELECT table_name, COUNT(*) AS col_count
+FROM information_schema.columns
+WHERE table_schema='dbops' AND table_name IN ('inspection_item','inspection_result')
+GROUP BY table_name;
+--  inspection_item   | 13
+--  inspection_result | 16
+-- 与 backend/app/models/dbops_assets.py InspectionItem/InspectionResult 完全一致
 ```
 
-- **状态**：记录中，未执行任何 DDL 变更；DROP 决策需 DBA + 业务方共同确认；后续 phase 3.5 起新任务"漏记字段治理"统一处理。
+### 5.4 治理决策记录
+
+| 时间 | 决策点 | 选择 | 理由 |
+|---|---|---|---|
+| 2026-06-13 | 第 1 批 9 字段 | 「DBA + 业务方决策」 | AI 不擅自 DROP/ALTER，列出 A/B/C 3 条候选 |
+| 2026-06-15 | 9 字段处理 | **A 路径：直接 DROP** | 用户确认功能开发完了开始治理；ORM grep 0 引用；前置校验 8 行非空数据（mixed/os）用户授权丢弃 |
+| 2026-06-15 | 第 2 批 2 字段（执行 A 时新发现） | **A 路径：直接 DROP** | 同性质（ORM 漏声明 + 应用 0 引用 + 0 行数据），保持路径一致 |
+
+- **状态**：✅ 已完成 A 路径 DROP 治理（11 字段全部清空）；`inspection_item` 13 列 + `inspection_result` 16 列，与 ORM 100% 对齐；`docs/db/schema-snapshot.md` 7.20 / 7.22 / 16 节已同步移除"漏记字段"标注。
 
