@@ -458,9 +458,7 @@ ORDER BY event_object_table, trigger_name;
 | id | bigint (BIGSERIAL) | NO | nextval | |
 | item_code | varchar(100) | NO | | |
 | item_name | varchar(200) | NO | | |
-| category | varchar(50) | YES | | 巡检分类：backup/ha/config/lifecycle/connectivity |
 | severity | varchar(20) | YES | 'info' | 默认严重级别 |
-| remark | text | YES | | |
 | created_at | timestamp | YES | now() | |
 | updated_at | timestamp | YES | now() | |
 | description | text | YES | | Phase 3.4：描述 |
@@ -469,7 +467,12 @@ ORDER BY event_object_table, trigger_name;
 | enabled | boolean | NO | true | Phase 3.4：是否启用 |
 | rule_config | jsonb | NO | '{}'::jsonb | Phase 3.4：规则配置（status_ok/status_abnormal/match 等） |
 
-> **说明**：上表 13 列与 `information_schema.columns` 一致，已与 `backend/app/models/dbops_assets.py:736 InspectionItem` 完全对齐。2026-06-15 A 路径治理：原 16 列中的 3 个孤儿字段（`target_type` / `threshold_config` / `status`）已 DROP，详见 [ddl-history.md §5](./ddl-history.md#5-phase13-漏记字段治理-已选-a-路径)。
+> **说明**：上表 11 列与 `information_schema.columns` 一致，已与 `backend/app/models/dbops_assets.py:736 InspectionItem` 完全对齐。2026-06-15 A 路径治理：原 16 列中的 5 个孤儿字段已 DROP：
+>
+> - 第 1 批 3 个（仓库无 DDL 来源）：`target_type` / `threshold_config` / `status`
+> - 第 3 批 2 个（ORM 漏声明）：`category` / `remark`
+>
+> 详见 [ddl-history.md §5](./ddl-history.md#5-phase13-漏记字段治理-已选-a-路径)。
 
 ### 7.21 inspection_task
 
@@ -904,8 +907,8 @@ ORDER BY event_object_table, trigger_name;
   - 收尾 DROP 旧约束 `chk_inspection_result_target`（已确认历史数据 0 行 `business_system`/`cluster` 旧值）
   - 收尾清理 3 对重名 FK（`fk_inspection_result_batch_run` / `fk_inspection_result_collector_run_item` / `fk_inspection_task_batch_run` → 改用 PG 默认名 `<table>_<col>_fkey`，DDL 已同步改写为 idempotent；详见 `docs/db/ddl-history.md` 4.4.1）
 - 2026-06-15 **phase1→3.4 漏记字段 A 路径治理完成**：
-  - `inspection_item` 真表 16 列 → **13 列**（DROP 3 个孤儿：`target_type` / `threshold_config` / `status`）
-  - `inspection_result` 真表 24 列 → **16 列**（DROP 8 个孤儿，第 1 批 6 + 第 2 批 2：`result_value` / `extra_attrs`）
-  - 第 1 批 6 个在仓库 `.sql` 文件和 git 全历史中均无 ALTER 痕迹（疑似手工 ALTER 引入），与 phase3_4 新设计字段语义重叠
-  - 第 2 批 2 个是 phase1 原生字段、ORM 漏声明，验证 25 行全为 NULL/默认空对象后一并 DROP
+  - `inspection_item` 真表 16 列 → **11 列**（DROP 5 个孤儿：第 1 批 3 + 第 3 批 2 `category` / `remark`）
+  - `inspection_result` 真表 24 列 → **16 列**（DROP 8 个孤儿：第 1 批 6 + 第 2 批 2）
+  - 第 1 批 9 字段在仓库 `.sql` 文件和 git 全历史中均无 ALTER 痕迹（疑似手工 ALTER 引入），与 phase3_4 新设计字段语义重叠
+  - 第 2 批 2 字段（result_value / extra_attrs）+ 第 3 批 2 字段（category / remark）是 phase1 原生字段、ORM 漏声明，验证全表 NULL/默认空对象后一并 DROP
   - 治理执行 SQL 与决策路径详见 [`ddl-history.md §5`](./ddl-history.md#5-phase13-漏记字段治理-已选-a-路径)

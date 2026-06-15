@@ -1054,7 +1054,7 @@ COMMIT;
 
 > 2026-06-15 通过 A 路径全部 DROP：第 1 批 9 字段 + 第 2 批 2 字段（执行第 1 批时发现 ORM 漏声明）。治理前所有字段均已通过 `COUNT(*) WHERE <>default` 聚合确认 0 行非默认数据；DROP 后 `inspection_item` 13 列、`inspection_result` 16 列，与 ORM 完全对齐。
 
-### 5.1 漏记字段清单（共 11 个，已全部 DROP）
+### 5.1 漏记字段清单（共 13 个，已全部 DROP）
 
 **第 1 批（9 个，2026-06-15 排查发现）** — 仓库 `.sql` 文件和 git 全历史均无 ALTER 痕迹，疑似手工 ALTER 引入：
 
@@ -1076,6 +1076,13 @@ COMMIT;
 |---|---|---|---|---|---|---|
 | `inspection_result` | `result_value` | text | YES | | `backend/db/dbops_phase1_25_tables.sql:867` | ORM 漏声明，应用 0 引用 |
 | `inspection_result` | `extra_attrs` | jsonb | YES | `'{}'` | `backend/db/dbops_phase1_25_tables.sql:868` | ORM 漏声明，grep 命中均不在 inspection_result 上下文 |
+
+**第 3 批（2 个，/ecc:review-pr R-1 发现）** — 同样 phase1 原生字段但 ORM 漏声明，验证 8 行全为 NULL 后一并 DROP：
+
+| 表 | 字段 | 类型 | Nullable | Default | 来源追溯 | 备注 |
+|---|---|---|---|---|---|---|
+| `inspection_item` | `category` | varchar(50) | YES | | `backend/db/dbops_phase1_25_tables.sql:808` | ORM 漏声明，注释说"巡检分类：backup/ha/config/lifecycle/connectivity"但 phase3_4 未启用 |
+| `inspection_item` | `remark` | text | YES | | `backend/db/dbops_phase1_25_tables.sql:810` | ORM 漏声明，phase3_4 改用 `description` 表达类似语义 |
 
 ### 5.2 排查依据
 
@@ -1157,10 +1164,15 @@ ALTER TABLE dbops.inspection_result
     DROP COLUMN IF EXISTS result_value,
     DROP COLUMN IF EXISTS extra_attrs;
 
+-- 第 3 批 2 字段（/ecc:review-pr R-1 发现）
+ALTER TABLE dbops.inspection_item
+    DROP COLUMN IF EXISTS category,
+    DROP COLUMN IF EXISTS remark;
+
 COMMIT;
 ```
 
-**DROP 后验证**：
+**DROP 后验证（第 1 批 + 第 2 批）**：
 
 ```sql
 SELECT table_name, COUNT(*) AS col_count
@@ -1169,7 +1181,13 @@ WHERE table_schema='dbops' AND table_name IN ('inspection_item','inspection_resu
 GROUP BY table_name;
 --  inspection_item   | 13
 --  inspection_result | 16
--- 与 backend/app/models/dbops_assets.py InspectionItem/InspectionResult 完全一致
+```
+
+**DROP 后验证（追加第 3 批后）**：
+
+```sql
+-- inspection_item 11 / inspection_result 16
+-- 与 backend/app/models/dbops_assets.py InspectionItem (L736) / InspectionResult (L833) 完全一致
 ```
 
 ### 5.4 治理决策记录
@@ -1177,8 +1195,9 @@ GROUP BY table_name;
 | 时间 | 决策点 | 选择 | 理由 |
 |---|---|---|---|
 | 2026-06-13 | 第 1 批 9 字段 | 「DBA + 业务方决策」 | AI 不擅自 DROP/ALTER，列出 A/B/C 3 条候选 |
-| 2026-06-15 | 9 字段处理 | **A 路径：直接 DROP** | 用户确认功能开发完了开始治理；ORM grep 0 引用；前置校验 8 行非空数据（mixed/os）用户授权丢弃 |
+| 2026-06-15 | 第 1 批 9 字段处理 | **A 路径：直接 DROP** | 用户确认功能开发完了开始治理；ORM grep 0 引用；前置校验 `inspection_item.target_type` 8 行非空（值域 `{mixed, os}` 分类标签）用户授权丢弃 |
 | 2026-06-15 | 第 2 批 2 字段（执行 A 时新发现） | **A 路径：直接 DROP** | 同性质（ORM 漏声明 + 应用 0 引用 + 0 行数据），保持路径一致 |
+| 2026-06-15 | 第 3 批 2 字段（/ecc:review-pr R-1 发现） | **A 路径：直接 DROP** | `/ecc:review-pr` 跑出 Important 级 finding；`category` / `remark` 是 phase1 原生字段、ORM 漏声明（`dbops_assets.py:736` 11 列 vs DB 13 列）；8/8 NULL；用户授权"先做 R-1" |
 
-- **状态**：✅ 已完成 A 路径 DROP 治理（11 字段全部清空）；`inspection_item` 13 列 + `inspection_result` 16 列，与 ORM 100% 对齐；`docs/db/schema-snapshot.md` 7.20 / 7.22 / 16 节已同步移除"漏记字段"标注。
+- **状态**：✅ 已完成 A 路径 DROP 治理（13 字段分 3 批全部清空）；`inspection_item` 11 列 + `inspection_result` 16 列，与 ORM 100% 对齐；`docs/db/schema-snapshot.md` 7.20 / 7.22 / 16 节已同步移除"漏记字段"标注。
 
