@@ -307,13 +307,21 @@ async def create_batch_run(
     # I2: per-user in-flight batch cap. Lightweight rate limit without
     # external dependency (no slowapi). Configurable via
     # COLLECTOR_MAX_BATCH_RUNS_PER_USER (default 3).
+    #
+    # M2: derive the in-flight set as the complement of
+    # BATCH_TERMINAL_STATUSES so this filter can never drift from the
+    # canonical terminal set (and from the chk_collector_batch_run_status
+    # CHECK constraint). The previous hardcoded list also contained
+    # 'launching', which is NOT a valid CollectorBatchRun.status —
+    # 'launching' belongs to CollectorDispatchRun (chk_collector_dispatch_run_status).
     from sqlalchemy import func
     from app.config import get_settings
+    from app.constants import BATCH_TERMINAL_STATUSES
     in_flight = (
         db.query(func.count(CollectorBatchRun.id))
         .filter(
             CollectorBatchRun.created_by == current_user.username,
-            CollectorBatchRun.status.in_(["pending", "running", "launching", "dispatching"]),
+            CollectorBatchRun.status.notin_(BATCH_TERMINAL_STATUSES),
         )
         .scalar()
     )

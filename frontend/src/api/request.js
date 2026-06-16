@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { isCancel } from 'axios'
 
 const request = axios.create({
   baseURL: '/api',
@@ -112,6 +112,13 @@ request.interceptors.response.use(
   },
   error => {
     const suppressErrorToast = Boolean(error?.config?.suppressErrorToast)
+    // M3: AbortError (component unmount / manual AbortController.abort())
+    // is an expected client-side cancel, not a network failure. Swallow
+    // the toast and propagate the original rejection so callers can
+    // branch on axios.isCancel(err) when they care.
+    if (isCancel(error)) {
+      return Promise.reject(error)
+    }
     if (error.response) {
       if (error.response.status === 401) {
         // Only redirect if not already on login page and router is available

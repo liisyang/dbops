@@ -101,3 +101,34 @@ describe('assetsApi business system CRUD', () => {
     expect(requestMock.delete).toHaveBeenCalledWith('/v1/servers/business-services/7/contacts/8/DBA_OWNER')
   })
 })
+
+describe('assetsApi.batchRuns spread order (M1)', () => {
+  // Regression for M1 in docs/40-tech-debt.md: when both the explicit
+  // `params` argument and a `config.params` key are passed, the explicit
+  // filter must win — otherwise a caller-supplied config silently
+  // overrides the visible query string.
+  it('explicit params win over config.params', async () => {
+    requestMock.get.mockResolvedValueOnce([])
+
+    await assetsApi.listBatchRuns(
+      { status: 'success' },
+      { params: { status: 'failed' } },
+    )
+
+    expect(requestMock.get).toHaveBeenCalledWith(
+      '/v1/collector/batch-runs',
+      { params: { status: 'success' } },
+    )
+  })
+
+  it('falls back to config.params when params arg is undefined', async () => {
+    requestMock.get.mockResolvedValueOnce([])
+
+    await assetsApi.listBatchRuns(undefined, { params: { status: 'running' } })
+
+    expect(requestMock.get).toHaveBeenCalledWith(
+      '/v1/collector/batch-runs',
+      { params: { status: 'running' } },
+    )
+  })
+})

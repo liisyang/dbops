@@ -59,7 +59,7 @@
 | # | 问题 | 位置 | 影响范围 | 风险等级 | 建议处理 | 状态 | 代码依据 |
 |---:|---|---|---|---|---|---|---|
 | L1 | `lucide-vue-next` 已安装但未使用 | `frontend/package.json:14` | 增加包体积 | Low | 确认是否需要，不需要则 `npm uninstall lucide-vue-next` | 待处理 | 全局搜索源码无 `lucide` 引用 |
-| L2 | `.js`/`.ts` 同名文件并存（0 对） | 全部 4 对已删 | TypeScript 项目中的 `.js` 文件不受类型检查；Vite 启动时把无后缀 import 解析到 `.js`，运行期 `.js` 被删除/重命名后模块图缓存不重新解析，导致前端空白（需重启 vite 才能恢复） | Low | 确认 `.ts` 版本是否为实际入口，移除冗余 `.js` 文件 | ✅ 已修复 | 2026-06-16: timezone.js / i18n.js / user.js 全删；main.js / stores/user.js / utils/weather.js 4 对 → 0 对。需 `pkill -f vite` 清旧 PID cache 后重启 |
+| L2 | `.js`/`.ts` 同名文件并存（0 对） | 3 对已删，0 对冗余 | TypeScript 项目中的 `.js` 文件不受类型检查；Vite 启动时把无后缀 import 解析到 `.js`，运行期 `.js` 被删除/重命名后模块图缓存不重新解析，导致前端空白（需重启 vite 才能恢复） | Low | 确认 `.ts` 版本是否为实际入口，移除冗余 `.js` 文件 | ✅ 已修复 | 2026-06-16: `utils/timezone.js`、`utils/i18n.js`、`stores/user.js` 3 对已删，对应 `.ts` 留存为唯一入口。`api/request.js`（无 `.ts` 对应，axios 客户端约定）+ `locales/{en,zh-CN,zh-TW,ja,pt-BR}.js`（5 个，vue-i18n 约定）是合法 `.js`，**非冗余**。`main.js` / `utils/weather.js` 在仓库历史中从未存在，文档此前误引。需 `pkill -f vite` 清旧 PID cache 后重启 |
 | L3 | CRUD 交互模式不一致 | `Servers.vue`（路由切换） vs `Instances.vue`/`Assets.vue`（OpsModal 弹窗） | 用户心智模型不一致 | Low | 统一为一种模式 | 待确认 | `Servers.vue`: 路由 `/assets/servers/create` 和 `/assets/servers/:id`；`Instances.vue:53-133`: OpsModal |
 | L4 | WebSocket 端点无认证 | `backend/app/api/websocket.py:62-75` | 任何知道 socket_id 的人可连接 WebSocket | Low | 添加 token 验证（查询参数或首条消息） | 待处理 | `websocket.py:62`: `@router.websocket("/{socket_id}")` 无 `Depends(get_current_user)` |
 | L5 | 国际化覆盖率低 | 各视图模板 | 切换语言后大量中文硬编码不变 | Low | 逐步迁移硬编码文案到 i18n | 待处理 | 各 `.vue` 文件中的中文按钮、标签、提示文案 |

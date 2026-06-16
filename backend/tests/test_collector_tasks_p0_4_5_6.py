@@ -638,7 +638,7 @@ def test_admin_role_required_for_state_change_endpoints():
         return await get_current_admin(current_user=viewer)
 
     with pytest.raises(HTTPException) as exc_info:
-        asyncio.get_event_loop().run_until_complete(_call())
+        asyncio.run(_call())
 
     assert exc_info.value.status_code == 403
     assert "Admin role required" in exc_info.value.detail
@@ -657,7 +657,7 @@ def test_admin_role_allows_admin_user():
     async def _call():
         return await get_current_admin(current_user=admin)
 
-    result = asyncio.get_event_loop().run_until_complete(_call())
+    result = asyncio.run(_call())
     assert result is admin
 
 
@@ -684,7 +684,7 @@ def test_admin_role_strict_rejects_mixed_case():
             return await get_current_admin(current_user=user)
 
         with pytest.raises(HTTPException) as exc_info:
-            asyncio.get_event_loop().run_until_complete(_call())
+            asyncio.run(_call())
         assert exc_info.value.status_code == 403, (
             f"role={bad_role!r} must be rejected with 403"
         )
@@ -1163,7 +1163,7 @@ def test_create_batch_run_returns_429_when_in_flight_cap_reached(monkeypatch):
     )
 
     with pytest.raises(HTTPException) as ei:
-        asyncio.get_event_loop().run_until_complete(
+        asyncio.run(
             create_batch_run(payload=payload, current_user=current_user, db=db)
         )
 

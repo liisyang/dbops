@@ -200,7 +200,17 @@ export const assetsApi = {
   createBatchRun: (data: BatchRunCreatePayload): Promise<BatchRunCreateResponse> =>
     request.post('/v1/collector/batch-runs', data),
   listBatchRuns: (params?: Record<string, any>, config?: Record<string, any>): Promise<BatchRunRow[]> =>
-    request.get('/v1/collector/batch-runs', { params, ...config }),
+    // M1 (40-tech-debt.md): when both the explicit `params` arg and a
+    // `config.params` key are present, the explicit filter must win;
+    // otherwise a caller-supplied config silently overrides the visible
+    // query string. We only inject `params` when it is defined, so that
+    // `listBatchRuns(undefined, { params: {...} })` still forwards the
+    // config-side query string (the previous { params, ...config }
+    // pattern lost config.params in that case too — same shape of bug).
+    request.get('/v1/collector/batch-runs', {
+      ...config,
+      ...(params !== undefined && { params }),
+    }),
   getBatchRun: (id: number | string, config?: Record<string, any>): Promise<BatchRunRow> =>
     request.get(`/v1/collector/batch-runs/${id}`, config),
   listBatchDispatches: (id: number | string): Promise<DispatchRunRow[]> =>
