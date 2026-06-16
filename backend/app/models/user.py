@@ -2,6 +2,8 @@
 用户模型 - 对应 PostgreSQL dbops.users 表
 """
 import uuid
+from typing import Literal
+
 from sqlalchemy import Column, String, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
@@ -9,6 +11,13 @@ from sqlalchemy.orm import declarative_base
 from app.utils.datetime import now_local
 
 Base = declarative_base()
+
+
+# I-4: strict role set. The DB column stays String(50) for forward
+# compatibility, but the model contract is now limited to these values.
+# get_current_admin compares with `==` (not .lower() ==) so any deviation
+# from the canonical spellings fails closed.
+UserRole = Literal["admin", "dba", "user"]
 
 
 class User(Base):

@@ -662,6 +662,68 @@ def test_admin_role_allows_admin_user():
 
 
 # ============================================================================
+# I-4: strict role comparison (no .lower() coercion)
+# ============================================================================
+
+
+def test_admin_role_strict_rejects_mixed_case():
+    """I-4: get_current_admin must fail closed on 'Admin' / 'ADMIN' /
+    'admin ' — the migration lower-cases historical data, but runtime
+    must not coerce new writes."""
+    import asyncio
+    from fastapi import HTTPException
+
+    from app.api.deps import get_current_admin
+
+    for bad_role in ("Admin", "ADMIN", "admin ", " admin", "Admin\n"):
+        user = SimpleNamespace(
+            id="u", username="u", role=bad_role, is_active=True,
+        )
+
+        async def _call():
+            return await get_current_admin(current_user=user)
+
+        with pytest.raises(HTTPException) as exc_info:
+            asyncio.get_event_loop().run_until_complete(_call())
+        assert exc_info.value.status_code == 403, (
+            f"role={bad_role!r} must be rejected with 403"
+        )
+
+
+def test_user_role_literal_contains_canonical_values():
+    """I-4: UserRole literal must include the canonical values that
+    the SQL migration accepts and get_current_admin compares against."""
+    from app.models.user import UserRole
+    import typing
+
+    # typing.get_args is the canonical way to read a Literal's values.
+    values = set(typing.get_args(UserRole))
+    assert "admin" in values
+    assert "user" in values
+    # dba is referenced by servers.py:686 as a valid role and is
+    # included in the migration's allowed set.
+    assert "dba" in values
+    # No accidental upper-case / whitespace values.
+    for v in values:
+        assert v == v.lower(), f"UserRole literal must be lower-case: {v!r}"
+        assert v == v.strip(), f"UserRole literal must have no whitespace: {v!r}"
+
+
+def test_role_lowercase_migration_sql_exists_and_is_idempotent():
+    """I-4: the migration file must exist and contain LOWER + TRIM
+    guards that make it safe to re-run."""
+    import os
+    sql_path = "/home/lisiyang/dbops/backend/db/dbops_phase3_4_user_role_lowercase.sql"
+    assert os.path.exists(sql_path), f"Migration file missing: {sql_path}"
+    src = open(sql_path, "r", encoding="utf-8").read()
+    assert "LOWER(role)" in src, "Migration must lowercase existing values"
+    assert "TRIM(role)" in src, "Migration must strip whitespace"
+    # Idempotency: WHERE clauses guard on <> LOWER / <> TRIM.
+    assert "role <> LOWER(role)" in src
+    assert "role <> TRIM(role)" in src
+
+
+# ============================================================================
 # Phase 3.4 批 4 — I2: rate limiting
 # ============================================================================
 

@@ -113,8 +113,11 @@ async def get_current_admin(
 
     Only users with role='admin' are allowed. Read-only endpoints
     should continue using get_current_user.
+
+    I-4: strict equality (no .lower()) so 'Admin' / 'admin ' / 'ADMIN'
+    fail closed. Use the UserRole literal from app.models.user.
     """
-    if (current_user.role or "").lower() != "admin":
+    if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin role required",
