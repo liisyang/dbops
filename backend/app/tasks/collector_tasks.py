@@ -133,7 +133,6 @@ class LaunchOutcome(str, enum.Enum):
     LAUNCHED = "launched"
     DATA_ERROR = "data_error"          # missing collector_run FK row
     AWX_ERROR = "awx_error"            # AwxService.launch_job raised
-    UNKNOWN_ERROR = "unknown_error"    # unexpected exception
 
 
 def _launch_one_dispatch(db, dispatch: CollectorDispatchRun) -> LaunchOutcome:
@@ -341,6 +340,17 @@ def dispatch_scheduler_task() -> dict[str, Any]:
                         summary.get("skipped_awx_error", 0) + 1
                     )
                 else:
+                    # A new LaunchOutcome was added without updating this
+                    # dispatcher. Log loudly so the regression is visible
+                    # in production logs (do NOT silently fold into
+                    # skipped_error — that masks the contract drift).
+                    logger.error(
+                        "dispatch_scheduler_tick: unmapped LaunchOutcome %r "
+                        "(dispatch_id=%s); incrementing skipped_error as "
+                        "fallback. Update collector_tasks.py dispatcher.",
+                        outcome,
+                        dispatch.id,
+                    )
                     summary["skipped_error"] += 1
                 # The launch may have flipped a dispatch from pending→launching;
                 # bump the relevant counters so sibling candidates in the same
@@ -502,9 +512,20 @@ def timeout_recovery_task() -> dict[str, Any]:
                 summary["skipped_running_in_awx"] += 1
                 continue
 
-            # The job is done in AWX but never called us back. Mark locally
-            # so the UI doesn't show it as running forever.
-            run.status = "timeout"
+            # The job is done in AWX but never called us back. Map the AWX
+            # status to the local run status so a job that finished
+            # `successful` in AWX is not labelled `timeout` locally. Only
+            # unknown / unexpected AWX terminal states fall through to
+            # `timeout` (the legacy behaviour).
+            awx_final = (awx_status.get("status") or "").lower()
+            if awx_final == "successful":
+                run.status = "success"
+            elif awx_final in ("failed", "error"):
+                run.status = "failed"
+            elif awx_final in ("canceled", "cancelled"):
+                run.status = "canceled"
+            else:
+                run.status = "timeout"
             run.error_message = (
                 f"AWX job {run.awx_job_id} reached terminal state "
                 f"({awx_status.get('status')}) but no callback was received "

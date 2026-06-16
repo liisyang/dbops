@@ -1192,7 +1192,8 @@ class BatchCollectorService:
         # C4: single source of truth for "is this batch already terminal?"
         # lives in app.constants.BATCH_TERMINAL_STATUSES. Adding a new
         # terminal status (e.g. 'expired') is now a one-line DB CHECK + one
-        # set update; all 3 sites (refresh / cancel / _summarize) follow.
+        # set update; both call sites (refresh_batch_status, cancel_batch_run)
+        # follow automatically.
         if (batch_run.status or "").lower() in BATCH_TERMINAL_STATUSES:
             return {
                 "detail": "already_terminal",

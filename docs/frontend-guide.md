@@ -175,7 +175,7 @@ src/
 | 问题 | 位置 | 影响 | 建议 | 代码依据 |
 |---|---|---|---|---|
 | lucide-vue-next 未使用 | `package.json` 依赖 | 增加包体积 | 确认是否需要，不需要则移除 | `package.json:14` |
-| `.js` / `.ts` 文件并存 | `api/logs.js` vs `api/logs.ts`，`stores/user.js` vs `stores/user.ts`，`utils/*.js` vs `utils/*.ts` | TypeScript 项目中的 `.js` 文件不受类型检查 | 需现场确认：`.js` 文件是否还有引用方，如无则移除 | `src/api/logs.js`, `src/stores/user.js`, `src/utils/timezone.js` |
+| `.js` / `.ts` 文件并存 | `api/request.js` 是项目内仅剩的 `.js` 文件 | TypeScript 项目中的 `.js` 文件不受类型检查 | 需现场确认：`api/request.js` 是否还有引用方，是否可迁移到 `request.ts` | `src/api/request.js` |
 | CRUD 交互模式不统一 | `Servers.vue` 用路由切换创建/详情页；`Instances.vue` / `Assets.vue` 用 OpsModal 弹窗 | 用户心智模型不一致 | 需现场确认：统一为一种模式 | `src/views/Servers.vue` (路由模式), `src/views/Instances.vue:53-133` (弹窗模式) |
 | 前端分页为全量加载后内存分页 | `usePagedAssetList` 一次性拉取所有页再前端切片 | 数据量大时性能瓶颈（目前无后端分页接口） | 后端提供分页查询参数后改为后端分页 | `src/composables/usePagedAssetList.ts:17-23` |
 | 国际化覆盖率低 | 大部分页面中文硬编码 | 切换语言后大量中文不变 | 逐步迁移硬编码文案到 i18n | 各视图模板中的中文文案 |
@@ -183,7 +183,7 @@ src/
 
 ## 6. 需现场确认
 
-- `api/logs.js`、`stores/user.js`、`utils/*.js` 是否还有外部引用？是否可以安全删除？
+- `api/request.js` 是否还有外部引用？是否可以迁移到 `request.ts`？
 - CRUD 交互统一为弹窗模式还是路由模式？（当前两种模式并存）
 - lucide-vue-next 是否需要保留？
 - 后续是否需要支持亮色模式？

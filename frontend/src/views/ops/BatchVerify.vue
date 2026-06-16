@@ -585,7 +585,7 @@ function formatTime(val: string | null | undefined): string {
 // ── 耗时工具：使用 utils/timezone.formatDuration（统一时区处理） ──
 // The local implementation was removed: it parsed naive backend timestamps
 // as browser-local time, which produced wrong durations in non-CST zones.
-// See app/utils/timezone.formatDuration for the fix.
+// See frontend/src/utils/timezone.ts#formatDuration for the fix.
 
 function formatDisplayValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
