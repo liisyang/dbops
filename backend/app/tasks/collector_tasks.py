@@ -218,18 +218,39 @@ def dispatch_scheduler_task() -> dict[str, Any]:
         "skipped_error": 0,
     }
 
+    # C1 v2: pg_try_advisory_lock (session-level, non-blocking) + explicit
+    # unlock. The lock key 0x434F4C4C = 'COLL' namespaces the collector
+    # scheduler. v2 differences from the original xact-lock approach:
+    #
+    #  (a) session-level lock (not xact-level): survives per-dispatch
+    #      db.commit() calls inside _launch_one_dispatch, so the entire
+    #      tick is protected.
+    #  (b) non-blocking (pg_try_*): a second worker that arrives while
+    #      another tick is in-flight immediately returns with
+    #      "scheduler_already_running" instead of queuing behind the lock.
+    #  (c) explicit unlock in finally: QueuePool returns connections to
+    #      the pool on Session.close() but does NOT close the underlying
+    #      PG connection. Without an explicit unlock the advisory lock
+    #      would leak to the next worker that happens to draw the same
+    #      pooled connection.
+    from sqlalchemy import text
+    LOCK_KEY = 0x434F4C4C  # 'COLL'
+    acquired = False
     db = SessionLocal()
     try:
-        # C1: acquire a coarse-grained PG advisory lock for the duration of
-        # this tick. Multiple Celery workers calling
-        # dispatch_scheduler_task concurrently will serialize on this lock
-        # so the precompute → quota-check → launch window is atomic.
-        # Single-worker behavior is unchanged; the lock is acquired and
-        # released in the same transaction. Key 0x434F4C4C = 'COLL' for
-        # the collector namespace; pick a different key for other task
-        # families to avoid cross-feature contention.
-        from sqlalchemy import text
-        db.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": 0x434F4C4C})
+        acquired = bool(
+            db.execute(
+                text("SELECT pg_try_advisory_lock(:k)"),
+                {"k": LOCK_KEY},
+            ).scalar()
+        )
+        # Commit the lock acquisition as its own micro-transaction so the
+        # SELECT FOR UPDATE later in this tick starts in a fresh tx.
+        db.commit()
+
+        if not acquired:
+            logger.info("dispatch scheduler skipped: another tick holds the lock")
+            return {"detail": "scheduler_already_running", "considered": 0}
 
         # Pre-compute running-dispatch counts in one GROUP BY query
         # (avoids N+1 COUNT queries in the per-candidate loop).
@@ -362,6 +383,27 @@ def dispatch_scheduler_task() -> dict[str, Any]:
                 logger.exception("refresh_batch_status failed for batch_id=%s", batch_id)
                 db.rollback()
     finally:
+        if acquired:
+            try:
+                # Release the lock in its own micro-transaction so it
+                # commits independent of any prior in-flight work.
+                db.rollback()
+                unlocked = bool(
+                    db.execute(
+                        text("SELECT pg_advisory_unlock(:k)"),
+                        {"k": LOCK_KEY},
+                    ).scalar()
+                )
+                db.commit()
+                if not unlocked:
+                    logger.warning(
+                        "dispatch scheduler advisory lock not held at unlock (leaked?)"
+                    )
+            except Exception:
+                db.rollback()
+                logger.exception(
+                    "advisory lock unlock failed; lock will release on conn close"
+                )
         db.close()
 
     if any(summary.values()):
@@ -397,32 +439,56 @@ def timeout_recovery_task() -> dict[str, Any]:
         "skipped_running_in_awx": 0,
     }
 
+    from app.constants import RUN_TERMINAL_STATUSES, DISPATCH_TERMINAL_STATUSES
+
     db = SessionLocal()
     try:
-        # Only inspect runs that are non-terminal AND have a known awx_job_id.
-        # started_at stores local time (Asia/Shanghai, from datetime.now()),
-        # matching PostgreSQL's now(). The cutoff uses server-side
-        # `func.now() - make_interval` so timeout_minutes is bound, never
-        # interpolated (avoids SQL-injection / quoting hazards).
-        candidates = (
-            db.query(CollectorRun)
-            .filter(
-                CollectorRun.status.in_(["pending", "launched", "running"]),
-                CollectorRun.awx_job_id.isnot(None),
-                CollectorRun.started_at.isnot(None),
-                CollectorRun.started_at
-                < func.now() - func.make_interval(0, 0, 0, 0, 0, int(timeout_minutes), 0),
+        # I3 v2: enumerate candidate IDs WITHOUT holding FOR UPDATE locks,
+        # then re-select each row one-at-a-time with skip_locked so a
+        # parallel tick or callback writer is not blocked. Also re-check
+        # run.status under the lock — a callback may have finalized it
+        # between enumeration and lock acquisition.
+        candidate_ids = [
+            row.id
+            for row in (
+                db.query(CollectorRun.id)
+                .filter(
+                    CollectorRun.status.in_(["pending", "launched", "running"]),
+                    CollectorRun.awx_job_id.isnot(None),
+                    CollectorRun.started_at.isnot(None),
+                    CollectorRun.started_at
+                    < func.now() - func.make_interval(0, 0, 0, 0, 0, int(timeout_minutes), 0),
+                )
+                .limit(50)
+                .all()
             )
-            .with_for_update(skip_locked=True)
-            .limit(50)
-            .all()
-        )
-        for run in candidates:
+        ]
+
+        for run_id in candidate_ids:
+            run = (
+                db.query(CollectorRun)
+                .filter(CollectorRun.id == run_id)
+                .with_for_update(skip_locked=True)
+                .first()
+            )
+            if run is None:
+                # Another worker grabbed it, or it transitioned out of
+                # pending between enumeration and lock acquisition.
+                continue
+            # I3 v2: use RUN_TERMINAL_STATUSES (canceled double-L), not
+            # BATCH_TERMINAL_STATUSES (cancelled single-L). run.status
+            # uses US spelling per chk_collector_run_status.
+            if (run.status or "").lower() in RUN_TERMINAL_STATUSES:
+                # Callback (or other) already finalized while we waited.
+                continue
             summary["considered"] += 1
             try:
                 awx_status = AwxService.get_job_status(int(run.awx_job_id))
             except AwxServiceError as exc:
-                # AWX unreachable — skip; next tick will try again
+                # I4: release this row's lock so a parallel tick can retry.
+                # Without rollback the FOR UPDATE lock persists until the
+                # next commit/close, blocking other workers.
+                db.rollback()
                 logger.warning(
                     "timeout_recovery awx_status failed: run_id=%s err=%s",
                     run.run_id,
@@ -453,18 +519,13 @@ def timeout_recovery_task() -> dict[str, Any]:
                     .first()
                 )
                 if dispatch is not None:
-                    # N2: do NOT clobber a dispatch that the user (or callback)
-                    # already moved to a terminal state. In particular, a
-                    # cancel_batch_run sets dispatch.status='cancelled' and
-                    # commits; if this tick fires afterwards we must preserve
-                    # that signal. Same for callback-arrived success/failed.
-                    _dispatch_terminal = {
-                        "success",
-                        "partial_success",
-                        "failed",
-                        "cancelled",
-                        "callback_failed",
-                    }
+                    # A2: use the canonical DISPATCH_TERMINAL_STATUSES constant
+                    # (subtract "timeout" — a dispatch we are about to mark
+                    # timeout should not be skipped because it merely happens
+                    # to be in the terminal set). All other terminal states
+                    # (success, failed, cancelled, callback_failed, etc.)
+                    # are genuinely terminal and must not be clobbered.
+                    _dispatch_terminal = DISPATCH_TERMINAL_STATUSES - {"timeout"}
                     current = (dispatch.status or "").lower()
                     if current in _dispatch_terminal:
                         logger.info(

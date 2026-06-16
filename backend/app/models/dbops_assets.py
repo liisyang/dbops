@@ -1164,13 +1164,18 @@ class AssetFactSnapshot(DbopsAssetBase):
         Index("idx_fact_snapshot_source_run", "source_run_id"),
         Index("idx_fact_snapshot_check_code", "check_code"),
         Index("idx_fact_snapshot_collected_at", collected_at.desc()),
-        # I3: prevent two parallel handle_callback calls from both
-        # passing the existing_snapshot pre-check and double-inserting.
-        # Mirrors the DB-level UNIQUE constraint added in
-        # dbops_phase3_4_batch_verify_p0_4_5_6_fixups.sql.
-        UniqueConstraint(
+        # v2 I5: replace full UNIQUE with partial UNIQUE INDEX (TOCTOU only
+        # when both columns populated). Matches DB migration v2.
+        # DO NOT also keep UniqueConstraint — they would be two distinct
+        # objects with the same name (constraint vs index) and confuse
+        # Base.metadata.create_all / Alembic autogenerate.
+        Index(
+            "uq_asset_fact_snapshot_source",
             "source_run_id", "source_item_key",
-            name="uq_asset_fact_snapshot_source",
+            unique=True,
+            postgresql_where=text(
+                "source_run_id IS NOT NULL AND source_item_key IS NOT NULL"
+            ),
         ),
     )
 

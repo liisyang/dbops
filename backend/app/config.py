@@ -76,6 +76,8 @@ class Settings(BaseSettings):
     COLLECTOR_RUN_TIMEOUT_MINUTES: int = 30
     # timeout_recovery beat 间隔（秒）
     COLLECTOR_TIMEOUT_RECOVERY_INTERVAL: int = 60
+    # 单用户最大 in-flight batch runs 数量 (I2 rate limit)
+    COLLECTOR_MAX_BATCH_RUNS_PER_USER: int = 3
 
     class Config:
         env_file = os.path.join(BASE_DIR, '.env')

@@ -1,8 +1,8 @@
 # 技术债 Backlog
 
 > 文档状态：已校准
-> 最近校准：2026-05-22
-> 依据来源：真实代码
+> 最近校准：2026-06-16
+> 依据来源：真实代码 + PR 评审批 0/1/2/3/4
 
 ## 1. 维护定位
 
@@ -14,11 +14,11 @@
 
 | 等级 | 数量 | 说明 |
 |---|---:|---|
-| High | 0 | 已全部修复（2026-06-16 批 0/1/2 收尾） |
+| High | 0 | 已全部修复（2026-06-16 批 0/1/2/3/4 收尾） |
 | Medium | 10 | 重复实现、不一致、性能隐患（4 项已修复） |
-| Low | 6 | 清理项、渐进优化（2 项已修复：timezone.js 删、L6） |
+| Low | 6 | 清理项、渐进优化（3 项已修复：timezone.js / i18n.js / user.js 全删） |
 
-> 最近校准：2026-06-16 10:30 — PR 评审 19 项修复（批 0/1/2/3）全部完成：advisory lock (C1) + cancel_batch_run 终态集合补 callback_failed (C2) + 锁粒度 (C3) + BATCH_TERMINAL_STATUSES 常量 (C4) + now_local() 时区一致性 (C5) + cancelled_at 取消信号 (C6) + 前端 dayjs.tz (C8) + N1/N2/N3 业务正确性 + I1 LaunchOutcome 桶分 + I3 AssetFactSnapshot UNIQUE + 测试 mock 修复（_FakeCancelDB）；后端重启 PID 3809407 + celery beat/worker 新进程 + batch 133/134 验证 dispatch.finished_at 不被 cancel 覆盖、cancelled_at 正确设置、awx_cancel_failed=0
+> 最近校准：2026-06-16 15:00 — 批 4 v2 加固完成：C1v2 pg_try_advisory_lock + C2 cancel race + C3+I5 partial unique index + C4/C5 .js 删除 + I1 admin gate + I2 rate limit + I3 timeout re-read + I4 lock release + A2 DISPATCH_TERMINAL_STATUSES + I6 AWX sanitize + I7 callback replay + I8 AbortController + I9 formatTime + I10 TERMINAL_BATCH_STATUS_SET。全 111 测试 + frontend build 绿。
 
 ## 3. 技术债清单
 
@@ -59,7 +59,7 @@
 | # | 问题 | 位置 | 影响范围 | 风险等级 | 建议处理 | 状态 | 代码依据 |
 |---:|---|---|---|---|---|---|---|
 | L1 | `lucide-vue-next` 已安装但未使用 | `frontend/package.json:14` | 增加包体积 | Low | 确认是否需要，不需要则 `npm uninstall lucide-vue-next` | 待处理 | 全局搜索源码无 `lucide` 引用 |
-| L2 | `.js`/`.ts` 同名文件并存（4 对） | `main.js/ts`, `stores/user.js/ts`, `utils/i18n.js/ts`, `utils/weather.js/ts` | TypeScript 项目中的 `.js` 文件不受类型检查 | Low | 确认 `.ts` 版本是否为实际入口，移除冗余 `.js` 文件 | 部分修复 | 已删 `utils/timezone.js`（与 `.ts` 冲突导致 build 失败，批 1 A1）；其余 4 对待处理 |
+| L2 | `.js`/`.ts` 同名文件并存（0 对） | 全部 4 对已删 | TypeScript 项目中的 `.js` 文件不受类型检查；Vite 启动时把无后缀 import 解析到 `.js`，运行期 `.js` 被删除/重命名后模块图缓存不重新解析，导致前端空白（需重启 vite 才能恢复） | Low | 确认 `.ts` 版本是否为实际入口，移除冗余 `.js` 文件 | ✅ 已修复 | 2026-06-16: timezone.js / i18n.js / user.js 全删；main.js / stores/user.js / utils/weather.js 4 对 → 0 对。需 `pkill -f vite` 清旧 PID cache 后重启 |
 | L3 | CRUD 交互模式不一致 | `Servers.vue`（路由切换） vs `Instances.vue`/`Assets.vue`（OpsModal 弹窗） | 用户心智模型不一致 | Low | 统一为一种模式 | 待确认 | `Servers.vue`: 路由 `/assets/servers/create` 和 `/assets/servers/:id`；`Instances.vue:53-133`: OpsModal |
 | L4 | WebSocket 端点无认证 | `backend/app/api/websocket.py:62-75` | 任何知道 socket_id 的人可连接 WebSocket | Low | 添加 token 验证（查询参数或首条消息） | 待处理 | `websocket.py:62`: `@router.websocket("/{socket_id}")` 无 `Depends(get_current_user)` |
 | L5 | 国际化覆盖率低 | 各视图模板 | 切换语言后大量中文硬编码不变 | Low | 逐步迁移硬编码文案到 i18n | 待处理 | 各 `.vue` 文件中的中文按钮、标签、提示文案 |
@@ -77,7 +77,7 @@
 ## 5. 需现场确认
 
 - H4 硬编码凭证：当前 `.env` 文件是否存在并覆盖了默认值？
-- L2 `.js`/`.ts` 双文件：4 对待处理（已删 timezone.js → 2026-06-16 批 1 A1）
+- L2 `.js`/`.ts` 双文件：全部 4 对已清理（2026-06-16 批 4）
 - L3 CRUD 交互模式：倾向于统一为弹窗模式还是路由模式？
 - L1 `lucide-vue-next`：是否有计划使用？还是可以直接移除？
 - M9 `resource_tag`：多态关联是否需要应用层定期校验/清理？
@@ -131,6 +131,30 @@
 | A6 | Advisory | `cancel_batch_run` 多处 `db.commit()`，可在异常路径加 `db.rollback()` 保险 | 用 context manager 统一事务 | 下个 refactor |
 | A7 | Advisory | `BatchCollectorService` 越来越大（>700 行） | 按职责拆 `BatchRunService` / `DispatchService` / `RunSummaryService` | 下个 refactor |
 | A8 | Advisory | `tests/test_collector_tasks_p0_4_5_6.py` mock 重写后可参数化 | 抽 `pytest.mark.parametrize` 模板 | 测试清理 |
+
+### 6.3 批 4 — v2 加固 (2026-06-16)
+
+> 基于 v2 plan（pg_try_advisory_lock + QueuePool 防泄漏 + RUN_TERMINAL_STATUSES 拼写 + partial unique index）
+> 执行：C1 v2 / C2 / C3+I5 合并迁移 / C4/C5 .js 删除 / I1 admin gate / I2 rate limit / I3 timeout re-read / I4 lock release / A2 DISPATCH_TERMINAL_STATUSES / I6 AWX error sanitize / I7 callback replay / I8 AbortController / I9 formatTime type / I10 TERMINAL_BATCH_STATUS_SET
+> 全 111 测试通过 + frontend build 绿
+
+| 编号 | 类别 | 描述 | 落点 | 闭环 |
+|---|---|---|---|---|---|
+| C1v2 | Critical | `pg_advisory_xact_lock` 被 per-dispatch commit 提前释放 + QueuePool 锁泄漏 | `pg_try_advisory_lock` (session-level, non-blocking) + finally 显式 unlock | ✅ 批 4 |
+| C2 | Critical | `cancel_batch_run` 最终 batch re-acquire 无条件覆盖终态 | `BATCH_TERMINAL_STATUSES` 守卫 + `detail=already_terminal` | ✅ 批 4 |
+| C3+I5 | Critical | `uq_asset_fact_snapshot_source` UNIQUE CONSTRAINT 不覆盖 NULL + 单列索引冗余 | 合并迁移：DROP CONSTRAINT → CREATE PARTIAL UNIQUE INDEX (WHERE NOT NULL) + ORM 同步 | ✅ 批 4 |
+| C4 | Critical | `i18n.js` Vite 优先于 .ts 不可达 | 删除 `frontend/src/utils/i18n.js` | ✅ 批 4 |
+| C5 | Critical | `user.js` Vite 优先于 .ts 不可达 | 删除 `frontend/src/stores/user.js` | ✅ 批 4 |
+| I1 | Important | `create_batch_run` / `retry_failed_items` / `cancel_batch_run` 无 admin 角色门 | `get_current_admin` dependency + 3 endpoint 切换 | ✅ 批 4 |
+| I2 | Important | `create_batch_run` 无速率限制 | per-user in-flight batch cap (default 3) + `COLLECTOR_MAX_BATCH_RUNS_PER_USER` config | ✅ 批 4 |
+| I3 | Important | `timeout_recovery_task` 不重读 run.status（callback 抢先终态） | per-row re-select + `RUN_TERMINAL_STATUSES` 守卫（canceled 双 L） | ✅ 批 4 |
+| I4 | Important | `timeout_recovery_task` AWX error 时 FOR UPDATE 锁未释放 | `db.rollback()` before `continue` | ✅ 批 4 |
+| A2 | Advisory | `timeout_recovery` 硬编码终态集合 | 改用 `DISPATCH_TERMINAL_STATUSES - {"timeout"}` | ✅ 批 4 |
+| I6 | Important | AWX error body 全量落 DB（可能泄漏凭据/路径/IP） | cap 500 字符 + raw body 只写 log | ✅ 批 4 |
+| I7 | Important | callback 无 replay protection | `collector_callback` 入口 `RUN_TERMINAL_STATUSES` 检查 | ✅ 批 4 |
+| I8 | Important | BatchVerify 轮询无 AbortController | 切路由/换 batch 时 abort in-flight 请求 | ✅ 批 4 |
+| I9 | Advisory | `formatTime(val: any)` 类型过宽 | 收紧为 `string | null | undefined` | ✅ 批 4 |
+| I10 | Advisory | `TERMINAL_BATCH_STATUSES` 前端本地硬编码 | 迁移到 `@/types/api.ts` 作为 `TERMINAL_BATCH_STATUS_SET` | ✅ 批 4 |
 | A9 | Advisory | `cancelled_at` 列名在 schema-snapshot 也需补 | `docs/db/schema-snapshot.md` 更新 | 文档同步 sprint |
 
 ### 6.3 PR 评审闭环验证

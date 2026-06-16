@@ -199,10 +199,10 @@ export const assetsApi = {
   // Phase 3.2 — Batch verify
   createBatchRun: (data: BatchRunCreatePayload): Promise<BatchRunCreateResponse> =>
     request.post('/v1/collector/batch-runs', data),
-  listBatchRuns: (params?: Record<string, any>): Promise<BatchRunRow[]> =>
-    request.get('/v1/collector/batch-runs', { params }),
-  getBatchRun: (id: number | string): Promise<BatchRunRow> =>
-    request.get(`/v1/collector/batch-runs/${id}`),
+  listBatchRuns: (params?: Record<string, any>, config?: Record<string, any>): Promise<BatchRunRow[]> =>
+    request.get('/v1/collector/batch-runs', { params, ...config }),
+  getBatchRun: (id: number | string, config?: Record<string, any>): Promise<BatchRunRow> =>
+    request.get(`/v1/collector/batch-runs/${id}`, config),
   listBatchDispatches: (id: number | string): Promise<DispatchRunRow[]> =>
     request.get(`/v1/collector/batch-runs/${id}/dispatches`),
   listBatchItems: (

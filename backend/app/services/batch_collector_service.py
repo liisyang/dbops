@@ -1171,11 +1171,23 @@ class BatchCollectorService:
         batch_run = (
             db.query(CollectorBatchRun)
             .filter(CollectorBatchRun.id == batch_run_id)
-            .with_for_update()
+            .with_for_update(skip_locked=True)
             .first()
         )
         if not batch_run:
-            raise LookupError("batch_run_id 不存在")
+            # P2: skip_locked means another writer (refresh_batch_status or
+            # a sibling cancel) is currently holding the row. Do not block;
+            # let the caller retry or treat the in-flight call as the
+            # source of truth.
+            return {
+                "detail": "concurrent_writer",
+                "batch_run_id": batch_run_id,
+                "current_status": None,
+                "cancelled_dispatches": 0,
+                "awx_cancel_requested": 0,
+                "awx_cancel_failed": 0,
+                "commit_failures": 0,
+            }
 
         # C4: single source of truth for "is this batch already terminal?"
         # lives in app.constants.BATCH_TERMINAL_STATUSES. Adding a new
@@ -1185,10 +1197,11 @@ class BatchCollectorService:
             return {
                 "detail": "already_terminal",
                 "batch_run_id": batch_run_id,
-                "status": batch_run.status,
+                "current_status": batch_run.status,
                 "cancelled_dispatches": 0,
                 "awx_cancel_requested": 0,
                 "awx_cancel_failed": 0,
+                "commit_failures": 0,
             }
 
         # C3: enumerate candidate IDs WITHOUT holding a long-running
@@ -1210,6 +1223,7 @@ class BatchCollectorService:
         cancelled_dispatches = 0
         awx_cancel_requested = 0
         awx_cancel_failed = 0
+        commit_failures = 0
         now = BatchCollectorService._now()
 
         for dispatch_id in candidate_ids:
@@ -1277,6 +1291,9 @@ class BatchCollectorService:
                 db.commit()
             except Exception as exc:
                 db.rollback()
+                commit_failures += 1
+                # P2: track and surface — caller must NOT be told the row
+                # was cancelled when its commit silently rolled back.
                 logger.warning(
                     "cancel_batch_run per-row commit failed: dispatch_id=%s error=%s",
                     dispatch_id,
@@ -1284,30 +1301,77 @@ class BatchCollectorService:
                 )
 
         # Refresh the batch row under its own short lock; final status write.
+        # C2: the per-row loop above commits each row individually,
+        # releasing the initial FOR UPDATE lock from line 1174. A callback
+        # (or refresh_batch_status) could have finalized the batch in the
+        # meantime. If the batch is already terminal, preserve that state
+        # instead of unconditionally overwriting to "cancelled".
         batch_run = (
             db.query(CollectorBatchRun)
             .filter(CollectorBatchRun.id == batch_run_id)
-            .with_for_update()
+            .with_for_update(skip_locked=True)
             .first()
         )
-        if batch_run is not None:
-            batch_run.status = "cancelled"
-            batch_run.finished_at = now
-            batch_run.error_message = (
-                batch_run.error_message
-                if batch_run.error_message
-                else f"cancelled by {cancelled_by or 'user'}"
+        if batch_run is None:
+            # P2: another writer holds the row right now (e.g. callback
+            # finalizing). The per-row cancellations we already committed
+            # stand; report partial with the dispatch counts we did apply.
+            return {
+                "detail": "concurrent_writer",
+                "batch_run_id": batch_run_id,
+                "current_status": None,
+                "cancelled_dispatches": cancelled_dispatches,
+                "awx_cancel_requested": awx_cancel_requested,
+                "awx_cancel_failed": awx_cancel_failed,
+                "commit_failures": commit_failures,
+            }
+        current_status = (batch_run.status or "").lower()
+        if current_status in BATCH_TERMINAL_STATUSES:
+            # Lost the race: a callback (or sibling) finalized first.
+            # Preserve that terminal state — do NOT clobber to cancelled.
+            logger.info(
+                "cancel_batch_run race lost: batch_id=%s current_status=%s, "
+                "skipping cancel overwrite (per-row cancellations=%d applied)",
+                batch_run_id, current_status, cancelled_dispatches,
             )
             db.commit()
-            db.refresh(batch_run)
+            return {
+                "detail": "already_terminal",
+                "batch_run_id": batch_run_id,
+                "current_status": current_status,
+                "cancelled_dispatches": cancelled_dispatches,
+                "awx_cancel_requested": awx_cancel_requested,
+                "awx_cancel_failed": awx_cancel_failed,
+                "commit_failures": commit_failures,
+            }
+        batch_run.status = "cancelled"
+        batch_run.finished_at = now
+        batch_run.error_message = (
+            batch_run.error_message
+            if batch_run.error_message
+            else f"cancelled by {cancelled_by or 'user'}"
+        )
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            commit_failures += 1
+            logger.warning(
+                "cancel_batch_run final batch-row commit failed: batch_id=%s error=%s",
+                batch_run_id, exc,
+            )
+        db.refresh(batch_run)
 
+        # P2: surface partial cancellation if any per-row commit rolled back.
+        final_detail = "partial" if commit_failures > 0 else "cancelled"
         return {
-            "detail": "cancelled",
+            "detail": final_detail,
             "batch_run_id": batch_run_id,
-            "status": batch_run.status if batch_run else None,
+            "current_status": batch_run.status,
             "cancelled_dispatches": cancelled_dispatches,
             "awx_cancel_requested": awx_cancel_requested,
             "awx_cancel_failed": awx_cancel_failed,
+            "commit_failures": commit_failures,
         }
 
     @staticmethod

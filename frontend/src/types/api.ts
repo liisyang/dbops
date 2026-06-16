@@ -883,3 +883,21 @@ export interface InspectionResultRow {
   created_at?: string | null
   updated_at?: string | null
 }
+
+// ============================================================================
+// I10: Shared batch status constants (single source of truth)
+// ============================================================================
+// Matches backend BATCH_TERMINAL_STATUSES + "canceled" compat spelling.
+export const TERMINAL_BATCH_STATUSES = [
+  'success',
+  'partial_success',
+  'failed',
+  'timeout',
+  'callback_failed',
+  'cancelled',
+  'canceled',  // compat: collector_run uses US spelling
+] as const
+
+export type BatchStatus = (typeof TERMINAL_BATCH_STATUSES)[number] | 'pending' | 'running' | 'launching' | 'dispatching'
+
+export const TERMINAL_BATCH_STATUS_SET: ReadonlySet<string> = new Set(TERMINAL_BATCH_STATUSES)

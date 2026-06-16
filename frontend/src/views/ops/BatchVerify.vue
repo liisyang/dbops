@@ -119,6 +119,10 @@
         <!-- Messages -->
         <div v-if="launchMessage" class="rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">{{ launchMessage }}</div>
         <div v-if="launchError" class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">{{ launchError }}</div>
+        <div v-if="pollError" class="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-200">
+          {{ pollError }}
+          <button class="ml-3 underline" @click="pollError = ''">关闭</button>
+        </div>
       </div>
     </OpsSectionCard>
 
@@ -444,6 +448,7 @@ import OpsTableShell from '@/components/ops/OpsTableShell.vue'
 import OpsEmptyState from '@/components/ops/OpsEmptyState.vue'
 import { assetsApi } from '@/api/assets'
 import type { AssetChangeProposalRow, BatchRunRow, BatchRunItemRow, DbTypeRow } from '@/types/api'
+import { TERMINAL_BATCH_STATUS_SET } from '@/types/api'
 import { formatInTz, formatDuration } from '@/utils/timezone'
 
 const selectionMode = ref<'ids' | 'filters'>('ids')
@@ -462,50 +467,53 @@ const batchProposals = ref<AssetChangeProposalRow[]>([])
 const proposalsLoading = ref(false)
 const proposalsError = ref('')
 const selectedItemId = ref<number | null>(null)
+// P1: 轮询失败可见 — 5s tick 失败不再静默停轮询/清空详情
+const pollError = ref('')
 
 // ── 自动轮询：运行中批次每 5s 刷新 ────────────────────────────────
 const POLL_INTERVAL = 5000
 const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
 const pollingLoading = ref(false)
 
-const TERMINAL_BATCH_STATUSES = new Set([
-  'success',
-  'partial_success',
-  'failed',
-  'timeout',
-  'callback_failed',
-  'cancelled',
-  'canceled',
-])
+// I10: imported from @/types/api (single source of truth)
+// TERMINAL_BATCH_STATUS_SET is ReadonlySet<string>, used via .has()
 
 const isBatchRunning = computed(() => {
   const s = batchDetail.value?.status?.toLowerCase()
-  return !!s && !TERMINAL_BATCH_STATUSES.has(s)
+  return !!s && !TERMINAL_BATCH_STATUS_SET.has(s)
 })
+
+// I8: AbortController for in-flight poll requests so we don't leave
+// dangling network calls when the user navigates away or switches batch.
+let pollController: AbortController | null = null
 
 function startPolling() {
   if (pollTimer.value) return
-  pollTimer.value = setInterval(async () => {
+  const tick = async () => {
     if (!selectedBatchId.value) {
       stopPolling()
       return
     }
-    // 防重入：上一次请求未完成则跳过本次
     if (pollingLoading.value) return
     pollingLoading.value = true
+    pollController = new AbortController()
     try {
-      await loadBatches()
-      await loadBatchDetail(selectedBatchId.value)
+      await loadBatches({ signal: pollController.signal })
+      await loadBatchDetail(selectedBatchId.value, { signal: pollController.signal })
       if (!isBatchRunning.value) {
         stopPolling()
       }
-    } catch (err) {
-      // 网络偶发错误不停止轮询，下次 tick 重试
+    } catch (err: any) {
+      if (err?.name === 'AbortError' || err?.name === 'CanceledError') return
+      // P1: 可见失败但不停轮询 — 操作员需要持续看到运行状态
+      pollError.value = `轮询失败: ${err?.message || err}（已记日志，继续轮询）`
       console.error('poll batch detail failed', err)
     } finally {
       pollingLoading.value = false
     }
-  }, POLL_INTERVAL)
+  }
+  tick()  // immediate first fetch
+  pollTimer.value = window.setInterval(tick, POLL_INTERVAL)
 }
 
 function stopPolling() {
@@ -513,11 +521,17 @@ function stopPolling() {
     clearInterval(pollTimer.value)
     pollTimer.value = null
   }
+  if (pollController) {
+    pollController.abort()
+    pollController = null
+  }
+  pollingLoading.value = false
 }
 
 // 切换 batch 时重置轮询
 watch(selectedBatchId, () => {
   stopPolling()
+  if (isBatchRunning.value) startPolling()
 })
 
 const checkCodeOptions = [
@@ -563,8 +577,9 @@ const selectedFacts = computed(() => {
   return Array.isArray(facts) ? facts : []
 })
 
-function formatTime(val: any): string {
-  return val ? formatInTz(val) : '-'
+function formatTime(val: string | null | undefined): string {
+  if (!val) return '—'
+  return formatInTz(val)
 }
 
 // ── 耗时工具：使用 utils/timezone.formatDuration（统一时区处理） ──
@@ -723,17 +738,20 @@ async function createBatch() {
   }
 }
 
-async function loadBatches() {
+async function loadBatches(opts?: { signal?: AbortSignal }) {
   try {
-    batches.value = await assetsApi.listBatchRuns({ limit: 20 })
-  } catch {
-    // silently fail
+    batches.value = await assetsApi.listBatchRuns({ limit: 20 }, opts)
+  } catch (e: any) {
+    if (e?.name === 'AbortError' || e?.name === 'CanceledError') return
+    // P1: 不再 silently fail — 列表接口失败必须可见
+    pollError.value = `批量列表加载失败: ${e?.message || e}`
+    console.error('loadBatches failed', e)
   }
 }
 
-async function loadBatchDetail(id: number) {
+async function loadBatchDetail(id: number, opts?: { signal?: AbortSignal }) {
   try {
-    batchDetail.value = await assetsApi.getBatchRun(id)
+    batchDetail.value = await assetsApi.getBatchRun(id, opts)
     await loadItems()
     await loadBatchProposals()
     // 运行中批次启动轮询；终态停止
@@ -742,9 +760,11 @@ async function loadBatchDetail(id: number) {
     } else {
       stopPolling()
     }
-  } catch {
-    batchDetail.value = null
-    stopPolling()
+  } catch (e: any) {
+    if (e?.name === 'AbortError' || e?.name === 'CanceledError') return
+    // P1: 保留旧 batchDetail，不清空，不停轮询；仅暴露错误
+    pollError.value = `批次详情加载失败: ${e?.message || e}`
+    console.error('loadBatchDetail failed', e)
   }
 }
 

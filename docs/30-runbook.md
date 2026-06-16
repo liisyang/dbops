@@ -1,7 +1,7 @@
 # 排障手册
 
 > 文档状态：已校准
-> 最近校准：2026-06-11
+> 最近校准：2026-06-16
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -57,6 +57,10 @@
 | batch/dispatch 的 `created_at` 显示 UTC (07:xx) 而非 CST (15:xx)，与 `updated_at` 不一致 | ORM model `default=datetime.utcnow` 写入 UTC，但 DB trigger `set_updated_at()` 使用 PostgreSQL `now()`（CST） | Python 侧写入 UTC naive 值，PostgreSQL 侧写入 CST naive 值 → 同一行的 `created_at`/`updated_at` 时区不同 | 已修复：模型 defaults 全部改为 `default=datetime.now`（67 处），`_now()` 改为 `datetime.now()`，`collector_tasks.py` 所有显式 `datetime.utcnow()` 改为 `datetime.now()` | `backend/app/models/dbops_assets.py` + `backend/app/services/collector_service.py:_now()` + `backend/app/tasks/collector_tasks.py` |
 | timeout_recovery 将刚启动的 job 立即标记为 timeout（< 2 分钟） | `collector_tasks.py` 查询用 `func.now() - interval`（CST）比较 `started_at`（UTC naive） | M14 v1 修复只改了查询端用 CST，但写入端仍用 UTC → CST 15:14 - 30min = 14:44 vs UTC naive 07:12 → `07:12 < 14:44` 恒为 TRUE → 所有新 job 秒级 timeout | 已修复（M14 v2）：写入端全部改为 `datetime.now()`（CST），查询端 `func.now() - interval`（CST），双端对齐 | `backend/app/tasks/collector_tasks.py` + `backend/app/models/dbops_assets.py` |
 | 前端 61088 返回 HTML 但 `<div id="app">` 始终空白（Pre-transform error） | curl `/src/main.ts` 看编译后 import 路径是否仍引用已删除/重命名的 `.js` 文件；看 `frontend-dev.log` 是否有 `Pre-transform error: Failed to load url /src/...` | Vite dev server 启动时把 `@/utils/foo`（无后缀）解析到 `foo.js`，运行期 `foo.js` 被删除/重命名后，Vite 模块图缓存不重新解析 → 编译后 main.ts 仍 emit `/src/utils/foo.js` → 浏览器请求 `.js` 拿到 index.html（HTML 200）→ JS 解析失败 → app 永不 mount | 1) `curl -sS http://127.0.0.1:61088/src/main.ts \| grep foo` 找 stale 引用；2) `pkill -f "vite.*61088"`；3) `cd frontend && nohup npx vite --host 0.0.0.0 --port 61088 --strictPort > frontend-dev.log 2>&1 &`；4) 复查 `curl http://127.0.0.1:61088/src/main.ts` import 路径都指向磁盘上存在的文件；5) 浏览器 hard refresh | `frontend/vite.config.ts:15-23` + `frontend/src/main.ts:5` |
+| 多 Celery worker 同时 dispatch 导致 per-dispatch commit 提前释放 xact lock | 检查 `pg_locks` 是否有 0x434F4C4C 的 advisory lock 堆积；看 worker 日志是否每 15s 只有一个 `dispatch_scheduler_tick` | v1 使用 `pg_advisory_xact_lock`（xact 级），per-dispatch `db.commit()` 提前释放 → 后续 loop 无保护。v2 改用 `pg_try_advisory_lock`（session 级非阻塞）+ finally 显式 unlock。QueuePool 场景下 `Session.close()` 还连接回池不断 PG 连接，不显式 unlock 会锁泄漏到下个 worker | 查看 `pg_locks WHERE locktype='advisory' AND objid=1129279564` 持续只有 0 或 1 个；若持续 > 1 需重启 worker | `backend/app/tasks/collector_tasks.py:dispatch_scheduler_task` (C1 v2, 批 4) |
+| cancel_batch_run 后 batch.status 被 callback 覆盖为 success | 检查 cancel 请求的时间线 vs callback 时间线 | per-row commit 释放初始 FOR UPDATE 锁后，callback 可抢先 finalize batch → cancel 最终无条件写 "cancelled" 覆盖 "success" | v2 在最终 batch re-acquire 后检查 `BATCH_TERMINAL_STATUSES`，若已终态则返回 `detail=already_terminal` 保留原状态 | `backend/app/services/batch_collector_service.py:cancel_batch_run` (C2, 批 4) |
+| timeout_recovery 覆盖 callback 已终态的 run | 检查 run.status 是否在 timeout 后又被改回 "timeout" | 旧代码在一次 SELECT FOR UPDATE 中拿候选行后不再重读 status，callback 在 AWX HTTP 调用期间抢先终态 | v2 改 per-row re-select + `RUN_TERMINAL_STATUSES`（canceled 双 L）守卫，AWX error 时 `db.rollback()` 释放锁 | `backend/app/tasks/collector_tasks.py:timeout_recovery_task` (I3+I4, 批 4) |
+| asset_fact_snapshot 双写 TOCTOU | 查询是否有同 `(source_run_id, source_item_key)` 的重复行 | PG 默认 NULLS DISTINCT → UNIQUE 约束不覆盖 NULL 列，两条 NULL 行可同时通过 pre-check → double INSERT | v2 合并迁移：DROP full UNIQUE → CREATE PARTIAL UNIQUE INDEX (`WHERE source_run_id IS NOT NULL AND source_item_key IS NOT NULL`) | `backend/db/dbops_phase3_4_batch_verify_p0_4_5_6_v2_partial_unique.sql` (C3+I5, 批 4) |
 
 ## 3. 标准排查命令
 

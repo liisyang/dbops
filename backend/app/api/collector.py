@@ -7,7 +7,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_user, get_db
+from app.api.deps import get_current_admin, get_current_user, get_db
 from app.config import get_settings
 from app.models.user import User
 from app.schemas.collector import (
@@ -44,6 +44,8 @@ from app.models.dbops_assets import (
     AssetDriftRecord,
     AssetFactSnapshot,
     AssetFactValue,
+    CollectorBatchRun,
+    CollectorRun,
     CredentialBinding,
     CredentialProfile,
 )
@@ -266,6 +268,23 @@ async def collector_callback(
     if not collector_token or not expected_token or not hmac.compare_digest(collector_token, expected_token):
         raise HTTPException(status_code=401, detail="invalid callback token")
 
+    # I7 / P3: replay protection — guard only against statuses from which
+    # recovery is impossible. `failed` and `partial_success` are transient
+    # terminals: a later callback may legitimately want to overwrite (e.g.
+    # dispatcher marked partial_success, then a real `successful` arrives).
+    # Using the full RUN_TERMINAL_STATUSES would silently swallow those
+    # valid retries, breaking the "callback at least N times" SLO.
+    from app.constants import CALLBACK_REPLAY_GUARD_STATUSES
+    run = db.query(CollectorRun).filter(CollectorRun.run_id == payload.run_id).first()
+    if run is None:
+        raise HTTPException(status_code=404, detail="run_id not found")
+    if (run.status or "").lower() in CALLBACK_REPLAY_GUARD_STATUSES:
+        logger.info(
+            "callback replay ignored: run_id=%s status=%s",
+            run.run_id, run.status,
+        )
+        return {"detail": "already_terminal"}
+
     try:
         return CollectorService.handle_callback(db, payload=payload)
     except LookupError as exc:
@@ -282,9 +301,29 @@ async def collector_callback(
 @router.post("/collector/batch-runs", response_model=BatchRunCreateResponse)
 async def create_batch_run(
     payload: BatchRunCreateRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
+    # I2: per-user in-flight batch cap. Lightweight rate limit without
+    # external dependency (no slowapi). Configurable via
+    # COLLECTOR_MAX_BATCH_RUNS_PER_USER (default 3).
+    from sqlalchemy import func
+    from app.config import get_settings
+    in_flight = (
+        db.query(func.count(CollectorBatchRun.id))
+        .filter(
+            CollectorBatchRun.created_by == current_user.username,
+            CollectorBatchRun.status.in_(["pending", "running", "launching", "dispatching"]),
+        )
+        .scalar()
+    )
+    max_per_user = getattr(get_settings(), "COLLECTOR_MAX_BATCH_RUNS_PER_USER", 3)
+    if in_flight >= max_per_user:
+        raise HTTPException(
+            status_code=429,
+            detail=f"Max in-flight batch runs per user ({max_per_user}) reached",
+        )
+
     try:
         return BatchCollectorService.create_batch_run(
             db,
@@ -369,7 +408,7 @@ async def list_batch_items(
 async def retry_failed_batch_items(
     batch_run_id: int,
     payload: RetryFailedRequest,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
     try:
@@ -390,7 +429,7 @@ async def retry_failed_batch_items(
 @router.post("/collector/batch-runs/{batch_run_id}/cancel")
 async def cancel_batch_run(
     batch_run_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
     """Cancel a running batch run.

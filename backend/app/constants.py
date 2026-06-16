@@ -45,6 +45,22 @@ RUN_TERMINAL_STATUSES: Final[frozenset[str]] = frozenset({
 
 
 # ---------------------------------------------------------------------------
+# Callback replay guard set (subset of RUN_TERMINAL_STATUSES)
+# ---------------------------------------------------------------------------
+# P3: A callback arriving for an already-terminal run is normally a no-op
+# replay (AWX retry storms, network blips). BUT — `failed` and
+# `partial_success` are transient terminal states where a later callback
+# may legitimately want to overwrite (e.g. the dispatcher marked
+# partial_success, but a real `successful` callback arrives afterwards).
+# Only reject replays for the states from which recovery is impossible.
+CALLBACK_REPLAY_GUARD_STATUSES: Final[frozenset[str]] = frozenset({
+    "canceled",   # double-L, per chk_collector_run_status
+    "timeout",
+    "callback_failed",
+})
+
+
+# ---------------------------------------------------------------------------
 # Running (non-terminal) dispatch statuses
 # ---------------------------------------------------------------------------
 # Used by the dispatch scheduler to count in-flight work for quota checks

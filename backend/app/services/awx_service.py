@@ -53,8 +53,12 @@ class AwxService:
                     return {}
                 return json.loads(content)
         except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="ignore")
-            raise AwxServiceError(f"AWX API 请求失败: {exc.code} {detail}") from exc
+            # I6: cap error body length and log the raw body separately so
+            # the exception message (which may land in DB error_message
+            # columns) does not leak AWX internal paths / hostnames / creds.
+            raw_body = exc.read().decode("utf-8", errors="ignore")[:500]
+            logger.warning("AWX HTTP %s body=%s", exc.code, raw_body)
+            raise AwxServiceError(f"AWX HTTP {exc.code}: upstream error") from exc
         except URLError as exc:
             raise AwxServiceError(f"AWX API 网络错误: {exc.reason}") from exc
         except json.JSONDecodeError as exc:
