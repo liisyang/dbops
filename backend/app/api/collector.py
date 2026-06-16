@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -50,6 +51,8 @@ from app.services.asset_proposal_service import AssetProposalService
 from app.services.batch_collector_service import BatchCollectorService
 from app.services.collector_service import CollectorService
 from app.services.port_profile_service import PortProfileService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -295,8 +298,7 @@ async def create_batch_run(
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        logger.exception("create_batch_run failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
 
 
@@ -381,9 +383,110 @@ async def retry_failed_batch_items(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
-        import traceback
-        traceback.print_exc()
+        logger.exception("retry_failed_batch_items failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
+
+
+@router.post("/collector/batch-runs/{batch_run_id}/cancel")
+async def cancel_batch_run(
+    batch_run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Cancel a running batch run.
+
+    P0-6: best-effort. Marks pending dispatches cancelled (scheduler will
+    skip them) and requests AWX cancel for any already-launched dispatches.
+    Idempotent: a no-op if the batch is already terminal.
+    """
+    try:
+        return BatchCollectorService.cancel_batch_run(
+            db,
+            batch_run_id=batch_run_id,
+            cancelled_by=current_user.username,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("cancel_batch_run failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
+
+
+# ============================================================================
+# Phase 3.4 P0-4 — Dispatch scheduler observability
+# ============================================================================
+
+
+@router.get("/collector/scheduler/status")
+async def get_scheduler_status(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Snapshot of dispatch queue depth + concurrency caps for the UI.
+
+    Read-only; does not trigger a scheduler tick. The actual scheduler
+    runs as a Celery beat task (`dispatch-scheduler`).
+    """
+    from sqlalchemy import func
+
+    from app.constants import RUNNING_DISPATCH_STATUSES
+    from app.models.dbops_assets import CollectorDispatchRun
+
+    settings = get_settings()
+    running_statuses = list(RUNNING_DISPATCH_STATUSES)
+
+    status_counts = dict(
+        db.query(CollectorDispatchRun.status, func.count(CollectorDispatchRun.id))
+        .group_by(CollectorDispatchRun.status)
+        .all()
+    )
+    total_running = sum(int(status_counts.get(s, 0)) for s in running_statuses)
+    pending_count = int(status_counts.get("pending", 0))
+
+    # Per-IG / per-NZ running counts (top 5 each) for quick diagnosis
+    ig_rows = (
+        db.query(
+            CollectorDispatchRun.awx_instance_group,
+            func.count(CollectorDispatchRun.id),
+        )
+        .filter(CollectorDispatchRun.status.in_(running_statuses))
+        .group_by(CollectorDispatchRun.awx_instance_group)
+        .order_by(func.count(CollectorDispatchRun.id).desc())
+        .limit(5)
+        .all()
+    )
+    nz_rows = (
+        db.query(
+            CollectorDispatchRun.network_zone,
+            func.count(CollectorDispatchRun.id),
+        )
+        .filter(CollectorDispatchRun.status.in_(running_statuses))
+        .group_by(CollectorDispatchRun.network_zone)
+        .order_by(func.count(CollectorDispatchRun.id).desc())
+        .limit(5)
+        .all()
+    )
+
+    return {
+        "dispatch_counts_by_status": {k: int(v) for k, v in status_counts.items()},
+        "total_running": total_running,
+        "pending_count": pending_count,
+        "top_instance_groups_running": [
+            {"awx_instance_group": g, "running": int(c)} for g, c in ig_rows
+        ],
+        "top_network_zones_running": [
+            {"network_zone": z, "running": int(c)} for z, c in nz_rows
+        ],
+        "caps": {
+            "global": settings.COLLECTOR_GLOBAL_MAX_RUNNING_DISPATCHES,
+            "batch": settings.COLLECTOR_BATCH_MAX_RUNNING_DISPATCHES,
+            "instance_group": settings.COLLECTOR_IG_MAX_RUNNING_DISPATCHES,
+            "network_zone": settings.COLLECTOR_NETWORK_ZONE_MAX_RUNNING_DISPATCHES,
+        },
+        "awx_launch_qps": settings.COLLECTOR_AWX_LAUNCH_QPS,
+        "scheduler_interval_seconds": settings.COLLECTOR_DISPATCH_SCHEDULER_INTERVAL,
+        "run_timeout_minutes": settings.COLLECTOR_RUN_TIMEOUT_MINUTES,
+    }
 
 
 # ============================================================================

@@ -1192,7 +1192,11 @@ def test_port_calibration_callback_prefers_exact_asset_endpoint_identity(monkeyp
 
     result = collector_service_module.CollectorService.handle_callback(db, payload=callback_payload)
 
-    assert result["status"] in {"partial_success", "success"}
+    # P0-2: a single-item callback leaves the other run_item still "pending",
+    # so the run is correctly reported as "running" until that item arrives.
+    # The original "partial_success" expectation predates that safety net;
+    # we accept the broader set so the test stays focused on endpoint identity.
+    assert result["status"] in {"partial_success", "success", "running"}
     generic_endpoint = next(row for row in db.store[AssetEndpoint] if row.id == 9201)
     exact_endpoint = next(row for row in db.store[AssetEndpoint] if row.id == 9202)
     assert exact_endpoint.last_run_id == run.run_id

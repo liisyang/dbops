@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.constants import RUN_TERMINAL_STATUSES as _RUN_TERMINAL_STATUSES
 from app.models.dbops_assets import (
     AssetChangeProposal,
     AssetEndpoint,
+    AssetFactSnapshot,
     CollectorCheckDefinition,
     CollectorRun,
     CollectorRunItem,
@@ -38,10 +42,40 @@ from app.services.port_calibration_service import PortCalibrationService
 from app.services.inspection_service import InspectionService
 
 
+logger = logging.getLogger(__name__)
+
+
+# Callback status → (CollectorRunItem.status, CollectorRunResult.status).
+# Both target columns have CHECK constraints; this map only contains
+# values allowed by:
+#   chk_collector_run_item_status   = pending/running/success/failed/skipped/timeout
+#   chk_collector_run_result_status = verified/missing/drifted/collected/failed
+# Unknown statuses fall through to "failed"/"failed" (logged + visible in UI)
+# rather than the previous silent-success fallback that wrote CHECK-violating
+# values and rolled back the entire callback for one bad item.
+_ITEM_STATUS_MAP: dict[str, tuple[str, str | None]] = {
+    "verified":  ("success", "verified"),
+    "collected": ("success", "collected"),
+    "ok":        ("success", "verified"),    # ok is a verified alias
+    "missing":   ("failed",  "missing"),
+    "drifted":   ("failed",  "drifted"),
+    "failed":    ("failed",  "failed"),
+    "error":     ("failed",  "failed"),
+    "canceled":  ("failed",  "failed"),      # run cancelled mid-flight → failed item
+    "cancelled": ("failed",  "failed"),
+    "timeout":   ("timeout", "failed"),
+    "skipped":   ("skipped", None),          # skipped has no per-result row
+}
+
+
 class CollectorService:
     @staticmethod
     def _now() -> datetime:
-        return datetime.utcnow()
+        # Use local time (Asia/Shanghai) to match PostgreSQL's naive
+        # `now()` / triggers. The single source of truth is
+        # app.utils.datetime.now_local.
+        from app.utils.datetime import now_local
+        return now_local()
 
     @staticmethod
     def _validate_port(port: int | None) -> int:
@@ -729,17 +763,20 @@ class CollectorService:
 
     @staticmethod
     def _map_item_status(status: str) -> tuple[str, str | None]:
-        if status == "verified":
-            return "success", "verified"
-        if status == "collected":
-            return "success", "collected"
-        if status == "missing":
-            return "failed", "missing"
-        if status == "drifted":
-            return "failed", "drifted"
-        if status == "failed":
-            return "failed", "failed"
-        return "success", status
+        """Normalize a raw callback status to (run_item.status, result.status_name).
+
+        - run_item.status must satisfy chk_collector_run_item_status
+          (pending/running/success/failed/skipped/timeout).
+        - result.status must satisfy chk_collector_run_result_status
+          (verified/missing/drifted/collected/failed).
+        Unknown statuses return ("failed", "failed") and are logged so the
+        operator can decide whether to teach AWX to send a known status.
+        """
+        if status in _ITEM_STATUS_MAP:
+            run_item_status, result_status = _ITEM_STATUS_MAP[status]
+            return run_item_status, result_status
+        logger.error("collector callback unknown status %r — mapping to failed/failed", status)
+        return "failed", "failed"
 
     @staticmethod
     def _endpoint_status(status: str, *, is_required: bool = False, candidate_state: str | None = None) -> str:
@@ -874,6 +911,22 @@ class CollectorService:
         if not run:
             raise LookupError("run_id 不存在")
 
+        # Idempotency at run level: skip if already terminal.
+        # AWX may retry the callback after a network blip; we should not
+        # double-write run state, item results, snapshots or drift events.
+        if (run.status or "").lower() in _RUN_TERMINAL_STATUSES:
+            logger.info(
+                "collector callback ignored: run_id=%s already in terminal status=%s",
+                payload.run_id,
+                run.status,
+            )
+            return {
+                "detail": "ok_already_processed",
+                "run_id": payload.run_id,
+                "status": run.status,
+                "item_count": 0,
+            }
+
         callback_items = CollectorService._build_callback_items(payload, run)
         processed_count = 0
         calibration_results: list[dict[str, Any]] = []
@@ -923,6 +976,18 @@ class CollectorService:
             if run_item.started_at is None:
                 run_item.started_at = now
 
+            # N3: a 'skipped' item maps to (run_item.status='skipped',
+            # result_status=None). CollectorRunResult.status is constrained
+            # by chk_collector_run_result_status to
+            # verified/missing/drifted/collected/failed — writing 'skipped'
+            # would raise a CHECK violation and roll back the entire callback.
+            # Per _ITEM_STATUS_MAP comment, "skipped has no per-result row";
+            # honor that by skipping result creation/update for skipped items
+            # (both the new-row path below AND the existing-row overwrite at
+            # line ~1054 must be guarded).
+            if (run_item.status or "").lower() == "skipped":
+                continue
+
             result = (
                 db.query(CollectorRunResult)
                 .filter(
@@ -944,13 +1009,49 @@ class CollectorService:
                     check_type=run_item.check_code,
                     target_host=callback_item.target_host,
                     target_port=callback_item.target_port,
+                    status=(
+                        "failed"
+                        if candidate_state
+                        else (run_item.result_status or callback_item.status)
+                    ),
                 )
                 db.add(result)
+                # Defend against a parallel writer winning the (run_id, item_key)
+                # unique index race even when our SELECT missed it.
+                try:
+                    db.flush()
+                except IntegrityError as exc:
+                    db.rollback()
+                    logger.warning(
+                        "collector_run_result race lost for run_id=%s item_key=%s: %s",
+                        run.run_id,
+                        callback_item.item_key,
+                        exc.orig,
+                    )
+                    result = (
+                        db.query(CollectorRunResult)
+                        .filter(
+                            CollectorRunResult.collector_run_id == run.id,
+                            CollectorRunResult.item_key == callback_item.item_key,
+                        )
+                        .first()
+                    )
+                    if result is None:
+                        raise
+                    result.collector_run_item_id = run_item.id
             else:
                 result.collector_run_item_id = run_item.id
 
             _, result_status_name = CollectorService._map_item_status(callback_item.status)
-            result.status = "failed" if candidate_state else (result_status_name or callback_item.status)
+            # N3 defensive: result_status_name may be None for 'skipped' (which
+            # we already short-circuited above), but be defensive in case a
+            # future map entry returns (status, None) — fall back to 'failed'
+            # to keep result.status within the CHECK constraint.
+            result.status = (
+                "failed"
+                if candidate_state
+                else (result_status_name or "failed")
+            )
             result.port_reachable = callback_item.reachable
             result.target_host = callback_item.target_host
             result.target_port = callback_item.target_port
@@ -1100,17 +1201,38 @@ class CollectorService:
             # Phase 3.3A: Fact snapshot + drift detection for fact collection items
             if FactSnapshotService.is_fact_collection(run_item.check_code or ""):
                 try:
-                    snapshot = FactSnapshotService.create_from_collector_result(
-                        db,
-                        run_item=run_item,
-                        raw_result=raw_result,
+                    existing_snapshot = (
+                        db.query(AssetFactSnapshot)
+                        .filter(
+                            AssetFactSnapshot.source_run_id == run.run_id,
+                            AssetFactSnapshot.source_item_key == run_item.item_key,
+                        )
+                        .first()
                     )
+                    if existing_snapshot is not None:
+                        logger.info(
+                            "fact snapshot already exists for run_id=%s item_key=%s snapshot_id=%s; skip recreate",
+                            run.run_id,
+                            run_item.item_key,
+                            existing_snapshot.snapshot_id,
+                        )
+                        snapshot = None
+                    else:
+                        snapshot = FactSnapshotService.create_from_collector_result(
+                            db,
+                            run_item=run_item,
+                            raw_result=raw_result,
+                        )
                     if snapshot:
                         DriftDetectionService.detect_for_snapshot(db, snapshot)
                 except Exception:
                     # Fact/drift processing failure MUST NOT break the callback.
                     # Errors are logged implicitly by not updating facts.
-                    pass
+                    logger.exception(
+                        "fact snapshot / drift processing failed for run_id=%s item_key=%s",
+                        run.run_id,
+                        run_item.item_key,
+                    )
 
             if (run.request_payload or {}).get("run_type") == "port_calibration":
                 calibration_results.append(
@@ -1172,10 +1294,19 @@ class CollectorService:
         if not items:
             return "failed"
         statuses = [item.status for item in items]
-        if all(status == "success" for status in statuses):
+        # N1: require EVERY item to be terminal before reporting a terminal
+        # run status. Previously the new logic marked the run "success" when
+        # all *terminal* items were success even with pending stragglers, but
+        # handle_callback's idempotency guard (line ~929) and timeout_recovery
+        # both skip terminal runs — stragglers were stuck forever.
+        has_pending = any(s in {"pending", "running"} for s in statuses)
+        if has_pending:
+            return "running"
+        # All items are terminal — apply the simple rules.
+        if all(s == "success" for s in statuses):
             return "success"
-        if any(status == "success" for status in statuses) and any(status in {"failed", "timeout"} for status in statuses):
+        if all(s == "skipped" for s in statuses):
             return "partial_success"
-        if any(status == "success" for status in statuses):
+        if any(s == "success" for s in statuses):
             return "partial_success"
         return "failed"

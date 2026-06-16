@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime
 from typing import Any
@@ -7,6 +8,10 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
+from app.constants import (
+    BATCH_TERMINAL_STATUSES,
+    DISPATCH_TERMINAL_STATUSES,
+)
 from app.models.dbops_assets import (
     CollectorBatchRun,
     CollectorDispatchRun,
@@ -22,6 +27,32 @@ from app.services.check_item_builder_registry import CheckItemBuilderRegistry
 from app.services.dispatch_planner_service import DispatchPlannerService
 
 
+logger = logging.getLogger(__name__)
+
+
+# Maximum length of error_message fields. PostgreSQL TEXT is unbounded but
+# a runaway append loop (e.g. 1000-instance cancel where every AWX HTTP
+# call fails) could blow past MySQL TEXT (64KB) if a future migration
+# moves the column. Cap here to keep the failure mode predictable.
+_ERROR_MESSAGE_MAX_LEN = 4000
+
+
+def _append_error(existing: str | None, suffix: str) -> str:
+    """Null-safe join of an existing error_message with a new suffix.
+
+    A1: extracted from cancel_batch_run where the same idiom was duplicated
+    twice. Also caps total length to keep runaway append loops bounded.
+    """
+    base = (existing or "").strip()
+    if not suffix:
+        return existing or ""
+    combined = f"{base}; {suffix}" if base else suffix
+    if len(combined) > _ERROR_MESSAGE_MAX_LEN:
+        # Keep the tail — the most recent context is most actionable.
+        combined = "..." + combined[-(_ERROR_MESSAGE_MAX_LEN - 3):]
+    return combined
+
+
 class BatchCollectorService:
     """Orchestrate batch collector runs with dispatch grouping.
 
@@ -32,7 +63,11 @@ class BatchCollectorService:
 
     @staticmethod
     def _now() -> datetime:
-        return datetime.utcnow()
+        # Use local time (Asia/Shanghai) to match PostgreSQL's timezone
+        # (`now()` / triggers) and the rest of the codebase. The single
+        # source of truth is app.utils.datetime.now_local.
+        from app.utils.datetime import now_local
+        return now_local()
 
     @staticmethod
     def _generate_batch_code() -> str:
@@ -279,7 +314,10 @@ class BatchCollectorService:
         batch_run.pending_item_count = len(dispatchable_items)
 
         if not dispatchable_items:
-           batch_run.status = "failed"
+           # P1 fix: when everything is skipped (no executable items),
+           # this is not a hard failure — surface as partial_success so
+           # dashboards/queries do not treat it as a run failure.
+           batch_run.status = "partial_success"
            batch_run.error_message = (
                f"未生成任何可执行校验项，已跳过 {len(credential_skipped_items)} 项"
                if credential_skipped_items
@@ -410,13 +448,9 @@ class BatchCollectorService:
                 run_seq += 1
 
         batch_run.dispatch_count = len(dispatches)
+        # P0-4: do NOT launch here. The dispatch_scheduler_task (Celery beat)
+        # will pick up pending dispatches with concurrency / QPS limits.
         db.commit()
-
-        # 6. Launch dispatches (each creates an AWX Job)
-        dispatches = BatchCollectorService.launch_dispatches(db, int(batch_run.id))
-
-        # 7. Refresh batch status after launch
-        BatchCollectorService.refresh_batch_status(db, int(batch_run.id))
 
         # Persist skipped items so the UI can show explicit skip reasons.
         all_skipped_items = credential_skipped_items + dispatch_skipped_items
@@ -622,10 +656,17 @@ class BatchCollectorService:
         all_success = True
         has_running = False
 
+        # 终态集合：app.constants.BATCH_TERMINAL_STATUSES（单一来源）
+        terminal_statuses = BATCH_TERMINAL_STATUSES
+
+        # 在 status 赋值前保存旧状态，便于首次进入终态时回写 finished_at
+        old_status = batch_run.status
+
         for d in dispatches:
             total_success += d.success_item_count or 0
             total_failed += d.failed_item_count or 0
-            if d.status not in ("success", "partial_success", "failed", "cancelled"):
+            # C4: collapse 3 copies of the terminal set into the constant import.
+            if d.status not in terminal_statuses:
                 has_running = True
             if d.status != "success":
                 all_success = False
@@ -656,6 +697,14 @@ class BatchCollectorService:
             batch_run.status = "running"
         else:
             batch_run.status = "partial_success"
+
+        # 首次进入终态时回写 finished_at，避免后续 refresh 覆盖真实结束时间
+        if (
+            batch_run.status in terminal_statuses
+            and old_status not in terminal_statuses
+            and batch_run.finished_at is None
+        ):
+            batch_run.finished_at = BatchCollectorService._now()
 
         db.flush()
 
@@ -1082,16 +1131,183 @@ class BatchCollectorService:
             raise ValueError("所有失败项无法重新分组")
 
         batch_run.dispatch_count = (batch_run.dispatch_count or 0) + len(retry_dispatches)
+        # P0-4: do NOT launch here. The dispatch_scheduler_task (Celery beat)
+        # will pick up pending dispatches with concurrency / QPS limits.
         db.commit()
-
-        # Launch the retry dispatches
-        retry_dispatches = BatchCollectorService.launch_dispatches(db, int(batch_run.id))
-        BatchCollectorService.refresh_batch_status(db, int(batch_run.id))
 
         return {
             "detail": "retry_launched",
             "batch_run_id": batch_run_id,
             "retry_dispatches": retry_dispatches,
+        }
+
+    # === P0-6: Batch Cancellation ===
+
+    @staticmethod
+    def cancel_batch_run(
+        db: Session,
+        batch_run_id: int,
+        cancelled_by: str | None = None,
+    ) -> dict[str, Any]:
+        """Cancel a batch run.
+
+        Behavior:
+        - If the batch is already terminal (success/failed/cancelled/timeout),
+          return immediately with detail=already_terminal.
+        - Set batch_run.status='cancelled' and finished_at.
+        - For each dispatch:
+            - pending: mark dispatch 'cancelled' (scheduler won't launch it).
+            - launching/launched/running: call AwxService.cancel_job on the
+              underlying AWX job; mark dispatch 'cancelled' regardless of the
+              call result. The callback (if it arrives) will be a no-op
+              because CollectorService skips runs in terminal state.
+        - The corresponding collector_run and its items are left to converge
+          via the AWX callback / timeout_recovery_task; the cancellation
+          signal itself propagates through dispatch_run.status.
+
+        Cancel is best-effort: an AWX cancel failure is logged but does not
+        fail the batch cancel — the run is already marked cancelled.
+        """
+        batch_run = (
+            db.query(CollectorBatchRun)
+            .filter(CollectorBatchRun.id == batch_run_id)
+            .with_for_update()
+            .first()
+        )
+        if not batch_run:
+            raise LookupError("batch_run_id 不存在")
+
+        # C4: single source of truth for "is this batch already terminal?"
+        # lives in app.constants.BATCH_TERMINAL_STATUSES. Adding a new
+        # terminal status (e.g. 'expired') is now a one-line DB CHECK + one
+        # set update; all 3 sites (refresh / cancel / _summarize) follow.
+        if (batch_run.status or "").lower() in BATCH_TERMINAL_STATUSES:
+            return {
+                "detail": "already_terminal",
+                "batch_run_id": batch_run_id,
+                "status": batch_run.status,
+                "cancelled_dispatches": 0,
+                "awx_cancel_requested": 0,
+                "awx_cancel_failed": 0,
+            }
+
+        # C3: enumerate candidate IDs WITHOUT holding a long-running
+        # SELECT FOR UPDATE. Re-select each row inside the loop with
+        # skip_locked=True so the lock window is one row at a time. The
+        # per-row commit below releases each row's lock before the next
+        # iteration's HTTP call, so the callback writer / refresh
+        # scheduler are not blocked while a 1000-instance cancel is in
+        # flight.
+        candidate_ids = [
+            row.id
+            for row in (
+                db.query(CollectorDispatchRun.id)
+                .filter(CollectorDispatchRun.batch_run_id == batch_run_id)
+                .all()
+            )
+        ]
+
+        cancelled_dispatches = 0
+        awx_cancel_requested = 0
+        awx_cancel_failed = 0
+        now = BatchCollectorService._now()
+
+        for dispatch_id in candidate_ids:
+            # Per-row lock; another cancel on the same row will skip_lock.
+            dispatch = (
+                db.query(CollectorDispatchRun)
+                .filter(
+                    CollectorDispatchRun.id == dispatch_id,
+                    # Re-check status under the lock — it may have
+                    # transitioned to a terminal state (callback arrived,
+                    # timeout_recovery fired) between enumeration and
+                    # lock acquisition.
+                    CollectorDispatchRun.status.notin_(BATCH_TERMINAL_STATUSES),
+                )
+                .with_for_update(skip_locked=True)
+                .first()
+            )
+            if dispatch is None:
+                # Another writer / callback moved it terminal; nothing to do.
+                continue
+
+            current = (dispatch.status or "").lower()
+            if current == "pending":
+                dispatch.status = "cancelled"
+                # C6: write cancelled_at, do not touch finished_at. For a
+                # pending dispatch finished_at was NULL anyway, so this
+                # change is observationally equivalent here — but the
+                # invariant is now "cancel always sets cancelled_at; only
+                # natural termination sets finished_at."
+                dispatch.cancelled_at = now
+                dispatch.error_message = _append_error(
+                    dispatch.error_message, "cancelled by user"
+                )
+                cancelled_dispatches += 1
+            elif current in {"launching", "launched", "running"}:
+                # Best-effort AWX cancel; mark cancelled locally regardless.
+                if dispatch.awx_job_id:
+                    awx_cancel_requested += 1
+                    try:
+                        AwxService.cancel_job(int(dispatch.awx_job_id))
+                    except AwxServiceError as exc:
+                        awx_cancel_failed += 1
+                        dispatch.error_message = _append_error(
+                            dispatch.error_message,
+                            f"awx cancel failed: {exc}; marked cancelled locally",
+                        )
+                else:
+                    # Defensive: a launched/running dispatch with no awx_job_id
+                    # is an upstream bug (launch_job returned without one).
+                    awx_cancel_failed += 1
+                    dispatch.error_message = _append_error(
+                        dispatch.error_message,
+                        "dispatch launched without awx_job_id; marked cancelled locally",
+                    )
+                dispatch.status = "cancelled"
+                dispatch.cancelled_at = now
+                cancelled_dispatches += 1
+            # Any other non-terminal state (defensive — should not occur
+            # given the .notin_(BATCH_TERMINAL_STATUSES) filter above) is
+            # also left alone.
+
+            # C3: per-row commit releases the lock immediately so the
+            # callback writer / other workers are not blocked.
+            try:
+                db.commit()
+            except Exception as exc:
+                db.rollback()
+                logger.warning(
+                    "cancel_batch_run per-row commit failed: dispatch_id=%s error=%s",
+                    dispatch_id,
+                    exc,
+                )
+
+        # Refresh the batch row under its own short lock; final status write.
+        batch_run = (
+            db.query(CollectorBatchRun)
+            .filter(CollectorBatchRun.id == batch_run_id)
+            .with_for_update()
+            .first()
+        )
+        if batch_run is not None:
+            batch_run.status = "cancelled"
+            batch_run.finished_at = now
+            batch_run.error_message = (
+                batch_run.error_message
+                if batch_run.error_message
+                else f"cancelled by {cancelled_by or 'user'}"
+            )
+            db.commit()
+            db.refresh(batch_run)
+
+        return {
+            "detail": "cancelled",
+            "batch_run_id": batch_run_id,
+            "status": batch_run.status if batch_run else None,
+            "cancelled_dispatches": cancelled_dispatches,
+            "awx_cancel_requested": awx_cancel_requested,
+            "awx_cancel_failed": awx_cancel_failed,
         }
 
     @staticmethod

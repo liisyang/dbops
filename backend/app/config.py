@@ -59,6 +59,24 @@ class Settings(BaseSettings):
     # AWX Job Template 已绑定的 credential ID 列表（逗号分隔），launch 时必须保留
     AWX_PREBOUND_CREDENTIAL_IDS: str = ""
 
+    # Collector 调度（Phase 3.4 P0-4/5/6 批量校验底座）
+    # 全局并发上限
+    COLLECTOR_GLOBAL_MAX_RUNNING_DISPATCHES: int = 20
+    # 单 batch_run 并发上限
+    COLLECTOR_BATCH_MAX_RUNNING_DISPATCHES: int = 10
+    # 单 instance_group 并发上限
+    COLLECTOR_IG_MAX_RUNNING_DISPATCHES: int = 5
+    # 单 network_zone 并发上限
+    COLLECTOR_NETWORK_ZONE_MAX_RUNNING_DISPATCHES: int = 3
+    # AWX launch QPS 限速（每秒 launch 次数）
+    COLLECTOR_AWX_LAUNCH_QPS: float = 2.0
+    # 调度器 beat 间隔（秒）
+    COLLECTOR_DISPATCH_SCHEDULER_INTERVAL: int = 15
+    # 单 run 超时阈值（分钟），超过后由 timeout_recovery_task 回收
+    COLLECTOR_RUN_TIMEOUT_MINUTES: int = 30
+    # timeout_recovery beat 间隔（秒）
+    COLLECTOR_TIMEOUT_RECOVERY_INTERVAL: int = 60
+
     class Config:
         env_file = os.path.join(BASE_DIR, '.env')
         extra = "allow"

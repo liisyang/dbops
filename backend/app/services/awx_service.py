@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import base64
 import json
+import logging
 from typing import Any, Optional
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from app.config import get_settings
+from app.constants import AWX_TERMINAL_STATUSES
+
+
+logger = logging.getLogger(__name__)
 
 
 class AwxServiceError(RuntimeError):
@@ -133,3 +138,44 @@ class AwxService:
     @staticmethod
     def launch_verify_job(extra_vars: dict[str, Any]) -> dict[str, Any]:
         return AwxService.launch_job(extra_vars)
+
+    # ------------------------------------------------------------------
+    # P0-3: status / cancel helpers for timeout-recovery + batch-cancel.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_job_status(awx_job_id: int) -> dict[str, Any]:
+        """Return a normalized snapshot of an AWX job.
+
+        Response shape is the raw AWX `/api/v2/jobs/{id}/` payload plus a
+        derived `is_terminal` boolean so callers don't need to mirror AWX
+        status semantics.
+        """
+        if not awx_job_id:
+            raise AwxServiceError("awx_job_id 不能为空")
+        data = AwxService._request_json("GET", f"/api/v2/jobs/{int(awx_job_id)}/")
+        status = (data.get("status") or "").lower()
+        data["is_terminal"] = status in AWX_TERMINAL_STATUSES
+        return data
+
+    @staticmethod
+    def cancel_job(awx_job_id: int) -> dict[str, Any]:
+        """Request AWX to cancel a running job.
+
+        AWX returns 405 if the job is already in a terminal state; that is
+        surfaced as AwxServiceError so the caller can decide whether to
+        treat it as success (idempotent cancel) or hard-fail.
+        """
+        if not awx_job_id:
+            raise AwxServiceError("awx_job_id 不能为空")
+        try:
+            result = AwxService._request_json(
+                "POST", f"/api/v2/jobs/{int(awx_job_id)}/cancel/"
+            )
+        except AwxServiceError as exc:
+            logger.warning(
+                "awx cancel_job failed: awx_job_id=%s error=%s", awx_job_id, exc
+            )
+            raise
+        logger.info("awx cancel_job requested: awx_job_id=%s", awx_job_id)
+        return result
