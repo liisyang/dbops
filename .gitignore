@@ -5,6 +5,10 @@ __pycache__/
 dist/
 *.log
 
+# Celery
+celerybeat-schedule
+celerybeat-schedule.*
+
 # Virtual environment
 .venv/
 venv/

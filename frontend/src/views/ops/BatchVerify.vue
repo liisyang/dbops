@@ -138,6 +138,7 @@
               <th class="whitespace-nowrap px-4 py-3">失败</th>
               <th class="whitespace-nowrap px-4 py-3">分发数</th>
               <th class="whitespace-nowrap px-4 py-3">创建时间</th>
+              <th class="whitespace-nowrap px-4 py-3">耗时</th>
               <th class="whitespace-nowrap px-4 py-3">操作</th>
             </tr>
           </thead>
@@ -163,6 +164,9 @@
               <td class="whitespace-nowrap px-4 py-3 text-red-400">{{ batch.failed_item_count }}</td>
               <td class="whitespace-nowrap px-4 py-3">{{ batch.dispatch_count }}</td>
               <td class="whitespace-nowrap px-4 py-3 text-xs text-on-surface-variant">{{ formatTime(batch.created_at) }}</td>
+              <td class="whitespace-nowrap px-4 py-3 font-mono text-xs text-on-surface-variant">
+                {{ formatDuration(batch.started_at, batch.finished_at) }}
+              </td>
               <td class="whitespace-nowrap px-4 py-3">
                 <button
                   class="text-xs text-primary transition-colors hover:text-primary/80"
@@ -180,7 +184,7 @@
     <div v-if="batchDetail" class="mt-6 space-y-6">
       <!-- Results Summary -->
       <OpsSectionCard title="结果摘要" icon="analytics">
-        <div class="grid gap-3 sm:grid-cols-6">
+        <div class="grid gap-3 sm:grid-cols-7">
           <div class="field-card text-center">
             <div class="field-value text-2xl font-bold">{{ batchDetail.total_asset_count }}</div>
             <div class="field-label">总资产数</div>
@@ -205,6 +209,12 @@
             <div class="field-value text-2xl font-bold text-slate-300">{{ batchDetail.skipped_item_count }}</div>
             <div class="field-label">跳过</div>
           </div>
+          <div class="field-card text-center">
+            <div class="field-value text-2xl font-bold font-mono">
+              {{ formatDuration(batchDetail.started_at, batchDetail.finished_at) }}
+            </div>
+            <div class="field-label">总耗时</div>
+          </div>
         </div>
         <div
           v-if="(batchDetail.skipped_item_count || 0) > 0"
@@ -228,6 +238,7 @@
                 <th class="whitespace-nowrap px-4 py-3">成功</th>
                 <th class="whitespace-nowrap px-4 py-3">失败</th>
                 <th class="whitespace-nowrap px-4 py-3">AWX Job</th>
+                <th class="whitespace-nowrap px-4 py-3">耗时</th>
               </tr>
             </thead>
             <tbody>
@@ -245,6 +256,9 @@
                 <td class="whitespace-nowrap px-4 py-3 text-emerald-400">{{ d.success_item_count }}</td>
                 <td class="whitespace-nowrap px-4 py-3 text-red-400">{{ d.failed_item_count }}</td>
                 <td class="whitespace-nowrap px-4 py-3 font-mono text-xs">{{ d.awx_job_id || '-' }}</td>
+                <td class="whitespace-nowrap px-4 py-3 font-mono text-xs text-on-surface-variant">
+                  {{ formatDuration(d.launched_at, d.finished_at) }}
+                </td>
               </tr>
             </tbody>
           </table>
@@ -279,6 +293,12 @@
             :disabled="retryLoading"
             @click="retryFailed"
           >{{ retryLoading ? '重跑中...' : '重跑失败项' }}</button>
+          <button
+            v-if="canCancelBatch(batchDetail?.status)"
+            class="text-xs text-red-300 transition-colors hover:text-red-200 disabled:opacity-50"
+            :disabled="cancelLoading"
+            @click="cancelBatch"
+          >{{ cancelLoading ? '取消中...' : '取消批次' }}</button>
         </div>
 
         <OpsTableShell v-if="items.length > 0">
@@ -416,7 +436,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue'
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import OpsPage from '@/components/ops/OpsPage.vue'
 import OpsPageHeader from '@/components/ops/OpsPageHeader.vue'
 import OpsSectionCard from '@/components/ops/OpsSectionCard.vue'
@@ -424,7 +444,7 @@ import OpsTableShell from '@/components/ops/OpsTableShell.vue'
 import OpsEmptyState from '@/components/ops/OpsEmptyState.vue'
 import { assetsApi } from '@/api/assets'
 import type { AssetChangeProposalRow, BatchRunRow, BatchRunItemRow, DbTypeRow } from '@/types/api'
-import { formatInTz } from '@/utils/timezone'
+import { formatInTz, formatDuration } from '@/utils/timezone'
 
 const selectionMode = ref<'ids' | 'filters'>('ids')
 const assetIdsInput = ref('')
@@ -442,6 +462,63 @@ const batchProposals = ref<AssetChangeProposalRow[]>([])
 const proposalsLoading = ref(false)
 const proposalsError = ref('')
 const selectedItemId = ref<number | null>(null)
+
+// ── 自动轮询：运行中批次每 5s 刷新 ────────────────────────────────
+const POLL_INTERVAL = 5000
+const pollTimer = ref<ReturnType<typeof setInterval> | null>(null)
+const pollingLoading = ref(false)
+
+const TERMINAL_BATCH_STATUSES = new Set([
+  'success',
+  'partial_success',
+  'failed',
+  'timeout',
+  'callback_failed',
+  'cancelled',
+  'canceled',
+])
+
+const isBatchRunning = computed(() => {
+  const s = batchDetail.value?.status?.toLowerCase()
+  return !!s && !TERMINAL_BATCH_STATUSES.has(s)
+})
+
+function startPolling() {
+  if (pollTimer.value) return
+  pollTimer.value = setInterval(async () => {
+    if (!selectedBatchId.value) {
+      stopPolling()
+      return
+    }
+    // 防重入：上一次请求未完成则跳过本次
+    if (pollingLoading.value) return
+    pollingLoading.value = true
+    try {
+      await loadBatches()
+      await loadBatchDetail(selectedBatchId.value)
+      if (!isBatchRunning.value) {
+        stopPolling()
+      }
+    } catch (err) {
+      // 网络偶发错误不停止轮询，下次 tick 重试
+      console.error('poll batch detail failed', err)
+    } finally {
+      pollingLoading.value = false
+    }
+  }, POLL_INTERVAL)
+}
+
+function stopPolling() {
+  if (pollTimer.value) {
+    clearInterval(pollTimer.value)
+    pollTimer.value = null
+  }
+}
+
+// 切换 batch 时重置轮询
+watch(selectedBatchId, () => {
+  stopPolling()
+})
 
 const checkCodeOptions = [
   { value: 'DB_PORT_REACHABILITY', label: 'DB 端口连通性' },
@@ -490,6 +567,11 @@ function formatTime(val: any): string {
   return val ? formatInTz(val) : '-'
 }
 
+// ── 耗时工具：使用 utils/timezone.formatDuration（统一时区处理） ──
+// The local implementation was removed: it parsed naive backend timestamps
+// as browser-local time, which produced wrong durations in non-CST zones.
+// See app/utils/timezone.formatDuration for the fix.
+
 function formatDisplayValue(value: unknown): string {
   if (value === null || value === undefined || value === '') return '-'
   if (typeof value === 'object') return JSON.stringify(value)
@@ -514,7 +596,7 @@ function formatStatusLabel(status: string | null | undefined): string {
   if (s === 'success') return '已完成'
   if (s === 'partial_success') return '部分成功'
   if (s === 'failed') return '失败'
-  if (s === 'cancelled') return '已取消'
+  if (s === 'cancelled' || s === 'canceled') return '已取消'
   return status || '-'
 }
 
@@ -526,7 +608,7 @@ function getStatusBadgeClass(status: string | null | undefined): string {
   if (s === 'success') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
   if (s === 'partial_success') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
   if (s === 'failed') return 'border-red-400/30 bg-red-400/10 text-red-200'
-  if (s === 'cancelled') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
+  if (s === 'cancelled' || s === 'canceled') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
   return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
 }
 
@@ -579,7 +661,7 @@ function formatProposalStatusLabel(status: string | null | undefined): string {
   if (s === 'approved') return '已同意'
   if (s === 'rejected') return '已拒绝'
   if (s === 'applied') return '已应用'
-  if (s === 'cancelled') return '已取消'
+  if (s === 'cancelled' || s === 'canceled') return '已取消'
   return status || '-'
 }
 
@@ -589,7 +671,7 @@ function getProposalStatusBadgeClass(status: string | null | undefined): string 
   if (s === 'approved') return 'border-sky-400/30 bg-sky-400/10 text-sky-200'
   if (s === 'rejected') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
   if (s === 'applied') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
-  if (s === 'cancelled') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
+  if (s === 'cancelled' || s === 'canceled') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
   return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
 }
 
@@ -654,8 +736,15 @@ async function loadBatchDetail(id: number) {
     batchDetail.value = await assetsApi.getBatchRun(id)
     await loadItems()
     await loadBatchProposals()
+    // 运行中批次启动轮询；终态停止
+    if (isBatchRunning.value) {
+      startPolling()
+    } else {
+      stopPolling()
+    }
   } catch {
     batchDetail.value = null
+    stopPolling()
   }
 }
 
@@ -688,6 +777,29 @@ async function retryFailed() {
     launchError.value = e?.response?.data?.detail || e?.message || String(e)
   } finally {
     retryLoading.value = false
+  }
+}
+
+const cancelLoading = ref(false)
+function canCancelBatch(status: string | undefined | null): boolean {
+  if (!status) return false
+  const s = status.toLowerCase()
+  return s === 'pending' || s === 'dispatching' || s === 'running'
+}
+async function cancelBatch() {
+  if (!selectedBatchId.value) return
+  const ok = typeof window !== 'undefined'
+    ? window.confirm('确认取消该批次？已启动的 AWX Job 会被请求 cancel，未启动的 dispatch 不会下发。')
+    : true
+  if (!ok) return
+  cancelLoading.value = true
+  try {
+    await assetsApi.cancelBatchRun(selectedBatchId.value)
+    await loadBatchDetail(selectedBatchId.value)
+  } catch (e: any) {
+    launchError.value = e?.response?.data?.detail || e?.message || String(e)
+  } finally {
+    cancelLoading.value = false
   }
 }
 
@@ -766,5 +878,9 @@ async function handleApplyProposal(proposalId: number) {
 onMounted(() => {
   loadBatches()
   assetsApi.listDbTypes().then((types) => { dbTypes.value = types }).catch(() => {})
+})
+
+onBeforeUnmount(() => {
+  stopPolling()
 })
 </script>

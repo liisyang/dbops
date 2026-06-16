@@ -219,6 +219,8 @@ export const assetsApi = {
     data?: RetryFailedPayload
   ): Promise<any> =>
     request.post(`/v1/collector/batch-runs/${id}/retry-failed`, data || { scope: 'failed' }),
+  cancelBatchRun: (id: number | string): Promise<any> =>
+    request.post(`/v1/collector/batch-runs/${id}/cancel`),
 
   // Phase 3.3A — Credential profiles
   listCredentialProfiles: (): Promise<CredentialProfileRow[]> =>

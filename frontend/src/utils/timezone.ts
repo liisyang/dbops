@@ -2,10 +2,12 @@ import dayjs from 'dayjs'
 import utc from 'dayjs/plugin/utc'
 import timezone from 'dayjs/plugin/timezone'
 import relativeTime from 'dayjs/plugin/relativeTime'
+import duration from 'dayjs/plugin/duration'
 
 dayjs.extend(utc)
 dayjs.extend(timezone)
 dayjs.extend(relativeTime)
+dayjs.extend(duration)
 
 export interface TimezoneOption {
   value: string
@@ -41,6 +43,43 @@ export function formatRelative(utcString: string | null | undefined): string {
   return dayjs(utcString).fromNow()
 }
 
+// N4/C8: format a duration between two backend datetimes.
+// The backend stores naive-local Asia/Shanghai timestamps via
+// CollectorService._now() (now_local). Parsing these as browser-local time
+// (the default for naive ISO strings) is wrong in non-CST zones — a US
+// operator looking at a batch that finished at CST 14:00 would see the
+// duration shifted by ±8h. Always treat the input as Asia/Shanghai.
+const SERVER_TZ = 'Asia/Shanghai'
+function parseServerTs(s: string | null | undefined): dayjs.Dayjs | null {
+  if (!s) return null
+  // The string is naive Asia/Shanghai; attach the server TZ explicitly.
+  const parsed = dayjs.tz(s, SERVER_TZ)
+  return parsed.isValid() ? parsed : null
+}
+
+export function formatDuration(
+  start: string | null | undefined,
+  end?: string | null | undefined
+): string {
+  const s = parseServerTs(start)
+  if (!s) return '-'
+  const e = end ? parseServerTs(end) : dayjs()
+  if (!e || !e.isValid()) return '-'
+  const sec = e.diff(s, 'second')
+  if (sec < 0) return '0s' // clock skew — never show negative
+  if (sec < 60) return `${sec}s`
+  const min = Math.floor(sec / 60)
+  const remainSec = sec % 60
+  if (min < 60) return `${min}m ${remainSec}s`
+  const hr = Math.floor(min / 60)
+  const remainMin = min % 60
+  if (hr < 24) return `${hr}h ${remainMin}m`
+  // Long-running batch (24h+): add days, used for 1000+ instance jobs
+  const days = Math.floor(hr / 24)
+  const remainHr = hr % 24
+  return `${days}d ${remainHr}h ${remainMin}m`
+}
+
 // 常用时区列表
 export const TIMEZONE_LIST: TimezoneOption[] = [
   { value: 'Asia/Shanghai', label: '北京 (UTC+8)', city: 'Beijing' },
@@ -66,5 +105,6 @@ export default {
   setUserTimezone,
   formatInTz,
   formatRelative,
+  formatDuration,
   TIMEZONE_LIST,
 }
