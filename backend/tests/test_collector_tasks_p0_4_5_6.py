@@ -724,6 +724,40 @@ def test_role_lowercase_migration_sql_exists_and_is_idempotent():
 
 
 # ============================================================================
+# I-7: NewType brand on terminal status sets
+# ============================================================================
+
+
+def test_terminal_status_newtypes_distinct_brands():
+    """I-7: each terminal status set must be tagged with its own NewType
+    brand so mypy / reveal_type can distinguish them at compile time.
+    Runtime sets remain plain frozensets of str, so cross-set comparisons
+    are still valid Python — the brand only surfaces under static analysis."""
+    from app.constants import (
+        RunTerminalStatus,
+        BatchTerminalStatus,
+        DispatchTerminalStatus,
+        AwxTerminalStatus,
+        BATCH_TERMINAL_STATUSES,
+        RUN_TERMINAL_STATUSES,
+        AWX_TERMINAL_STATUSES,
+    )
+
+    # The four NewType brands must be distinct callables (not the same
+    # function). The names are part of the contract; do not collapse them.
+    brands = {RunTerminalStatus, BatchTerminalStatus, DispatchTerminalStatus, AwxTerminalStatus}
+    assert len(brands) == 4, "NewType brands must be distinct identities"
+
+    # Each constant must be a frozenset[str] at runtime.
+    assert isinstance(BATCH_TERMINAL_STATUSES, frozenset)
+    assert isinstance(RUN_TERMINAL_STATUSES, frozenset)
+    assert isinstance(AWX_TERMINAL_STATUSES, frozenset)
+    # And every element is a str.
+    for s in BATCH_TERMINAL_STATUSES | RUN_TERMINAL_STATUSES | AWX_TERMINAL_STATUSES:
+        assert isinstance(s, str)
+
+
+# ============================================================================
 # Phase 3.4 批 4 — I2: rate limiting
 # ============================================================================
 
