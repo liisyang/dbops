@@ -370,6 +370,8 @@ class DispatchRunResponse(BaseModel):
     finished_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+    # I-8: surfaced from CollectorDispatchRun.cancelled_at.
+    cancelled_at: Optional[datetime] = None
 
 
 class BatchRunItemResponse(BaseModel):

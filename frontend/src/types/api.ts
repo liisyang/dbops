@@ -554,6 +554,9 @@ export interface DispatchRunSummary {
   launched_at?: string | null
   finished_at?: string | null
   created_at?: string | null
+  // I-8: timestamp set when this dispatch was explicitly cancelled
+  // (operator action) vs. cancelled as a callback side-effect (no ts).
+  cancelled_at?: string | null
 }
 
 export interface BatchRunCreateResponse {
@@ -611,6 +614,8 @@ export interface DispatchRunRow {
   finished_at?: string | null
   created_at?: string | null
   updated_at?: string | null
+  // I-8: see DispatchRunSummary.cancelled_at.
+  cancelled_at?: string | null
 }
 
 export interface BatchRunItemRow extends CollectorRunItemRow {

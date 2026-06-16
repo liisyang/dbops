@@ -255,6 +255,13 @@
                     class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium"
                     :class="getStatusBadgeClass(d.status)"
                   >{{ formatStatusLabel(d.status) }}</span>
+                  <!-- I-8: when an operator cancelled, show the timestamp;
+                       no ts means the dispatch was a callback side-effect. -->
+                  <span
+                    v-if="isCancelled(d.status) && d.cancelled_at"
+                    class="ml-1.5 font-mono text-[10px] text-slate-400"
+                    :title="`cancelled at ${d.cancelled_at}`"
+                  >{{ formatTime(d.cancelled_at) }}</span>
                 </td>
                 <td class="whitespace-nowrap px-4 py-3">{{ d.item_count }}</td>
                 <td class="whitespace-nowrap px-4 py-3 text-emerald-400">{{ d.success_item_count }}</td>
@@ -602,6 +609,15 @@ function formatJson(value: unknown): string {
 }
 
 // ── Status badge helpers ────────────────────────────────────────────────
+
+// I-8: explicit "is this dispatch cancelled?" predicate so the template
+// can decide whether to show the cancelled_at timestamp next to the
+// status badge. Matches both UK 'cancelled' (batch/dispatch) and US
+// 'canceled' (collector_run) spellings.
+function isCancelled(status: string | null | undefined): boolean {
+  const s = (status || '').toLowerCase()
+  return s === 'cancelled' || s === 'canceled'
+}
 
 function formatStatusLabel(status: string | null | undefined): string {
   const s = (status || '').toLowerCase()

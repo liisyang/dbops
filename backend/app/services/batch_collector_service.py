@@ -803,6 +803,9 @@ class BatchCollectorService:
                     "finished_at": d.finished_at,
                     "created_at": d.created_at,
                     "updated_at": d.updated_at,
+                    # I-8: surface cancelled_at for the UI to distinguish
+                    # operator-cancelled from callback-side cancellations.
+                    "cancelled_at": getattr(d, "cancelled_at", None),
                 }
                 for d in dispatches
             ],
@@ -871,6 +874,8 @@ class BatchCollectorService:
                 "finished_at": r.finished_at,
                 "created_at": r.created_at,
                 "updated_at": r.updated_at,
+                # I-8: surface cancelled_at so the UI can show "cancelled at <ts>".
+                "cancelled_at": getattr(r, "cancelled_at", None),
             }
             for r in rows
         ]
@@ -1365,6 +1370,15 @@ class BatchCollectorService:
 
         # P2: surface partial cancellation if any per-row commit rolled back.
         final_detail = "partial" if commit_failures > 0 else "cancelled"
+        # I-8: also surface a per-dispatch cancelled_at roll-up so the UI
+        # can render "cancelled at <ts>" without a follow-up GET.
+        per_dispatch_cancelled = [
+            {
+                "dispatch_run_id": int(d_id),
+                "cancelled_at": now,
+            }
+            for d_id in candidate_ids
+        ]
         return {
             "detail": final_detail,
             "batch_run_id": batch_run_id,
@@ -1373,6 +1387,8 @@ class BatchCollectorService:
             "awx_cancel_requested": awx_cancel_requested,
             "awx_cancel_failed": awx_cancel_failed,
             "commit_failures": commit_failures,
+            "cancelled_at": now,  # batch-level cancellation timestamp
+            "dispatch_cancellations": per_dispatch_cancelled,
         }
 
     @staticmethod
