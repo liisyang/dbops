@@ -12,7 +12,10 @@ from app.services.asset_event_history_service import record_event
 class AssetProposalService:
     @staticmethod
     def _now() -> datetime:
-        return datetime.utcnow()
+        # M14 v3: use local time to match PostgreSQL's naive `now()` and
+        # the rest of the codebase. Single source of truth: now_local().
+        from app.utils.datetime import now_local
+        return now_local()
 
     @staticmethod
     def _to_dict(row: AssetChangeProposal) -> dict[str, Any]:

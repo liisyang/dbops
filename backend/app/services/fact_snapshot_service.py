@@ -6,6 +6,8 @@ import secrets
 from datetime import datetime
 from typing import Any
 
+from app.utils.datetime import now_local
+
 from sqlalchemy.orm import Session
 
 from app.models.dbops_assets import (
@@ -66,7 +68,7 @@ class FactSnapshotService:
         if not facts:
             return None
 
-        now = datetime.utcnow()
+        now = now_local()
         snapshot_id = FactSnapshotService._generate_snapshot_id()
 
         snapshot = AssetFactSnapshot(

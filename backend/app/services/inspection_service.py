@@ -23,7 +23,11 @@ from app.services.check_item_builder_registry import CheckItemBuilderRegistry
 class InspectionService:
     @staticmethod
     def _now() -> datetime:
-        return datetime.utcnow()
+        # M14 v3: use local time (Asia/Shanghai) to match PostgreSQL's naive
+        # `now()` / triggers. Single source of truth is
+        # app.utils.datetime.now_local.
+        from app.utils.datetime import now_local
+        return now_local()
 
     @staticmethod
     def _generate_task_code() -> str:

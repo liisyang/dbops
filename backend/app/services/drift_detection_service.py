@@ -10,6 +10,8 @@ import secrets
 from datetime import datetime
 from typing import Any, Callable, Optional
 
+from app.utils.datetime import now_local
+
 from sqlalchemy.orm import Session
 
 from app.models.dbops_assets import (
@@ -305,7 +307,7 @@ class DriftDetectionService:
         severity: str = "warning",
     ) -> AssetDriftRecord:
         """Create an AssetDriftRecord row."""
-        now = datetime.utcnow()
+        now = now_local()
         drift_code = DriftDetectionService._generate_drift_code(fact_key)
 
         return AssetDriftRecord(

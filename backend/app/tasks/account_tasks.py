@@ -14,6 +14,8 @@ import shlex
 import redis as redis_lib
 from celery import Task
 
+from app.utils.datetime import now_local
+
 from app.config import get_settings
 from app.tasks.queue import app as celery_app
 from app.models.task import TaskState
@@ -74,7 +76,7 @@ def add_user_task(self, task_id, host_ips, username, profile, password_hash, ini
             status="running",
             total_hosts=len(host_ips),
             completed_hosts=0,
-            started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            started_at=now_local().strftime("%Y-%m-%d %H:%M:%S"),
             results={},
             initiated_by=initiated_by,
         )
@@ -188,7 +190,7 @@ def chpasswd_task(self, task_id, host_ips, username, password_hash, initiated_by
             status="running",
             total_hosts=len(host_ips),
             completed_hosts=0,
-            started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            started_at=now_local().strftime("%Y-%m-%d %H:%M:%S"),
             results={},
             initiated_by=initiated_by,
         )
@@ -286,7 +288,7 @@ def check_user_task(self, task_id, usernames, host_ips, initiated_by, socket_id=
             status="running",
             total_hosts=len(host_ips) * len(usernames),
             completed_hosts=0,
-            started_at=datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+            started_at=now_local().strftime("%Y-%m-%d %H:%M:%S"),
             results={},
             initiated_by=initiated_by,
         )

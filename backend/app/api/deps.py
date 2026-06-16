@@ -50,6 +50,10 @@ def get_password_hash(password: str) -> str:
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
     """创建 JWT token"""
     to_encode = data.copy()
+    # NB: deliberately datetime.utcnow() (not now_local). JWT NumericDate per
+    # RFC 7519 §2 is "the number of seconds from 1970-01-01T00:00:00Z UTC"
+    # and pyjwt treats naive datetimes as UTC. Using local-time here would
+    # shift exp by the TZ offset and break token validation cross-region.
     expire = datetime.utcnow() + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     to_encode.update({"exp": expire})
     settings = get_settings()

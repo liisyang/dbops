@@ -31,8 +31,8 @@ class SystemGroup(DbopsAssetBase):
     group_code = Column(String(50), nullable=False, unique=True)
     name = Column(String(50), nullable=False, unique=True)
     description = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
 
 class BusinessSystem(DbopsAssetBase):
@@ -49,8 +49,8 @@ class BusinessSystem(DbopsAssetBase):
     status = Column(String(20), nullable=False, server_default=text("'building'"))
     remark = Column(Text)
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     system_group = relationship("SystemGroup")
     contacts = relationship("BusinessSystemContact", back_populates="business_system")
@@ -68,8 +68,8 @@ class Contact(DbopsAssetBase):
     email = Column(String(200))
     dept = Column(String(200))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     business_links = relationship("BusinessSystemContact", back_populates="contact")
 
@@ -82,7 +82,7 @@ class BusinessSystemContact(DbopsAssetBase):
     contact_id = Column(BigInteger, ForeignKey("contact.id"), nullable=False)
     role_code = Column(String(50), nullable=False)
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     business_system = relationship("BusinessSystem", back_populates="contacts")
     contact = relationship("Contact", back_populates="business_links")
@@ -104,9 +104,9 @@ class AssetEventHistory(DbopsAssetBase):
     changed_fields = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     reason = Column(Text)
     operator = Column(String(100))
-    operated_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    operated_at = Column(DateTime, nullable=False, default=datetime.now)
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         Index("idx_asset_event_history_asset", "asset_type", "asset_id", operated_at.desc()),
@@ -125,8 +125,8 @@ class Site(DbopsAssetBase):
     factory_area = Column(String(100), nullable=False)
     room_location = Column(String(200), nullable=False)
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     servers = relationship("Server", back_populates="site")
 
@@ -146,8 +146,8 @@ class OsVersion(DbopsAssetBase):
     is_supported = Column(Boolean, nullable=False, server_default=text("true"))
     is_recommended = Column(Boolean, nullable=False, server_default=text("false"))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     servers = relationship("Server", back_populates="os_version")
 
@@ -163,8 +163,8 @@ class DbType(DbopsAssetBase):
     vendor = Column(String(100))
     remark = Column(Text)
     is_active = Column(Boolean, nullable=False, default=True, server_default=text("true"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         CheckConstraint(
@@ -199,8 +199,8 @@ class DbVersion(DbopsAssetBase):
     is_supported = Column(Boolean, nullable=False, server_default=text("true"))
     is_recommended = Column(Boolean, nullable=False, server_default=text("false"))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     db_type = relationship("DbType", back_populates="versions")
     instances = relationship("DbInstance", back_populates="db_version")
@@ -227,8 +227,8 @@ class Server(DbopsAssetBase):
     status = Column(String(20), nullable=False, server_default=text("'active'"))
     remark = Column(Text)
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     site = relationship("Site", back_populates="servers")
     os_version = relationship("OsVersion", back_populates="servers")
@@ -248,8 +248,8 @@ class Cluster(DbopsAssetBase):
     status = Column(String(20), nullable=False, server_default=text("'active'"))
     remark = Column(Text)
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     business_system = relationship("BusinessSystem", back_populates="clusters")
     db_type = relationship("DbType", back_populates="clusters")
@@ -265,7 +265,7 @@ class ClusterVip(DbopsAssetBase):
     vip_address = Column(Text, nullable=False)
     vip_type = Column(String(50))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     cluster = relationship("Cluster", back_populates="vips")
 
@@ -299,8 +299,8 @@ class DbInstance(DbopsAssetBase):
     verify_detail = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     remark = Column(Text)
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     db_type = relationship("DbType", back_populates="instances")
     db_version = relationship("DbVersion", back_populates="instances")
@@ -358,8 +358,8 @@ class CollectorRun(DbopsAssetBase):
     dispatch_run_id = Column(BigInteger, ForeignKey("collector_dispatch_run.id"))
     network_zone = Column(String(100))
     awx_instance_group = Column(String(100))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     db_instance = relationship("DbInstance", back_populates="collector_runs")
     server = relationship("Server")
@@ -417,8 +417,8 @@ class CollectorRunItem(DbopsAssetBase):
     raw_result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     collector_run = relationship("CollectorRun", back_populates="items")
     server = relationship("Server")
@@ -477,8 +477,8 @@ class CollectorRunResult(DbopsAssetBase):
     checked_by = Column(String(50))
     checked_at = Column(DateTime)
     raw_result = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     collector_run = relationship("CollectorRun", back_populates="results")
     db_instance = relationship("DbInstance", back_populates="collector_results")
@@ -520,8 +520,8 @@ class CollectorCheckDefinition(DbopsAssetBase):
     enabled = Column(Boolean, nullable=False, server_default=text("true"))
     config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     description = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         CheckConstraint(
@@ -551,8 +551,8 @@ class PortProfile(DbopsAssetBase):
     is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
     priority = Column(Integer, nullable=False, server_default=text("100"))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         CheckConstraint(
@@ -598,8 +598,8 @@ class AssetEndpoint(DbopsAssetBase):
     port_source = Column(String(50))
     is_required = Column(Boolean, nullable=False, server_default=text("false"))
     evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         CheckConstraint(
@@ -656,8 +656,8 @@ class AssetChangeProposal(DbopsAssetBase):
     applied_at = Column(DateTime)
     rejected_by = Column(String(100))
     rejected_reason = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         CheckConstraint(
@@ -686,8 +686,8 @@ class TopologyRelation(DbopsAssetBase):
     lag_seconds = Column(Integer)
     remark = Column(Text)
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
 
 class Tag(DbopsAssetBase):
@@ -699,8 +699,8 @@ class Tag(DbopsAssetBase):
     tag_type = Column(String(50))
     color = Column(String(30))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
 
 class ResourceTag(DbopsAssetBase):
@@ -710,7 +710,7 @@ class ResourceTag(DbopsAssetBase):
     resource_type = Column(String(50), nullable=False)
     resource_id = Column(BigInteger, nullable=False)
     tag_id = Column(BigInteger, ForeignKey("tag.id", ondelete="CASCADE"), nullable=False)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     __table_args__ = (
         UniqueConstraint("resource_type", "resource_id", "tag_id", name="uq_resource_tag"),
@@ -745,8 +745,8 @@ class InspectionItem(DbopsAssetBase):
     enabled = Column(Boolean, nullable=False, server_default=text("true"))
     description = Column(Text)
     rule_config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     results = relationship("InspectionResult", back_populates="item")
 
@@ -778,8 +778,8 @@ class InspectionSchedule(DbopsAssetBase):
     last_task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="SET NULL"))
     options = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_by = Column(String(100))
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     tasks = relationship("InspectionTask", back_populates="schedule", foreign_keys="InspectionTask.schedule_id")
 
@@ -808,8 +808,8 @@ class InspectionTask(DbopsAssetBase):
     error_message = Column(Text)
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     schedule = relationship("InspectionSchedule", back_populates="tasks", foreign_keys=[schedule_id])
     batch_run = relationship("CollectorBatchRun", foreign_keys=[batch_run_id])
@@ -846,9 +846,9 @@ class InspectionResult(DbopsAssetBase):
     severity = Column(String(20), nullable=False, server_default=text("'warning'"))
     message = Column(Text)
     evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    detected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    detected_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     task = relationship("InspectionTask", back_populates="results")
     item = relationship("InspectionItem", back_populates="results")
@@ -966,7 +966,7 @@ class StagingExcelImport(DbopsAssetBase):
     os_root = Column(Text)
     os_password_raw = Column(Text)
     raw_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    imported_at = Column(DateTime, default=datetime.utcnow)
+    imported_at = Column(DateTime, default=datetime.now)
 
 
 class CollectorBatchRun(DbopsAssetBase):
@@ -990,8 +990,8 @@ class CollectorBatchRun(DbopsAssetBase):
     created_by = Column(String(100))
     started_at = Column(DateTime)
     finished_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     dispatches = relationship("CollectorDispatchRun", back_populates="batch_run", cascade="all, delete-orphan")
     collector_runs = relationship("CollectorRun", foreign_keys="CollectorRun.batch_run_id", overlaps="batch_run")
@@ -1002,7 +1002,7 @@ class CollectorBatchRun(DbopsAssetBase):
             name="chk_collector_batch_run_scope",
         ),
         CheckConstraint(
-            "status IN ('pending','dispatching','running','success','partial_success','failed','cancelled')",
+            "status IN ('pending','dispatching','running','success','partial_success','failed','cancelled','timeout','callback_failed')",
             name="chk_collector_batch_run_status",
         ),
         Index("idx_collector_batch_run_status", "status"),
@@ -1034,15 +1034,21 @@ class CollectorDispatchRun(DbopsAssetBase):
     credential_group_hash = Column(String(100))
     launched_at = Column(DateTime)
     finished_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    # C6: separate cancel signal from finished_at. finished_at is set on the
+    # natural callback/timeout-recovery transition; cancelled_at is set by
+    # BatchCollectorService.cancel_batch_run. They are NOT mutually exclusive
+    # in general, but the operator audit story is much cleaner if cancel does
+    # not have to clobber finished_at.
+    cancelled_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     batch_run = relationship("CollectorBatchRun", back_populates="dispatches")
     collector_run = relationship("CollectorRun", foreign_keys=[collector_run_id])
 
     __table_args__ = (
         CheckConstraint(
-            "status IN ('pending','launching','launched','running','success','partial_success','failed','cancelled')",
+            "status IN ('pending','launching','launched','running','success','partial_success','failed','cancelled','timeout','callback_failed')",
             name="chk_collector_dispatch_run_status",
         ),
         Index("idx_collector_dispatch_batch", "batch_run_id"),
@@ -1071,8 +1077,8 @@ class CredentialProfile(DbopsAssetBase):
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     bindings = relationship("CredentialBinding", back_populates="profile", cascade="all, delete-orphan")
 
@@ -1108,8 +1114,8 @@ class CredentialBinding(DbopsAssetBase):
     is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
     extra_attrs = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     remark = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     profile = relationship("CredentialProfile", back_populates="bindings")
 
@@ -1141,10 +1147,10 @@ class AssetFactSnapshot(DbopsAssetBase):
     source_run_id = Column(String(64))
     source_item_key = Column(String(255))
     check_code = Column(String(100))
-    collected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    collected_at = Column(DateTime, nullable=False, default=datetime.now)
     fact_count = Column(Integer, nullable=False, server_default=text("0"))
     raw_payload = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    created_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
 
     values = relationship("AssetFactValue", back_populates="snapshot", cascade="all, delete-orphan")
     drifts = relationship("AssetDriftRecord", back_populates="snapshot", cascade="all, delete-orphan")
@@ -1158,6 +1164,14 @@ class AssetFactSnapshot(DbopsAssetBase):
         Index("idx_fact_snapshot_source_run", "source_run_id"),
         Index("idx_fact_snapshot_check_code", "check_code"),
         Index("idx_fact_snapshot_collected_at", collected_at.desc()),
+        # I3: prevent two parallel handle_callback calls from both
+        # passing the existing_snapshot pre-check and double-inserting.
+        # Mirrors the DB-level UNIQUE constraint added in
+        # dbops_phase3_4_batch_verify_p0_4_5_6_fixups.sql.
+        UniqueConstraint(
+            "source_run_id", "source_item_key",
+            name="uq_asset_fact_snapshot_source",
+        ),
     )
 
 
@@ -1170,8 +1184,8 @@ class AssetFactValue(DbopsAssetBase):
     fact_key = Column(String(255), nullable=False)
     fact_value = Column(JSONB)
     fact_type = Column(String(50), nullable=False, server_default=text("'string'"))
-    collected_at = Column(DateTime, nullable=False, default=datetime.utcnow)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    collected_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.now)
 
     snapshot = relationship("AssetFactSnapshot", back_populates="values")
 
@@ -1203,8 +1217,8 @@ class AssetDriftRecord(DbopsAssetBase):
     proposal_id = Column(BigInteger, ForeignKey("asset_change_proposal.id", ondelete="SET NULL"))
     is_resolved = Column(Boolean, nullable=False, server_default=text("false"))
     resolved_at = Column(DateTime)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.now)
+    updated_at = Column(DateTime, default=datetime.now)
 
     snapshot = relationship("AssetFactSnapshot", back_populates="drifts")
     proposal = relationship("AssetChangeProposal", foreign_keys=[proposal_id])

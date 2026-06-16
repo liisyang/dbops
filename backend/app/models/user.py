@@ -1,11 +1,12 @@
 """
 用户模型 - 对应 PostgreSQL dbops.users 表
 """
-from datetime import datetime
 import uuid
 from sqlalchemy import Column, String, Boolean, DateTime
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import declarative_base
+
+from app.utils.datetime import now_local
 
 Base = declarative_base()
 
@@ -25,8 +26,8 @@ class User(Base):
     is_active = Column(Boolean, default=True)
     timezone = Column(String(50), default='Asia/Shanghai')
     language = Column(String(20), default='zh-CN')
-    created_at = Column(DateTime, default=datetime.utcnow)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=now_local)
+    updated_at = Column(DateTime, default=now_local, onupdate=now_local)
 
     def verify_password(self, password):
         """验证密码"""
