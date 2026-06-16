@@ -758,6 +758,84 @@ def test_terminal_status_newtypes_distinct_brands():
 
 
 # ============================================================================
+# I-3: CollectorRunCreateRequest strict scope validation
+# ============================================================================
+
+
+def _make_request(**overrides):
+    """Build a minimal valid CollectorRunCreateRequest and let the
+    caller override / delete fields via kwargs."""
+    from app.schemas.collector import CollectorRunCreateRequest
+    base = {"check_codes": ["CHECK_OK"]}
+    base.update(overrides)
+    # Strip out keys whose value is the sentinel _DELETE_ so we can
+    # test the "field absent" case without retyping the schema.
+    cleaned = {k: v for k, v in base.items() if v != "_DELETE_"}
+    return CollectorRunCreateRequest(**cleaned)
+
+
+def test_collector_run_create_request_accepts_scope_object_shape():
+    """I-3: shape A — `scope = { target_scope, asset_ids }` only."""
+    req = _make_request(
+        scope={"target_scope": "db_instance", "asset_ids": [1, 2, 3]},
+    )
+    assert req.scope is not None
+    assert req.scope.target_scope == "db_instance"
+    assert req.scope.asset_ids == [1, 2, 3]
+
+
+def test_collector_run_create_request_accepts_flat_shape():
+    """I-3: shape B — `target_scope + asset_ids` (both flat)."""
+    req = _make_request(target_scope="server", asset_ids=[10, 11])
+    assert req.target_scope == "server"
+    assert req.asset_ids == [10, 11]
+
+
+def test_collector_run_create_request_rejects_empty_payload():
+    """I-3: empty `{}` (or missing both shapes) → ValidationError, not a
+    downstream 500. This is the bug that motivated the validator."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as ei:
+        _make_request(check_codes=["CHECK_OK"], scope="_DELETE_",
+                      target_scope="_DELETE_", asset_ids="_DELETE_")
+    assert "scope" in str(ei.value) or "target_scope" in str(ei.value)
+
+
+def test_collector_run_create_request_rejects_both_shapes():
+    """I-3: providing BOTH `scope` and `target_scope+asset_ids` is a
+    contract violation — the validator must surface a 422 with a clear
+    message rather than silently picking one."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError) as ei:
+        _make_request(
+            scope={"target_scope": "db_instance", "asset_ids": [1]},
+            target_scope="server",
+            asset_ids=[2],
+        )
+    assert "互斥" in str(ei.value) or "scope" in str(ei.value)
+
+
+def test_collector_run_create_request_rejects_target_scope_without_asset_ids():
+    """I-3: providing only `target_scope` (no `asset_ids`, no `scope`) is
+    a half-baked request — reject it before it reaches the service."""
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        _make_request(target_scope="db_instance", asset_ids="_DELETE_", scope="_DELETE_")
+
+
+def test_collector_run_create_payload_uses_mode_discriminator():
+    """I-3: TS frontend type uses a `mode` discriminator so a mis-shaped
+    call (forgetting `mode`, or mixing shapes) fails to compile."""
+    import os
+    types_path = "/home/lisiyang/dbops/frontend/src/types/api.ts"
+    src = open(types_path, "r", encoding="utf-8").read()
+    assert "CollectorRunCreatePayload" in src
+    # Discriminated union: two branches each carrying mode='scope' or 'flat'.
+    assert "mode: 'scope'" in src, "scope branch must set mode='scope'"
+    assert "mode: 'flat'" in src, "flat branch must set mode='flat'"
+
+
+# ============================================================================
 # Phase 3.4 批 4 — I2: rate limiting
 # ============================================================================
 

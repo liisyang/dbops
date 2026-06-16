@@ -732,6 +732,7 @@ async function submitLaunch() {
   launchModalError.value = ''
   try {
     const res = await assetsApi.createCollectorRun({
+      mode: 'scope',
       scope: {
         target_scope: 'db_instance',
         asset_ids: [Number(id)],
@@ -762,9 +763,8 @@ async function launchPortCalibration() {
   actionError.value = ''
   try {
     const res = await assetsApi.createCollectorRun({
+      mode: 'scope',
       run_type: 'port_calibration',
-      target_scope: 'db_instance',
-      asset_ids: [Number(id)],
       scope: {
         target_scope: 'db_instance',
         asset_ids: [Number(id)],

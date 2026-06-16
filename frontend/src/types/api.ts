@@ -283,17 +283,37 @@ export interface CollectorEndpointRow {
   updated_at?: string | null
 }
 
-export interface CollectorRunCreatePayload {
-  run_type?: string
-  scope: {
-    target_scope: 'db_instance' | 'server'
-    asset_ids: number[]
-  }
-  target_scope?: 'db_instance' | 'server'
-  asset_ids?: number[]
-  check_codes: string[]
-  options?: Record<string, any>
-}
+/**
+ * I-3: discriminated union for CollectorRunCreatePayload.
+ *
+ * Callers must pick exactly one of two shapes:
+ *   - 'scope'  : { mode: 'scope', scope: { target_scope, asset_ids } }
+ *   - 'flat'   : { mode: 'flat', target_scope, asset_ids }
+ *
+ * The legacy shape (both `scope` and `target_scope` Optional, no `mode`
+ * discriminator) is no longer accepted: the backend validator returns
+ * 422 on `{}` or on conflicting fields. The discriminator is enforced
+ * at the type level here so a mis-shaped call fails to compile.
+ */
+export type CollectorRunCreatePayload =
+  | {
+      mode: 'scope'
+      run_type?: string
+      scope: {
+        target_scope: 'db_instance' | 'server'
+        asset_ids: number[]
+      }
+      check_codes: string[]
+      options?: Record<string, any>
+    }
+  | {
+      mode: 'flat'
+      run_type?: string
+      target_scope: 'db_instance' | 'server'
+      asset_ids: number[]
+      check_codes: string[]
+      options?: Record<string, any>
+    }
 
 export interface PortProfileRow {
   id: number

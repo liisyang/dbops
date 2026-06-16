@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class AssetVerifyLaunchRequest(BaseModel):
@@ -28,12 +28,51 @@ class CollectorRunScopeRequest(BaseModel):
 
 
 class CollectorRunCreateRequest(BaseModel):
+    """Single-asset collector run request.
+
+    I-3: the legacy shape accepted BOTH `scope` (object) and the flat
+    `target_scope` + `asset_ids` fields as Optional. Callers could send
+    `{}` and get a generic 400. This validator now enforces "exactly one
+    of the two valid shapes" at parse time, so the failure mode is a
+    422 with a clear message instead of a downstream ValueError.
+
+    Valid shapes:
+      A) scope = { target_scope, asset_ids: [...] }
+      B) target_scope = ... AND asset_ids = [...] (both flat fields set)
+    """
     run_type: str = Field(default="asset_verify", min_length=1)
     scope: Optional[CollectorRunScopeRequest] = None
     target_scope: Optional[Literal["db_instance", "server"]] = None
     asset_ids: Optional[list[int]] = None
     check_codes: list[str] = Field(min_length=1)
     options: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_scope_xor(self) -> "CollectorRunCreateRequest":
+        has_scope_obj = self.scope is not None
+        has_flat_scope = self.target_scope is not None
+        has_flat_ids = self.asset_ids is not None and len(self.asset_ids) > 0
+
+        # Shape A only: scope object provided
+        if has_scope_obj and not (has_flat_scope or has_flat_ids):
+            return self
+        # Shape B only: flat target_scope + flat asset_ids, no scope object
+        if has_flat_scope and has_flat_ids and not has_scope_obj:
+            return self
+        # Shape B but asset_ids empty -> reject
+        if has_flat_scope and not has_flat_ids and not has_scope_obj:
+            raise ValueError(
+                "target_scope 需要同时提供 asset_ids（或改用 scope 对象）"
+            )
+        # Both shapes provided -> reject
+        if has_scope_obj and (has_flat_scope or has_flat_ids):
+            raise ValueError(
+                "scope 与 target_scope/asset_ids 互斥，只能二选一"
+            )
+        # Nothing provided -> reject (legacy `{}` case)
+        raise ValueError(
+            "必须提供 scope 对象，或 target_scope + asset_ids 组合"
+        )
 
 
 class CollectorRunCreateResponse(BaseModel):
