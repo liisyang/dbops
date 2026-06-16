@@ -790,3 +790,264 @@ def test_types_api_has_terminal_batch_status_set():
     assert "TERMINAL_BATCH_STATUS_SET" in src, "ReadonlySet must exist"
     assert "as const" in src, "const assertion required for type narrowing"
     assert "ReadonlySet" in src, "must use ReadonlySet type"
+
+
+# ============================================================================
+# Phase 3.4 批 5 — I-5: behaviour test coverage gaps
+# ============================================================================
+
+
+def test_launch_one_dispatch_launched_outcome(monkeypatch):
+    """I-5.C-2 (LAUNCHED branch): AwxService.launch_job returns awx_job_id,
+    dispatch + collector_run both transition to 'launched' / 'launched'."""
+    from app.tasks.collector_tasks import _launch_one_dispatch, LaunchOutcome
+
+    db = MagicMock()
+    dispatch = SimpleNamespace(
+        id=1,
+        collector_run_id=10,
+        status="pending",
+        awx_instance_group=None,
+        network_zone=None,
+        dispatch_code="D1",
+    )
+    collector_run = SimpleNamespace(
+        id=10,
+        run_id="RID-1",
+        extra_vars=None,
+    )
+
+    def _query(model):
+        q = MagicMock()
+        # _launch_one_dispatch only does db.query(CollectorRun).filter(...).first()
+        q.filter.return_value.first.return_value = collector_run
+        return q
+
+    db.query.side_effect = _query
+
+    fake_result = {
+        "awx_job_id": 999,
+        "awx_job_url": "https://awx.example/jobs/999/",
+        "awx_job_template_id": 7,
+        "awx_job_template_name": "JT",
+    }
+    monkeypatch.setattr(
+        "app.services.awx_service.AwxService.launch_job",
+        staticmethod(lambda *args, **kwargs: fake_result),
+    )
+    monkeypatch.setattr(
+        "app.tasks.collector_tasks.BatchCollectorService._extract_credential_ids",
+        staticmethod(lambda extra_vars: []),
+    )
+
+    outcome = _launch_one_dispatch(db, dispatch)
+
+    assert outcome is LaunchOutcome.LAUNCHED
+    assert dispatch.status == "launched"
+    assert dispatch.awx_job_id == 999
+    assert collector_run.status == "launched"
+    db.commit.assert_called()
+
+
+def test_launch_one_dispatch_data_error_outcome():
+    """I-5.C-2 (DATA_ERROR branch): dispatch has no collector_run row.
+    Must mark dispatch 'failed' and return DATA_ERROR (not LAUNCHED)."""
+    from app.tasks.collector_tasks import _launch_one_dispatch, LaunchOutcome
+
+    db = MagicMock()
+    dispatch = SimpleNamespace(
+        id=2,
+        collector_run_id=999,  # missing
+        status="pending",
+        awx_instance_group=None,
+        network_zone=None,
+        dispatch_code="D2",
+    )
+
+    def _query(model):
+        q = MagicMock()
+        q.filter.return_value.first.return_value = None  # collector_run not found
+        return q
+
+    db.query.side_effect = _query
+
+    outcome = _launch_one_dispatch(db, dispatch)
+
+    assert outcome is LaunchOutcome.DATA_ERROR
+    assert dispatch.status == "failed"
+    assert "no collector_run" in (dispatch.error_message or "")
+    assert dispatch.finished_at is not None
+    db.commit.assert_called()
+
+
+def test_launch_one_dispatch_awx_error_outcome(monkeypatch):
+    """I-5.C-2 (AWX_ERROR branch): AwxService.launch_job raises AwxServiceError.
+    Both dispatch and collector_run transition to 'failed'; returns AWX_ERROR."""
+    from app.tasks.collector_tasks import _launch_one_dispatch, LaunchOutcome
+    from app.services.awx_service import AwxServiceError
+
+    db = MagicMock()
+    dispatch = SimpleNamespace(
+        id=3,
+        collector_run_id=20,
+        status="pending",
+        awx_instance_group=None,
+        network_zone=None,
+        dispatch_code="D3",
+    )
+    collector_run = SimpleNamespace(
+        id=20,
+        run_id="RID-3",
+        extra_vars=None,
+        status="pending",
+    )
+
+    def _query(model):
+        q = MagicMock()
+        q.filter.return_value.first.return_value = collector_run
+        return q
+
+    db.query.side_effect = _query
+
+    def _raise(*args, **kwargs):
+        raise AwxServiceError("AWX is sad")
+
+    monkeypatch.setattr(
+        "app.services.awx_service.AwxService.launch_job",
+        staticmethod(_raise),
+    )
+    monkeypatch.setattr(
+        "app.tasks.collector_tasks.BatchCollectorService._extract_credential_ids",
+        staticmethod(lambda extra_vars: []),
+    )
+
+    outcome = _launch_one_dispatch(db, dispatch)
+
+    assert outcome is LaunchOutcome.AWX_ERROR
+    assert dispatch.status == "failed"
+    assert "AWX is sad" in (dispatch.error_message or "")
+    assert collector_run.status == "failed"
+    db.commit.assert_called()
+
+
+def test_handle_callback_already_terminal_returns_already_processed(monkeypatch):
+    """I-5.C-3: a callback arriving for an already-terminal run is a no-op
+    (AWX retry storms). Must return detail='ok_already_processed' with the
+    current terminal status; must not re-run item processing."""
+    from app.services.collector_service import CollectorService
+
+    db = MagicMock()
+    terminal_run = SimpleNamespace(
+        run_id="RID-TERM",
+        status="success",
+        request_payload={},
+        dispatch_run_id=None,
+        batch_run_id=None,
+    )
+    db.query.return_value.filter.return_value.with_for_update.return_value.first.return_value = (
+        terminal_run
+    )
+
+    payload = SimpleNamespace(run_id="RID-TERM", items=[])
+
+    result = CollectorService.handle_callback(db, payload=payload)
+
+    assert result["detail"] == "ok_already_processed"
+    assert result["status"] == "success"
+    assert result["item_count"] == 0
+
+
+def test_create_batch_run_returns_429_when_in_flight_cap_reached(monkeypatch):
+    """I-5.C-1: when an admin user already has 3 in-flight batch runs
+    (pending/running/launching/dispatching), POST /collector/batch-runs must
+    reject with HTTP 429 and not invoke BatchCollectorService.create_batch_run."""
+    import asyncio
+    from fastapi import HTTPException
+    from app.api.collector import create_batch_run
+
+    # Stub the in-flight count: 3 batches already in-flight.
+    db = MagicMock()
+    db.query.return_value.filter.return_value.scalar.return_value = 3
+
+    current_user = SimpleNamespace(username="alice")
+
+    payload = SimpleNamespace(
+        scope={"network_zone": "A"},
+        target_scope=None,
+    )
+    payload.model_dump = lambda: {"scope": {"network_zone": "A"}}
+
+    create_called = {"v": False}
+
+    def _create_stub(*args, **kwargs):
+        create_called["v"] = True
+        return {}
+
+    monkeypatch.setattr(
+        "app.services.batch_collector_service.BatchCollectorService.create_batch_run",
+        staticmethod(_create_stub),
+    )
+
+    with pytest.raises(HTTPException) as ei:
+        asyncio.get_event_loop().run_until_complete(
+            create_batch_run(payload=payload, current_user=current_user, db=db)
+        )
+
+    assert ei.value.status_code == 429
+    assert "Max in-flight" in ei.value.detail
+    assert create_called["v"] is False, "service must not be called when 429"
+
+
+def test_timeout_recovery_marks_awx_successful_as_run_success(monkeypatch):
+    """I-5.C-4 (timeout_recovery happy path): when AWX reports a job
+    is_terminal=True with status='successful', the local run must be marked
+    'success' (not 'timeout' — the bug I-1 fixed)."""
+    from app.tasks.collector_tasks import timeout_recovery_task
+
+    candidate_id = 42
+    run = SimpleNamespace(
+        id=candidate_id,
+        run_id="RID-OK",
+        status="running",
+        awx_job_id=123,
+        dispatch_run_id=None,
+        batch_run_id=None,
+        error_message=None,
+        finished_at=None,
+    )
+
+    db = MagicMock()
+
+    def _query(model):
+        m = MagicMock()
+        m.filter.return_value.limit.return_value.all.return_value = [
+            SimpleNamespace(id=candidate_id)
+        ]
+        m.filter.return_value.with_for_update.return_value.first.return_value = run
+        return m
+
+    db.query.side_effect = _query
+
+    fake_awx = {
+        "status": "successful",
+        "is_terminal": True,
+    }
+
+    monkeypatch.setattr(
+        "app.services.awx_service.AwxService.get_job_status",
+        staticmethod(lambda job_id: fake_awx),
+    )
+    monkeypatch.setattr(
+        collector_tasks_module,
+        "get_settings",
+        lambda: SimpleNamespace(COLLECTOR_RUN_TIMEOUT_MINUTES=30),
+    )
+    monkeypatch.setattr(collector_tasks_module, "SessionLocal", lambda: db)
+
+    result = timeout_recovery_task()
+
+    assert run.status == "success", (
+        f"run.status should be 'success' for awx 'successful', got {run.status!r}"
+    )
+    assert result["recovered"] == 1
+    db.commit.assert_called()
