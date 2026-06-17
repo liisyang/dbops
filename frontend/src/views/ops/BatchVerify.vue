@@ -228,6 +228,9 @@
         </div>
       </OpsSectionCard>
 
+      <!-- Asset-dimension report (Phase 2d) -->
+      <AssetVerifyReport :batch-run-id="selectedBatchId" />
+
       <!-- Dispatches -->
       <OpsSectionCard title="分发明细" icon="send">
         <OpsTableShell v-if="(batchDetail.dispatches || []).length > 0">
@@ -356,92 +359,19 @@
         <OpsEmptyState v-else state="empty" title="暂无执行项" description="选择状态或检查项筛选" />
       </OpsSectionCard>
 
-      <OpsSectionCard v-if="batchDetail && (batchDetail.run_type === 'port_calibration' || batchProposals.length > 0)" title="变更建议" icon="rule">
-        <OpsEmptyState v-if="proposalsLoading" state="loading" title="正在加载变更建议" description="请稍候。" />
-        <OpsEmptyState v-else-if="proposalsError" state="error" title="变更建议加载失败" :description="proposalsError" />
-        <OpsEmptyState v-else-if="!batchProposals.length" state="empty" title="暂无待处理建议" description="端口校准后若识别到可疑漂移或端口补齐场景，会在此生成建议。" />
-        <div v-else class="overflow-x-auto">
-          <table class="w-full text-sm">
-            <thead class="bg-surface-container text-left text-xs uppercase text-on-surface-variant">
-              <tr>
-                <th class="whitespace-nowrap px-4 py-3">对象</th>
-                <th class="whitespace-nowrap px-4 py-3">建议类型</th>
-                <th class="whitespace-nowrap px-4 py-3">当前值</th>
-                <th class="whitespace-nowrap px-4 py-3">建议值</th>
-                <th class="whitespace-nowrap px-4 py-3">置信度</th>
-                <th class="whitespace-nowrap px-4 py-3">状态</th>
-                <th class="whitespace-nowrap px-4 py-3">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr
-                v-for="proposal in batchProposals"
-                :key="proposal.id"
-                class="border-t border-outline-variant/30 transition-colors hover:bg-surface-container-high"
-              >
-                <td class="whitespace-nowrap px-4 py-3 text-xs text-on-surface-variant">{{ proposal.target_type }}#{{ proposal.target_id }}</td>
-                <td class="whitespace-nowrap px-4 py-3">{{ proposal.proposal_type }}</td>
-                <td class="whitespace-nowrap px-4 py-3 font-mono text-xs">{{ formatDisplayValue(proposal.current_value) }}</td>
-                <td class="whitespace-nowrap px-4 py-3 font-mono text-xs">{{ formatDisplayValue(proposal.suggested_value) }}</td>
-                <td class="whitespace-nowrap px-4 py-3">{{ proposal.confidence || '-' }}</td>
-                <td class="whitespace-nowrap px-4 py-3">
-                  <span class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium" :class="getProposalStatusBadgeClass(proposal.status)">{{ formatProposalStatusLabel(proposal.status) }}</span>
-                </td>
-                <td class="whitespace-nowrap px-4 py-3">
-                  <div class="flex flex-wrap gap-2">
-                    <button class="ops-secondary-button" :disabled="proposal.status !== 'pending'" @click="handleApproveProposal(proposal.id)">同意</button>
-                    <button class="ops-secondary-button" :disabled="proposal.status !== 'pending' && proposal.status !== 'approved'" @click="handleRejectProposal(proposal.id)">拒绝</button>
-                    <button class="ops-primary-button" :disabled="proposal.status !== 'approved'" @click="handleApplyProposal(proposal.id)">应用</button>
-                  </div>
-                </td>
-              </tr>
-            </tbody>
-          </table>
-        </div>
+      <OpsSectionCard v-if="false" title="变更建议" icon="rule">
+        <!-- Legacy inline proposal table replaced by <ProposalPanel> below (Phase 2d).
+             This block is kept off via v-if="false" so the section can be restored
+             quickly if a regression requires rolling back to the inline table. -->
       </OpsSectionCard>
+      <!-- Phase 2d: standalone Proposal panel (bulk action + PORT_CANDIDATE_CONFLICT picker) -->
+      <ProposalPanel :batch-run-id="selectedBatchId" />
 
-      <OpsSectionCard v-if="selectedItem" title="执行项详情" icon="description">
-        <div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-          <div class="field-card">
-            <div class="field-label">状态</div>
-            <div class="field-value">{{ formatItemStatusLabel(selectedItem.status) }}</div>
-          </div>
-          <div class="field-card">
-            <div class="field-label">结果</div>
-            <div class="field-value">{{ formatItemResult(selectedItem) }}</div>
-          </div>
-          <div class="field-card">
-            <div class="field-label">消息</div>
-            <div class="field-value truncate">{{ formatItemMessage(selectedItem) }}</div>
-          </div>
-          <div class="field-card">
-            <div class="field-label">事实数</div>
-            <div class="field-value">{{ getItemFactsCount(selectedItem) }}</div>
-          </div>
-        </div>
-
-        <div class="mt-4 grid gap-4 xl:grid-cols-2">
-          <div class="rounded-2xl border border-outline-variant/40 bg-surface-container-high/60 p-4">
-            <div class="mb-3 text-sm font-medium text-on-surface">事实列表</div>
-            <div v-if="selectedFacts.length > 0" class="space-y-2">
-              <div
-                v-for="fact in selectedFacts"
-                :key="fact.fact_key"
-                class="rounded-xl border border-outline-variant/30 bg-surface-container px-3 py-2 text-sm"
-              >
-                <div class="font-mono text-xs text-primary">{{ fact.fact_key }}</div>
-                <div class="mt-1 break-words text-on-surface-variant">{{ formatDisplayValue(fact.fact_value) }}</div>
-              </div>
-            </div>
-            <OpsEmptyState v-else state="empty" title="暂无事实内容" description="该项可能是跳过或未采集到 facts。" />
-          </div>
-
-          <div class="rounded-2xl border border-outline-variant/40 bg-surface-container-high/60 p-4">
-            <div class="mb-3 text-sm font-medium text-on-surface">原始返回</div>
-            <pre class="max-h-[360px] overflow-auto whitespace-pre-wrap break-words rounded-xl bg-surface-container px-3 py-2 text-xs text-on-surface-variant">{{ formatJson(selectedItem.raw_result) }}</pre>
-          </div>
-        </div>
+      <OpsSectionCard v-if="false" title="执行项详情" icon="description">
+        <!-- Legacy inline item detail replaced by <VerifyItemDetail> below (Phase 2d). -->
       </OpsSectionCard>
+      <!-- Phase 2d: standalone verify item detail (is_formal_port / port_source / reachable / skip_reason) -->
+      <VerifyItemDetail :item="selectedItemForDetail" />
     </div>
   </OpsPage>
 </template>
@@ -453,8 +383,11 @@ import OpsPageHeader from '@/components/ops/OpsPageHeader.vue'
 import OpsSectionCard from '@/components/ops/OpsSectionCard.vue'
 import OpsTableShell from '@/components/ops/OpsTableShell.vue'
 import OpsEmptyState from '@/components/ops/OpsEmptyState.vue'
+import AssetVerifyReport from '@/components/ops/AssetVerifyReport.vue'
+import ProposalPanel from '@/components/ops/ProposalPanel.vue'
+import VerifyItemDetail from '@/components/ops/VerifyItemDetail.vue'
 import { assetsApi } from '@/api/assets'
-import type { AssetChangeProposalRow, BatchRunRow, BatchRunItemRow, DbTypeRow } from '@/types/api'
+import type { BatchRunRow, BatchRunItemRow, DbTypeRow } from '@/types/api'
 import { TERMINAL_BATCH_STATUS_SET } from '@/types/api'
 import { formatInTz, formatDuration } from '@/utils/timezone'
 
@@ -470,9 +403,7 @@ const items = ref<BatchRunItemRow[]>([])
 const retryLoading = ref(false)
 const itemFilters = reactive({ status: '', check_code: '' })
 const dbTypes = ref<DbTypeRow[]>([])
-const batchProposals = ref<AssetChangeProposalRow[]>([])
-const proposalsLoading = ref(false)
-const proposalsError = ref('')
+// Phase 2d: legacy inline proposal state removed; <ProposalPanel> manages its own
 const selectedItemId = ref<number | null>(null)
 // P1: 轮询失败可见 — 5s tick 失败不再静默停轮询/清空详情
 const pollError = ref('')
@@ -579,9 +510,28 @@ const successRateClass = computed(() => {
 })
 
 const selectedItem = computed(() => items.value.find((item) => item.id === selectedItemId.value) || null)
-const selectedFacts = computed(() => {
-  const facts = selectedItem.value?.raw_result?.facts
-  return Array.isArray(facts) ? facts : []
+
+// Phase 2d: map BatchRunItemRow -> VerifyItemDetail's VerifyItem interface.
+// The component expects a narrower shape (no server_id/db_instance_id/network_zone/etc).
+const selectedItemForDetail = computed(() => {
+  const it = selectedItem.value
+  if (!it) return null
+  return {
+    item_key: it.item_key,
+    check_code: it.check_code,
+    target_scope: it.target_scope,
+    asset_id: (it as any).asset_id ?? it.db_instance_id ?? it.server_id ?? 0,
+    target_host: it.target_host,
+    target_port: it.target_port,
+    is_formal_port: it.is_formal_port ?? undefined,
+    port_source: it.port_source ?? null,
+    status: it.status,
+    reachable: (it.raw_result as any)?.reachable ?? null,
+    result_status: it.result_status,
+    result_message: it.result_message,
+    candidate_state: it.candidate_state,
+    raw_result: (it.raw_result as Record<string, unknown>) ?? null,
+  }
 })
 
 function formatTime(val: string | null | undefined): string {
@@ -593,20 +543,6 @@ function formatTime(val: string | null | undefined): string {
 // The local implementation was removed: it parsed naive backend timestamps
 // as browser-local time, which produced wrong durations in non-CST zones.
 // See frontend/src/utils/timezone.ts#formatDuration for the fix.
-
-function formatDisplayValue(value: unknown): string {
-  if (value === null || value === undefined || value === '') return '-'
-  if (typeof value === 'object') return JSON.stringify(value)
-  return String(value)
-}
-
-function formatJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2)
-  } catch {
-    return String(value)
-  }
-}
 
 // ── Status badge helpers ────────────────────────────────────────────────
 
@@ -686,26 +622,6 @@ function selectItem(item: BatchRunItemRow) {
   selectedItemId.value = item.id
 }
 
-function formatProposalStatusLabel(status: string | null | undefined): string {
-  const s = (status || '').toLowerCase()
-  if (s === 'pending') return '待审批'
-  if (s === 'approved') return '已同意'
-  if (s === 'rejected') return '已拒绝'
-  if (s === 'applied') return '已应用'
-  if (s === 'cancelled' || s === 'canceled') return '已取消'
-  return status || '-'
-}
-
-function getProposalStatusBadgeClass(status: string | null | undefined): string {
-  const s = (status || '').toLowerCase()
-  if (s === 'pending') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
-  if (s === 'approved') return 'border-sky-400/30 bg-sky-400/10 text-sky-200'
-  if (s === 'rejected') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
-  if (s === 'applied') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
-  if (s === 'cancelled' || s === 'canceled') return 'border-slate-400/30 bg-slate-400/10 text-slate-300'
-  return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
-}
-
 // ── API actions ─────────────────────────────────────────────────────────
 
 async function createBatch() {
@@ -769,7 +685,7 @@ async function loadBatchDetail(id: number, opts?: { signal?: AbortSignal }) {
   try {
     batchDetail.value = await assetsApi.getBatchRun(id, opts)
     await loadItems()
-    await loadBatchProposals()
+    // Phase 2d: proposal loading moved to <ProposalPanel> (auto-loads on mount/batchRunId change)
     // 运行中批次启动轮询；终态停止
     if (isBatchRunning.value) {
       startPolling()
@@ -836,78 +752,6 @@ async function cancelBatch() {
     launchError.value = e?.response?.data?.detail || e?.message || String(e)
   } finally {
     cancelLoading.value = false
-  }
-}
-
-async function loadBatchProposals() {
-  proposalsLoading.value = true
-  proposalsError.value = ''
-  try {
-    const allItems = await assetsApi.listBatchItems(selectedBatchId.value!, {}, { suppressErrorToast: true })
-    if (!allItems.length) {
-      batchProposals.value = []
-      return
-    }
-    const targets = new Map<string, { target_type: string; target_id: number }>()
-    for (const item of allItems) {
-      if (item.db_instance_id) {
-        targets.set(`db_instance:${item.db_instance_id}`, { target_type: 'db_instance', target_id: item.db_instance_id })
-      }
-      if (item.server_id) {
-        targets.set(`server:${item.server_id}`, { target_type: 'server', target_id: item.server_id })
-      }
-    }
-    const proposalLists = await Promise.all(
-      Array.from(targets.values()).map((t) =>
-        assetsApi.listCollectorProposals(
-          { target_type: t.target_type, target_id: t.target_id },
-          { suppressErrorToast: true }
-        ).catch(() => [] as AssetChangeProposalRow[])
-      )
-    )
-    const seen = new Set<number>()
-    const merged: AssetChangeProposalRow[] = []
-    for (const list of proposalLists) {
-      for (const p of list) {
-        if (!seen.has(p.id)) {
-          seen.add(p.id)
-          merged.push(p)
-        }
-      }
-    }
-    batchProposals.value = merged
-  } catch (err: any) {
-    batchProposals.value = []
-    proposalsError.value = err?.response?.data?.detail || err?.message || '加载失败'
-  } finally {
-    proposalsLoading.value = false
-  }
-}
-
-async function handleApproveProposal(proposalId: number) {
-  try {
-    await assetsApi.approveCollectorProposal(proposalId)
-    await loadBatchProposals()
-  } catch (e: any) {
-    launchError.value = e?.response?.data?.detail || e?.message || 'approve 失败'
-  }
-}
-
-async function handleRejectProposal(proposalId: number) {
-  try {
-    await assetsApi.rejectCollectorProposal(proposalId, {})
-    await loadBatchProposals()
-  } catch (e: any) {
-    launchError.value = e?.response?.data?.detail || e?.message || 'reject 失败'
-  }
-}
-
-async function handleApplyProposal(proposalId: number) {
-  try {
-    await assetsApi.applyCollectorProposal(proposalId)
-    await loadBatchProposals()
-  } catch (e: any) {
-    launchError.value = e?.response?.data?.detail || e?.message || 'apply 失败'
   }
 }
 

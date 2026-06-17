@@ -966,6 +966,141 @@ class BatchCollectorService:
             for item in rows
         ]
 
+    # ------------------------------------------------------------------
+    # 资产校验功能优化 v2 / 2026-06-17: 资产维度聚合报告
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def get_asset_report(db: Session, batch_run_id: int) -> dict[str, Any]:
+        """按资产维度聚合 batch 内所有 item 的结果。
+
+        返回结构：{batch_run_id, batch_code, assets: [...]}
+        每个 asset 包含：entity_type, entity_id, entity_name, ip_address,
+        db_port_status / os_port_status / fact_status, fact_count,
+        error_messages, items 摘要。
+        """
+        # 查找 batch_run
+        from app.models.dbops_assets import CollectorBatchRun, CollectorRun, CollectorRunItem, DbInstance, Server
+
+        batch_run = (
+            db.query(CollectorBatchRun)
+            .filter(CollectorBatchRun.id == int(batch_run_id))
+            .first()
+        )
+        if batch_run is None:
+            raise LookupError(f"batch_run {batch_run_id} 不存在")
+
+        # 找所有 dispatch_run 的 collector_run_id
+        dispatch_run_ids = [
+            d.id
+            for d in db.query(CollectorBatchRun.dispatch_runs).all()
+            if d.id is not None
+        ] if False else []  # avoid the .dispatch_runs attr access
+        # 通过 collector_run 找 items：找所有 collector_run.batch_run_id == batch_run_id
+        collector_runs = (
+            db.query(CollectorRun)
+            .filter(CollectorRun.batch_run_id == int(batch_run_id))
+            .all()
+        )
+        collector_run_ids = [int(r.id) for r in collector_runs]
+        if not collector_run_ids:
+            return {
+                "batch_run_id": int(batch_run_id),
+                "batch_code": batch_run.batch_code,
+                "assets": [],
+            }
+
+        # 取所有 item
+        items = (
+            db.query(CollectorRunItem)
+            .filter(CollectorRunItem.collector_run_id.in_(collector_run_ids))
+            .all()
+        )
+
+        # 按 (target_scope, asset_id) 分组
+        groups: dict[tuple, dict[str, Any]] = {}
+        for item in items:
+            key = (item.target_scope, int(item.db_instance_id or item.server_id or 0))
+            if key[1] == 0:
+                continue
+            g = groups.setdefault(
+                key,
+                {
+                    "entity_type": item.target_scope,
+                    "entity_id": key[1],
+                    "entity_name": None,
+                    "ip_address": None,
+                    "db_port_status": None,
+                    "os_port_status": None,
+                    "fact_status": None,
+                    "fact_count": 0,
+                    "error_messages": [],
+                    "items": [],
+                },
+            )
+            # 归类状态
+            g["items"].append({
+                "item_key": item.item_key,
+                "check_code": item.check_code,
+                "status": item.status,
+                "reachable": bool(item.is_required) is False and item.is_required is not None,
+                "target_host": item.target_host,
+                "target_port": int(item.target_port),
+                "result_status": item.result_status,
+            })
+            if item.target_scope == "db_instance" and item.check_code in {
+                "DB_PORT_REACHABILITY",
+                "PORT_CANDIDATE_REACHABILITY",
+            }:
+                if item.status == "verified" or item.result_status == "verified":
+                    g["db_port_status"] = "reachable"
+                elif g["db_port_status"] != "reachable":
+                    g["db_port_status"] = "unreachable"
+            elif item.target_scope == "server" and item.check_code in {
+                "OS_PORT_REACHABILITY",
+                "SSH_PORT_REACHABILITY",
+            }:
+                if item.status == "verified" or item.result_status == "verified":
+                    g["os_port_status"] = "reachable"
+                elif g["os_port_status"] != "reachable":
+                    g["os_port_status"] = "unreachable"
+
+            if item.check_code in {
+                "DB_BASIC_FACT_COLLECTION",
+                "DB_VERSION_FACT_COLLECTION",
+                "DB_ROLE_FACT_COLLECTION",
+                "OS_BASIC_FACT_COLLECTION",
+            }:
+                if item.status == "collected" or item.result_status == "collected":
+                    g["fact_status"] = "success"
+                    g["fact_count"] += 1
+                elif g["fact_status"] != "success":
+                    g["fact_status"] = "failed"
+
+            if item.result_message:
+                g["error_messages"].append(item.result_message)
+
+        # JOIN DbInstance / Server 取 name + IP
+        for key, g in groups.items():
+            if g["entity_type"] == "db_instance":
+                obj = db.query(DbInstance).filter(DbInstance.id == int(g["entity_id"])).first()
+                if obj is not None:
+                    g["entity_name"] = obj.instance_name or obj.code
+                    # IP 位于关联的 Server（DbInstance 无 ip_address 列）
+                    g["ip_address"] = str(obj.server.ip_address) if obj.server and obj.server.ip_address else None
+                    g["cluster_id"] = int(obj.cluster_id) if obj.cluster_id else None
+            elif g["entity_type"] == "server":
+                obj = db.query(Server).filter(Server.id == int(g["entity_id"])).first()
+                if obj is not None:
+                    g["entity_name"] = obj.hostname
+                    g["ip_address"] = obj.ip_address
+
+        return {
+            "batch_run_id": int(batch_run_id),
+            "batch_code": batch_run.batch_code,
+            "assets": list(groups.values()),
+        }
+
     # === Retry ===
 
     @staticmethod

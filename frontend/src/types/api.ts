@@ -245,6 +245,7 @@ export interface CollectorRunItemRow {
   protocol: string
   endpoint_type?: string | null
   port_source?: string | null
+  is_formal_port?: boolean | null
   is_required?: boolean
   timeout_seconds: number
   status: string
