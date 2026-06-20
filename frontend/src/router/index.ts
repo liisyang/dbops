@@ -56,8 +56,15 @@ const routes: RouteRecordRaw[] = [
       {
         path: 'ops/batch-verify',
         name: 'BatchVerify',
-        component: () => import('@/views/ops/BatchVerify.vue'),
+        component: () => import('@/views/ops/batch-verify/BatchVerifyList.vue'),
         meta: { title: '批量校验', parent: '自动化运维' }
+      },
+      {
+        path: 'ops/batch-verify/:batchRunId',
+        name: 'BatchVerifyDetail',
+        component: () => import('@/views/ops/batch-verify/BatchVerifyDetail.vue'),
+        meta: { title: '批量校验详情', parent: '自动化运维' },
+        props: (route) => ({ batchRunId: Number(route.params.batchRunId) }),
       },
       // 资产管理
       {
