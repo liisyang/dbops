@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hmac
 import logging
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_admin, get_current_user, get_db
@@ -15,8 +16,10 @@ from app.schemas.collector import (
     AssetDriftRecordResponse,
     AssetFactSnapshotResponse,
     AssetFactSnapshotSummary,
+    AssetReportResponse,  # I7 (PR review 2026-06-20): response_model
     AssetVerifyLaunchRequest,
     AssetVerifyLaunchResponse,
+    BatchActionResultResponse,  # I7 (PR review 2026-06-20): response_model
     BatchRunCreateRequest,
     BatchRunCreateResponse,
     BatchRunItemResponse,
@@ -24,6 +27,7 @@ from app.schemas.collector import (
     BatchRunSummary,
     CollectorCallbackRequest,
     CollectorCallbackResponse,
+    CollectorCheckDefinitionResponse,
     CollectorEndpointResponse,
     CredentialBindingCreate,
     CredentialBindingResponse,
@@ -51,6 +55,7 @@ from app.models.dbops_assets import (
 )
 from app.services.asset_proposal_service import AssetProposalService
 from app.services.batch_collector_service import BatchCollectorService
+from app.services.collector_check_definition_service import CollectorCheckDefinitionService
 from app.services.collector_service import CollectorService
 from app.services.port_profile_service import PortProfileService
 
@@ -186,12 +191,33 @@ async def list_port_profiles(
     )
 
 
+# 资产校验功能优化 v2 / Follow-up A / 2026-06-17:
+# 检查项定义查询 — 前端 BatchVerify.vue 用此端点替代硬编码 7 个 check_code 列表。
+# 三个 filter 均为可选；不传则返回全表（按 enabled desc, check_code asc）。
+@router.get("/collector/check-codes", response_model=List[CollectorCheckDefinitionResponse])
+async def list_check_codes(
+    target_scope: Optional[str] = Query(default=None),
+    task_type: Optional[str] = Query(default=None),
+    is_enabled: Optional[bool] = Query(default=None),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    return CollectorCheckDefinitionService.list_definitions(
+        db,
+        target_scope=target_scope,
+        task_type=task_type,
+        is_enabled=is_enabled,
+    )
+
+
 @router.get("/collector/proposals", response_model=List[AssetChangeProposalResponse])
 async def list_collector_proposals(
     target_type: Optional[str] = Query(default=None),
     target_id: Optional[int] = Query(default=None),
     proposal_type: Optional[str] = Query(default=None),
     status: Optional[str] = Query(default=None),
+    source_run_id: Optional[str] = Query(default=None),
+    batch_run_id: Optional[int] = Query(default=None),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
@@ -201,6 +227,8 @@ async def list_collector_proposals(
         target_id=target_id,
         proposal_type=proposal_type,
         status=status,
+        source_run_id=source_run_id,
+        batch_run_id=batch_run_id,
     )
 
 
@@ -242,10 +270,12 @@ async def reject_collector_proposal(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# M3 (PR review 2026-06-18): require admin for proposal apply — this endpoint
+# modifies production asset rows (port, hostname, cpu_cores, etc.).
 @router.post("/collector/proposals/{proposal_id}/apply", response_model=AssetChangeProposalResponse)
 async def apply_collector_proposal(
     proposal_id: int,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
     try:
@@ -255,6 +285,70 @@ async def apply_collector_proposal(
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# 资产校验功能优化 v2 / 2026-06-17: 单条 apply 支持 selected_value（PORT_CANDIDATE_CONFLICT）
+class ProposalApplyWithValueRequest(BaseModel):
+    selected_value: Optional[int] = Field(default=None)
+    comment: Optional[str] = None
+
+
+# M3 (PR review 2026-06-18): require admin for proposal apply-with-value.
+@router.post("/collector/proposals/{proposal_id}/apply-with-value", response_model=AssetChangeProposalResponse)
+async def apply_collector_proposal_with_value(
+    proposal_id: int,
+    payload: ProposalApplyWithValueRequest,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """Apply a proposal with an explicit selected_value (PORT_CANDIDATE_CONFLICT)."""
+    try:
+        result = AssetProposalService.apply_proposal(
+            db,
+            proposal_id=proposal_id,
+            operator=current_user.username,
+            selected_value=payload.selected_value,
+        )
+        db.commit()
+        return result
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class ProposalBatchActionRequest(BaseModel):
+    proposal_ids: list[int] = Field(min_length=1)
+    action: Literal["approve", "reject", "apply"]
+    comment: Optional[str] = None
+    override_values: dict[str, int] = Field(default_factory=dict)
+
+
+# M3 (PR review 2026-06-18): require admin for batch proposal mutations.
+@router.post("/collector/proposals/batch-action", response_model=BatchActionResultResponse)
+async def batch_action_proposals(
+    payload: ProposalBatchActionRequest,
+    current_user: User = Depends(get_current_admin),
+    db: Session = Depends(get_db),
+):
+    """批量 approve / reject / apply 多条 proposal。
+
+    override_values: 仅 PORT_CANDIDATE_CONFLICT apply 时使用；
+    键为 proposal_id（字符串），值为用户选定的单个整数端口。
+    """
+    try:
+        result = AssetProposalService.batch_action(
+            db,
+            proposal_ids=payload.proposal_ids,
+            action=payload.action,
+            operator=current_user.username,
+            comment=payload.comment,
+            override_values=payload.override_values,
+        )
+        return result
+    except Exception as exc:
+        db.rollback()
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -431,6 +525,28 @@ async def retry_failed_batch_items(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("retry_failed_batch_items failed: %s", exc)
+        raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
+
+
+# 资产校验功能优化 v2 / 2026-06-17: 资产维度聚合报告
+@router.get("/collector/batch-runs/{batch_run_id}/asset-report", response_model=AssetReportResponse)
+async def get_asset_report(
+    batch_run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """按资产维度聚合 batch 内所有 item 的结果。
+
+    返回结构：{batch_run_id, batch_code, assets: [...]}
+    """
+    # I14 (PR review 2026-06-20): BatchCollectorService 已在文件顶部 import，
+    # 删掉方法内冗余的 inline import。
+    try:
+        return BatchCollectorService.get_asset_report(db, batch_run_id=batch_run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.exception("get_asset_report failed: %s", exc)
         raise HTTPException(status_code=500, detail=f"内部错误: {exc}") from exc
 
 

@@ -7,6 +7,7 @@ import type {
   ClusterDetail,
   ClusterRow,
   ClusterUpsertPayload,
+  CollectorCheckDefinitionRow,
   ContactRow,
   ContactUpsertPayload,
   DbInstanceUpsertPayload,
@@ -116,8 +117,20 @@ export const assetsApi = {
     params?: { target_scope?: string; db_type_code?: string; os_family?: string; is_enabled?: boolean }
   ): Promise<PortProfileRow[]> =>
     request.get('/v1/collector/port-profiles', { params }),
+
+  // 资产校验功能优化 v2 / Follow-up A / 2026-06-17:
+  // 检查项定义查询 — 替代 BatchVerify.vue 硬编码 7 个 check_code 列表。
+  // suppressErrorToast: 表单 mount 失败时静默降级到 []，避免每次切 radio 触发 toast。
+  listCheckCodes: (
+    params?: { target_scope?: string; task_type?: string; is_enabled?: boolean },
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<CollectorCheckDefinitionRow[]> =>
+    request.get('/v1/collector/check-codes', {
+      params,
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
   listCollectorProposals: (
-    params?: { target_type?: string; target_id?: number; proposal_type?: string; status?: string },
+    params?: { target_type?: string; target_id?: number; proposal_type?: string; status?: string; source_run_id?: string | number; batch_run_id?: number },
     options?: { suppressErrorToast?: boolean }
   ): Promise<AssetChangeProposalRow[]> =>
     request.get('/v1/collector/proposals', {
@@ -313,4 +326,51 @@ export const assetsApi = {
     }
   ): Promise<InspectionResultRow[]> =>
     request.get('/v1/inspection/results', { params }),
+
+  // 资产校验功能优化 v2 / 2026-06-17: 批量 proposal 操作 + asset report
+  batchActionProposals: (
+    payload: {
+      proposal_ids: number[]
+      action: 'approve' | 'reject' | 'apply'
+      comment?: string
+      override_values?: Record<string, number>
+    }
+  ): Promise<{
+    action: string
+    results: Array<{ id: number; success: boolean; error?: string }>
+    success_count: number
+    fail_count: number
+  }> => request.post('/v1/collector/proposals/batch-action', payload),
+
+  applyProposalWithValue: (
+    proposalId: number,
+    payload: { selected_value?: number; comment?: string }
+  ): Promise<AssetChangeProposalRow> =>
+    request.post(`/v1/collector/proposals/${proposalId}/apply-with-value`, payload),
+
+  getAssetReport: (
+    batchRunId: number,
+    options?: { suppressErrorToast?: boolean }
+  ): Promise<{
+    batch_run_id: number
+    batch_code: string
+    assets: Array<{
+      entity_type: string
+      entity_id: number
+      entity_name?: string | null
+      ip_address?: string | null
+      db_port_status?: string | null
+      os_port_status?: string | null
+      fact_status?: string | null
+      fact_count: number
+      error_messages: string[]
+      items: Array<Record<string, unknown>>
+      // M6 (PR review 2026-06-18): backend returns cluster_type_suspected on
+      // every asset (C3 fix). TypeScript consumers need this in the contract.
+      cluster_type_suspected?: Record<string, unknown> | null
+    }>
+  }> =>
+    request.get(`/v1/collector/batch-runs/${batchRunId}/asset-report`, {
+      suppressErrorToast: options?.suppressErrorToast,
+    }),
 }

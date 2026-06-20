@@ -1,9 +1,15 @@
 from app.schemas.collector import (
+    AssetReportAssetResponse,
+    AssetReportItem,
+    AssetReportResponse,
     AssetVerifyLaunchRequest,
     AssetVerifyLaunchResponse,
+    BatchActionResultEntry,
+    BatchActionResultResponse,
     CollectorCallbackItem,
     CollectorCallbackRequest,
     CollectorCallbackResponse,
+    CollectorCheckDefinitionResponse,  # I15 (PR review 2026-06-20): 导出
     CollectorEndpointResponse,
     CollectorRunCreateRequest,
     CollectorRunCreateResponse,
@@ -14,11 +20,17 @@ from app.schemas.collector import (
 )
 
 __all__ = [
+    "AssetReportAssetResponse",
+    "AssetReportItem",
+    "AssetReportResponse",
     "AssetVerifyLaunchRequest",
     "AssetVerifyLaunchResponse",
+    "BatchActionResultEntry",
+    "BatchActionResultResponse",
     "CollectorCallbackItem",
     "CollectorCallbackRequest",
     "CollectorCallbackResponse",
+    "CollectorCheckDefinitionResponse",  # I15
     "CollectorEndpointResponse",
     "CollectorRunCreateRequest",
     "CollectorRunCreateResponse",

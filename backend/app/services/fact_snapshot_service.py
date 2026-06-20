@@ -101,6 +101,10 @@ class FactSnapshotService:
             )
             db.add(value)
 
+        # Flush fact values so downstream queries (e.g., DriftDetectionService)
+        # can see them within the same session even when autoflush=False.
+        db.flush()
+
         return snapshot
 
     # ------------------------------------------------------------------

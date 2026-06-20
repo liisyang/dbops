@@ -333,3 +333,223 @@ def test_db_fact_builder_emits_skipped_item_when_credential_missing(monkeypatch)
     assert items[0]["result_message"] == "CREDENTIAL_MISSING"
     assert items[0]["server_id"] == 2
     assert items[0]["raw_result"]["skip_reason"] == "CREDENTIAL_MISSING"
+
+
+# ============================================================================
+# C3 (PR review 2026-06-18): build_cluster_type_hint wire-in
+# ============================================================================
+
+
+def test_infer_cluster_type_from_facts_primary_with_slave_returns_master_slave():
+    """C3: PRIMARY role + has_slave → master-slave 推断."""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    facts = {"database_role": "PRIMARY", "has_slave": True}
+    result = DriftDetectionService._infer_cluster_type_from_facts(facts)
+    assert result == "master-slave"
+
+
+def test_infer_cluster_type_from_facts_standby_returns_primary_standby():
+    """C3: PHYSICAL STANDBY → primary-standby 推断."""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    facts = {"database_role": "PHYSICAL STANDBY"}
+    result = DriftDetectionService._infer_cluster_type_from_facts(facts)
+    assert result == "primary-standby"
+
+
+def test_infer_cluster_type_from_facts_is_in_recovery_true_returns_primary_standby():
+    """C3: PostgreSQL pg_is_in_recovery=True → primary-standby."""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    facts = {"is_in_recovery": True}
+    result = DriftDetectionService._infer_cluster_type_from_facts(facts)
+    assert result == "primary-standby"
+
+
+def test_infer_cluster_type_from_facts_ambiguous_returns_none():
+    """C3: PRIMARY 但 has_slave 缺失 → 模糊，不推断 (返回 None)。"""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    facts = {"database_role": "PRIMARY"}  # 无 has_slave
+    result = DriftDetectionService._infer_cluster_type_from_facts(facts)
+    assert result is None
+
+    # Empty facts 同样模糊
+    result = DriftDetectionService._infer_cluster_type_from_facts({})
+    assert result is None
+
+
+def test_build_cluster_type_hint_happy_path_returns_mismatch_dict():
+    """C3: inferred type 与 cluster.cluster_type 不一致 → 返回 hint dict。"""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    db = MagicMock()
+    instance = SimpleNamespace(
+        id=80, cluster_id=70,
+        db_type=SimpleNamespace(type_code="mysql"),
+        cluster=SimpleNamespace(cluster_type="DATAGUARD"),  # CMDB 标 DATAGUARD
+    )
+    facts = {"database_role": "PRIMARY", "has_slave": True}  # 推断 master-slave
+
+    result = DriftDetectionService.build_cluster_type_hint(db, instance, facts)
+    assert result is not None
+    assert result["item_code"] == "CLUSTER_TYPE_MISMATCH"
+    assert result["derived_target_type"] == "cluster"
+    assert result["derived_target_id"] == 70
+    assert result["current_cluster_type"] == "DATAGUARD"
+    assert result["inferred_cluster_type"] == "master-slave"
+    assert result["auto_proposal"] is False
+    assert "不一致" in result["message"]
+
+
+def test_build_cluster_type_hint_returns_none_when_consistent():
+    """C3: cluster.cluster_type 与推断一致 → 返回 None，无需提示。"""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    db = MagicMock()
+    instance = SimpleNamespace(
+        id=80, cluster_id=70,
+        db_type=SimpleNamespace(type_code="mysql"),
+        cluster=SimpleNamespace(cluster_type="master-slave"),  # 已对齐
+    )
+    facts = {"database_role": "PRIMARY", "has_slave": True}
+
+    result = DriftDetectionService.build_cluster_type_hint(db, instance, facts)
+    assert result is None
+
+
+def test_build_cluster_type_hint_returns_none_when_no_cluster():
+    """C3: 实例未关联 cluster → 返回 None。"""
+    from app.services.drift_detection_service import DriftDetectionService
+
+    db = MagicMock()
+    instance = SimpleNamespace(
+        id=80, cluster_id=None,
+        db_type=SimpleNamespace(type_code="mysql"),
+        cluster=None,
+    )
+    facts = {"database_role": "PRIMARY", "has_slave": True}
+
+    result = DriftDetectionService.build_cluster_type_hint(db, instance, facts)
+    assert result is None
+
+
+def test_get_asset_report_includes_cluster_type_suspected():
+    """C3 集成: get_asset_report 对每个 db_instance asset 填充 cluster_type_suspected。
+
+    seed 1 instance + cluster_type="single" + facts 显示 role=PRIMARY + has_slave=True
+    → asset.cluster_type_suspected != null
+    """
+    # Simulate the relevant subset of db.query(model).filter(...).first() calls
+    # that BatchCollectorService.get_asset_report issues:
+    #   CollectorBatchRun → batch_run
+    #   CollectorRun      → runs (one per collector_run_id)
+    #   CollectorRunItem  → items (port check + DB_BASIC_FACT_COLLECTION)
+    #   DbInstance        → instance (for name + IP + cluster_type_hint)
+    #   CollectorRunItem  → latest DB_BASIC_FACT_COLLECTION (for facts)
+    batch_run = SimpleNamespace(id=1, batch_code="BATCH-CLUSTER")
+    instance = SimpleNamespace(
+        id=80,
+        instance_name="ORCL1",
+        code="INS-1",
+        cluster_id=70,
+        cluster=SimpleNamespace(cluster_type="single"),  # 不一致
+        server=SimpleNamespace(ip_address="10.0.0.10"),
+    )
+    port_item = SimpleNamespace(
+        collector_run_id=10, run_id="RID-1", item_key="db:80:DB_PORT:10.0.0.10:1521",
+        check_code="DB_PORT_REACHABILITY", target_scope="db_instance",
+        db_instance_id=80, server_id=None, target_host="10.0.0.10", target_port=1521,
+        status="verified", result_status="verified", result_message=None,
+        is_required=True, raw_result={},
+    )
+    fact_item = SimpleNamespace(
+        collector_run_id=10, run_id="RID-1", item_key="db:80:DB_FACT:10.0.0.10:1521",
+        check_code="DB_BASIC_FACT_COLLECTION", target_scope="db_instance",
+        db_instance_id=80, server_id=None, target_host="10.0.0.10", target_port=1521,
+        status="success", result_status="collected", result_message=None,
+        is_required=True,
+        raw_result={"facts": {"database_role": "PRIMARY", "has_slave": True}},
+    )
+    collector_run = SimpleNamespace(id=10, batch_run_id=1)
+
+    db = MagicMock()
+
+    def _query(model):
+        m = MagicMock()
+        name = model.__name__ if hasattr(model, "__name__") else str(model)
+        if name == "CollectorBatchRun":
+            m.filter.return_value.first.return_value = batch_run
+        elif name == "CollectorRun":
+            m.filter.return_value.all.return_value = [collector_run]
+        elif name == "CollectorRunItem":
+            m.filter.return_value.all.return_value = [port_item, fact_item]
+            m.filter.return_value.first.return_value = fact_item
+            # _load_latest_facts_for_instance uses .order_by().first()
+            m.filter.return_value.order_by.return_value.first.return_value = fact_item
+        elif name == "DbInstance":
+            # I3 (PR review 2026-06-20): get_asset_report 改用批量 in_() 预加载
+            m.options.return_value.filter.return_value.all.return_value = [instance]
+            m.filter.return_value.first.return_value = instance
+        return m
+
+    db.query.side_effect = _query
+
+    result = BatchCollectorService.get_asset_report(db, batch_run_id=1)
+
+    assert result["batch_run_id"] == 1
+    assert result["batch_code"] == "BATCH-CLUSTER"
+    assert len(result["assets"]) == 1
+    asset = result["assets"][0]
+    assert asset["entity_type"] == "db_instance"
+    assert asset["entity_id"] == 80
+    # C3 关键断言: cluster_type_suspected 字段填充
+    assert "cluster_type_suspected" in asset
+    hint = asset["cluster_type_suspected"]
+    assert hint is not None
+    assert hint["inferred_cluster_type"] == "master-slave"
+    assert hint["current_cluster_type"] == "single"
+    assert hint["item_code"] == "CLUSTER_TYPE_MISMATCH"
+
+
+def test_get_asset_report_returns_null_cluster_type_when_no_latest_facts():
+    """C3: 没有任何 DB_BASIC_FACT_COLLECTION 历史 → cluster_type_suspected = None。"""
+    batch_run = SimpleNamespace(id=2, batch_code="BATCH-EMPTY")
+    instance = SimpleNamespace(
+        id=81, instance_name="ORCL2", code="INS-2",
+        cluster_id=70,
+        cluster=SimpleNamespace(cluster_type="master-slave"),
+        server=SimpleNamespace(ip_address="10.0.0.11"),
+    )
+    port_item = SimpleNamespace(
+        collector_run_id=11, run_id="RID-2", item_key="db:81:DB_PORT:10.0.0.11:1521",
+        check_code="DB_PORT_REACHABILITY", target_scope="db_instance",
+        db_instance_id=81, server_id=None, target_host="10.0.0.11", target_port=1521,
+        status="verified", result_status="verified", result_message=None,
+        is_required=True, raw_result={},
+    )
+    collector_run = SimpleNamespace(id=11, batch_run_id=2)
+
+    db = MagicMock()
+
+    def _query(model):
+        m = MagicMock()
+        name = model.__name__ if hasattr(model, "__name__") else str(model)
+        if name == "CollectorBatchRun":
+            m.filter.return_value.first.return_value = batch_run
+        elif name == "CollectorRun":
+            m.filter.return_value.all.return_value = [collector_run]
+        elif name == "CollectorRunItem":
+            # No DB_BASIC_FACT_COLLECTION items — just the port check
+            m.filter.return_value.all.return_value = [port_item]
+            m.filter.return_value.first.return_value = None  # no facts
+        elif name == "DbInstance":
+            m.filter.return_value.first.return_value = instance
+        return m
+
+    db.query.side_effect = _query
+
+    result = BatchCollectorService.get_asset_report(db, batch_run_id=2)
+    assert len(result["assets"]) == 1
+    assert result["assets"][0]["cluster_type_suspected"] is None

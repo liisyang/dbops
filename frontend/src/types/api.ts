@@ -245,7 +245,6 @@ export interface CollectorRunItemRow {
   protocol: string
   endpoint_type?: string | null
   port_source?: string | null
-  is_formal_port?: boolean | null
   is_required?: boolean
   timeout_seconds: number
   status: string
@@ -332,19 +331,79 @@ export interface PortProfileRow {
   remark?: string | null
 }
 
+// 资产校验功能优化 v2 / Follow-up A / 2026-06-17:
+// 检查项定义 — 由后端 GET /v1/collector/check-codes 返回，
+// 前端 BatchVerify.vue 用此数据驱动 check_code 选择列表，替代硬编码。
+// `enabled` 字段名跟随 DB 列实际命名（与 PortProfileRow.is_enabled 不对称）。
+export interface CollectorCheckDefinitionRow {
+  id: number
+  check_code: string
+  check_name: string
+  target_scope: 'server' | 'db_instance'
+  task_type: 'PORT_CHECK' | 'DB_PORT_DISCOVERY' | 'OS_DISCOVERY' | 'DB_SQL_COLLECT'
+  db_type_code?: string | null
+  os_type_code?: string | null
+  awx_role?: string | null
+  default_timeout_seconds: number
+  enabled: boolean
+  config?: Record<string, any>
+  description?: string | null
+}
+
+// I9+I10 (PR review 2026-06-18): Literal unions for proposal type-safe code.
+// Backends emit these values; missing keys become compile errors instead of
+// silent fallthroughs.
+// M8 (PR review 2026-06-18): removed 'cancelled' — the DB CHECK constraint
+// (chk_asset_change_proposal_status) only allows 'canceled' (single L).
+export type ProposalStatus =
+  | 'pending'
+  | 'approved'
+  | 'rejected'
+  | 'applied'
+  | 'canceled'
+
+export type ProposalType =
+  | 'PORT_DRIFT_SUSPECTED'
+  | 'PORT_FILL_SUGGESTION'
+  | 'PORT_CANDIDATE_CONFLICT'
+  | 'IP_DRIFT'
+  | 'ASSET_FACT_DRIFT'
+  | 'DB_FACT_DRIFT_DETECTED'
+  | 'DB_PORT_DRIFT'
+  | 'CLUSTER_TYPE_MISMATCH'
+
+export type ApplyableField =
+  | 'port'
+  | 'instance_name'
+  | 'service_name'
+  | 'node_role'
+  | 'db_size_gb'
+  | 'db_version'
+  | 'hostname'
+  | 'cpu_cores'
+  | 'memory_gb'
+  | 'disk_gb'
+
+// I1 (PR review 2026-06-20): 抽常量类型，避免散落硬编码。
+export type ProposalTargetType = 'server' | 'db_instance'
+
+// M7 (PR review 2026-06-18): removed `| string` widening escape hatch from
+// proposal_type and field_path. Literal unions now provide real compile-time
+// protection — if the backend adds a new value, TypeScript flags it at build.
+// I6 (PR review 2026-06-20): target_type 也去掉 | string 拓宽。
 export interface AssetChangeProposalRow {
   id: number
-  target_type: 'server' | 'db_instance' | string
+  target_type: ProposalTargetType
   target_id: number
-  proposal_type: string
-  field_path?: string | null
+  proposal_type: ProposalType
+  field_path?: ApplyableField | null
   current_value?: any
   suggested_value?: any
   confidence?: string | null
   evidence: Record<string, any>
   source_run_id?: string | null
   source_item_key?: string | null
-  status: 'pending' | 'approved' | 'rejected' | 'applied' | 'cancelled' | string
+  status: ProposalStatus
   requested_by?: string | null
   approved_by?: string | null
   approved_at?: string | null
@@ -362,6 +421,29 @@ export interface CollectorRunCreateResponse {
   awx_job_url?: string | null
   status: string
   item_count: number
+}
+
+// I12 (PR review 2026-06-20): 资产报告类型从 inline 迁到 types/api.ts，
+// 避免 SFC 与 api/assets.ts 各定义一份。
+export interface AssetReportAsset {
+  entity_type: string
+  entity_id: number
+  entity_name?: string | null
+  ip_address?: string | null
+  db_port_status?: string | null
+  os_port_status?: string | null
+  fact_status?: string | null
+  fact_count: number
+  error_messages: string[]
+  items: Array<Record<string, unknown>>
+  // M6 (PR review 2026-06-18): backend returns cluster_type_suspected (C3 fix)
+  cluster_type_suspected?: Record<string, unknown> | null
+}
+
+export interface AssetReport {
+  batch_run_id: number
+  batch_code: string
+  assets: AssetReportAsset[]
 }
 
 export interface ClusterDetail extends ClusterRow {

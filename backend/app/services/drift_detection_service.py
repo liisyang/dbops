@@ -6,12 +6,14 @@ Optionally creates asset_change_proposal (never auto-applies).
 
 from __future__ import annotations
 
+import logging
 import secrets
 from datetime import datetime
 from typing import Any, Callable, Optional
 
 from app.utils.datetime import now_local
 
+from sqlalchemy.exc import DBAPIError, IntegrityError, OperationalError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.models.dbops_assets import (
@@ -22,6 +24,10 @@ from app.models.dbops_assets import (
     DbInstance,
     Server,
 )
+
+
+# A3 (PR review 2026-06-20): logger 移到 import 块外，遵守 PEP 8 import 顺序。
+logger = logging.getLogger(__name__)
 
 
 class DriftDetectionService:
@@ -83,11 +89,23 @@ class DriftDetectionService:
             "database_role": {
                 "asset_field": "node_role",
                 "target_type": "db_instance",
-                "converter": "role_map",
+                "converter": DriftDetectionService._map_role,
             },
-            # Version drift (informational only, no formal field)
+            # Version drift — compare short version_label against db_version.version_name.
+            # Both are short labels in the actual data:
+            #   version_label: "Microsoft SQL Server 2019" (from collector regex)
+            #   version_name:   "Microsoft SQL Server 2019" (from DbVersion table)
+            # They share the same format, so exact comparison works.
+            "version_label": {
+                "asset_field": "db_version_name",  # resolved via _get_formal_value
+                "target_type": "db_instance",
+                "proposal_field": "db_version",
+            },
+            # Full version string — info only. Too long/variable for reliable
+            # comparison (includes build numbers, compiler versions, etc.).
+            # Stored as evidence for apply_proposal fallback lookup.
             "version_full": {
-                "asset_field": None,  # drift record only, no formal field
+                "asset_field": None,
                 "target_type": "db_instance",
                 "drift_info": True,
             },
@@ -95,6 +113,13 @@ class DriftDetectionService:
                 "asset_field": None,
                 "target_type": "db_instance",
                 "drift_info": True,
+            },
+            # Database size
+            "database_size_gb": {
+                "asset_field": "db_size_gb",
+                "target_type": "db_instance",
+                "converter": float,
+                "proposal_field": "db_size_gb",
             },
         }
 
@@ -190,35 +215,47 @@ class DriftDetectionService:
 
             # Determine drift
             is_drift = False
+            # I11 (PR review 2026-06-20): 正式字段为 None → 字典未登记，视为信息缺失
+            # 不是 actionable drift；仍记 info-only record，但不创建 proposal。
+            record_info_only = False
             if asset_field is None:
                 # Informational only: always record
                 pass
             elif current_value is None:
-                # No formal value to compare — informational
-                pass
+                # 字典未登记视为信息缺失
+                is_drift = False
+                record_info_only = True
             else:
                 # Compare normalized values
                 is_drift = not cls._values_equal(normalized, current_value)
 
-            if is_drift or asset_field is None:
+            # database_role on standalone instance (node_role=single) is not a
+            # drift.  Oracle v$database.database_role = 'PRIMARY' is normal for
+            # any non-standby database, regardless of clustering.
+            if is_drift and fact_key == "database_role" and str(current_value).strip().lower() == "single":
+                is_drift = False
+
+            if is_drift or asset_field is None or record_info_only:
                 drift = cls._create_drift_record(
                     db,
                     snapshot=snapshot,
                     fact_key=fact_key,
                     expected_value=current_value,
                     actual_value=normalized if is_drift else fact_value,
-                    drift_type="mismatch" if is_drift else "info",
+                    drift_type="mismatch" if is_drift else "extra",
                     severity="warning" if is_drift else "info",
                 )
                 db.add(drift)
                 drifts.append(drift)
 
-                # Create change proposal for actionable drifts
+                # Create change proposal for actionable drifts only
+                # I11: None formal value → 不创建 proposal（信息缺失非漂移）
                 if is_drift and asset_field is not None:
                     proposal = cls._create_change_proposal(
                         db,
                         snapshot=snapshot,
                         fact_key=fact_key,
+                        proposal_field=mapping.get("proposal_field", asset_field),
                         current_value=current_value,
                         suggested_value=normalized,
                         target_type=target_type,
@@ -274,6 +311,11 @@ class DriftDetectionService:
 
         if row is None:
             return None
+
+        # Special fields resolved via relationships
+        if asset_field == "db_version_name":
+            db_version = getattr(row, "db_version", None)
+            return getattr(db_version, "version_name", None) if db_version else None
 
         value = getattr(row, asset_field, None)
 
@@ -335,6 +377,7 @@ class DriftDetectionService:
         *,
         snapshot: AssetFactSnapshot,
         fact_key: str,
+        proposal_field: str | None = None,
         current_value: Any,
         suggested_value: Any,
         target_type: str,
@@ -352,7 +395,7 @@ class DriftDetectionService:
                 target_type=target_type,
                 target_id=target_id,
                 proposal_type="ASSET_FACT_DRIFT",
-                field_path=fact_key,
+                field_path=proposal_field or fact_key,
                 current_value=current_value,
                 suggested_value=suggested_value,
                 confidence="medium",
@@ -372,8 +415,29 @@ class DriftDetectionService:
                 .filter(AssetChangeProposal.id == proposal_dict["id"])
                 .first()
             )
-        except Exception:
+        except IntegrityError as exc:
+            # C5 (PR review 2026-06-20): 重复 (snapshot, fact_key) 视为正常的并发副作用，
+            # 不阻断 callback 事务的提交。
+            logger.info(
+                "Duplicate change proposal for snapshot_id=%s fact_key=%s: %s",
+                snapshot.snapshot_id, fact_key, exc.orig,
+            )
             return None
+        except (OperationalError, DBAPIError):
+            # 瞬时 DB 错误（连接断 / 超时）：让 callback 事务感知并回滚，
+            # 而不是把半成功的 state 一起 commit。
+            logger.exception(
+                "DB error creating change proposal for snapshot_id=%s fact_key=%s",
+                snapshot.snapshot_id, fact_key,
+            )
+            raise
+        except SQLAlchemyError:
+            # schema / 编程错误：日志 + 抛出，让上层决定如何处理。
+            logger.exception(
+                "ORM error creating change proposal for snapshot_id=%s fact_key=%s",
+                snapshot.snapshot_id, fact_key,
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Helpers
@@ -385,3 +449,63 @@ class DriftDetectionService:
         suffix = secrets.token_hex(3).upper()
         safe_key = fact_key.replace(" ", "_").replace("-", "_")[:30]
         return f"DRIFT-{timestamp}-{safe_key}-{suffix}"
+
+    # ------------------------------------------------------------------
+    # 资产校验功能优化 v2 / 2026-06-17:
+    # build_cluster_type_hint — 单实例 cluster_type 提示
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _infer_cluster_type_from_facts(facts: dict[str, Any]) -> str | None:
+        """从单实例采集事实推断集群类型。"""
+        role = str(facts.get("database_role") or facts.get("instance_role") or "").upper()
+        is_recovery = facts.get("is_in_recovery")
+        has_slave = facts.get("has_slave")
+
+        if role in ("PRIMARY",) and has_slave:
+            return "master-slave"
+        if role in ("PHYSICAL STANDBY", "LOGICAL STANDBY", "SNAPSHOT STANDBY"):
+            return "primary-standby"
+        if is_recovery is True:
+            return "primary-standby"
+        # PRIMARY without slave / is_in_recovery=false → ambiguous, don't infer
+        return None
+
+    @staticmethod
+    def build_cluster_type_hint(
+        db: Session,
+        instance: Any,
+        facts: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """从单实例采集事实推断 cluster_type 提示。
+
+        本次仅作为 AssetVerifyReport 的信息提示，不生成 AssetChangeProposal。
+        下轮跨实例聚合后再考虑自动 proposal。
+        """
+        inferred = DriftDetectionService._infer_cluster_type_from_facts(facts)
+        if not inferred:
+            return None
+
+        cluster = getattr(instance, "cluster", None)
+        if not cluster or not getattr(cluster, "cluster_type", None):
+            return None
+
+        current = (cluster.cluster_type or "").lower()
+        if current == inferred.lower():
+            return None  # 一致，无需提示
+
+        return {
+            "item_code": "CLUSTER_TYPE_MISMATCH",
+            "severity": "warning",
+            "target_scope": "db_instance",
+            "target_id": int(instance.id),
+            "derived_target_type": "cluster",
+            "derived_target_id": int(instance.cluster_id) if instance.cluster_id else None,
+            "current_cluster_type": cluster.cluster_type,
+            "inferred_cluster_type": inferred,
+            "auto_proposal": False,
+            "message": (
+                f"采集事实推断的集群类型({inferred})与CMDB记录({cluster.cluster_type})"
+                "不一致，请人工确认。"
+            ),
+        }

@@ -100,6 +100,8 @@ class CollectorRunItemResponse(BaseModel):
     endpoint_type: Optional[str] = None
     port_source: Optional[str] = None
     is_required: bool = False
+    # I11 (PR review 2026-06-18): 顶层 is_formal_port 是 dead wire —
+    # _item_to_dict 不输出，前端改读 raw_result.is_formal_port。
     timeout_seconds: int
     status: str
     result_status: Optional[str] = None
@@ -147,8 +149,12 @@ class CollectorCallbackItem(BaseModel):
     endpoint_type: Optional[str] = None
     protocol: str = Field(default="tcp", min_length=1)
     port_source: str = Field(default="unknown", min_length=1)
+    # 资产校验功能优化 v2 / 2026-06-17:
+    # is_formal_port 用于 callback 端按实例聚合端口探测结果（区分正式端口 vs 候选端口）。
+    # 持久化以 raw_result.is_formal_port 为准；顶层字段用于 callback 入参校验和聚合查询。
+    is_formal_port: bool = False
     is_required: bool = False
-    status: Literal["verified", "missing", "drifted", "collected", "failed"]
+    status: Literal["verified", "missing", "drifted", "collected", "failed", "skipped"]
     reachable: Optional[bool] = None
     message: Optional[str] = None
     raw_result: dict[str, Any] = Field(default_factory=dict)
@@ -262,6 +268,27 @@ class PortProfileResponse(BaseModel):
     is_enabled: bool
     priority: int
     remark: Optional[str] = None
+    created_at: Optional[datetime] = None
+    updated_at: Optional[datetime] = None
+
+
+# 资产校验功能优化 v2 / Follow-up A / 2026-06-17:
+# 检查项定义 — 由前端 BatchVerify.vue 通过 GET /v1/collector/check-codes 取数据，
+# 避免硬编码 7 个 check_code 列表导致 DB 启用/禁用变化不同步。
+# enabled 字段名跟随 DB 列实际命名（与 port-profiles 的 is_enabled 不对称）。
+class CollectorCheckDefinitionResponse(BaseModel):
+    id: int
+    check_code: str
+    check_name: str
+    target_scope: Literal["server", "db_instance"]
+    task_type: Literal["PORT_CHECK", "DB_PORT_DISCOVERY", "OS_DISCOVERY", "DB_SQL_COLLECT"]
+    db_type_code: Optional[str] = None
+    os_type_code: Optional[str] = None
+    awx_role: Optional[str] = None
+    default_timeout_seconds: int
+    enabled: bool
+    config: dict[str, Any] = Field(default_factory=dict)
+    description: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
 
@@ -617,3 +644,57 @@ class AssetDriftRecordResponse(BaseModel):
     resolved_at: Optional[datetime] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+# ============================================================================
+# I7 (PR review 2026-06-20): response_model schemas for batch-action / asset-report
+# ============================================================================
+
+
+class BatchActionResultEntry(BaseModel):
+    """Single proposal result within a batch-action response."""
+    id: int
+    success: bool
+    error: Optional[str] = None
+
+
+class BatchActionResultResponse(BaseModel):
+    """POST /collector/proposals/batch-action response."""
+    action: Literal["approve", "reject", "apply"]
+    results: list[BatchActionResultEntry]
+    success_count: int
+    fail_count: int
+
+
+class AssetReportItem(BaseModel):
+    """Single item summary within an asset report group."""
+    item_key: str
+    check_code: str
+    status: str
+    reachable: bool = False
+    target_host: str
+    target_port: int
+    result_status: Optional[str] = None
+
+
+class AssetReportAssetResponse(BaseModel):
+    """Per-asset summary in GET /collector/batch-runs/{id}/asset-report."""
+    entity_type: str
+    entity_id: int
+    entity_name: Optional[str] = None
+    ip_address: Optional[str] = None
+    db_port_status: Optional[str] = None
+    os_port_status: Optional[str] = None
+    fact_status: Optional[str] = None
+    fact_count: int = 0
+    error_messages: list[str] = Field(default_factory=list)
+    items: list[AssetReportItem] = Field(default_factory=list)
+    cluster_id: Optional[int] = None
+    cluster_type_suspected: Optional[dict[str, Any]] = None
+
+
+class AssetReportResponse(BaseModel):
+    """GET /collector/batch-runs/{id}/asset-report response."""
+    batch_run_id: int
+    batch_code: str
+    assets: list[AssetReportAssetResponse]

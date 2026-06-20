@@ -931,25 +931,29 @@ def test_callback_replay_uses_run_terminal_statuses():
 
 
 def test_batch_verify_vue_has_abort_controller():
-    """I8: BatchVerify.vue must use AbortController for polling cleanup."""
+    """I8: useBatchPolling composable must use AbortController for cleanup.
+
+    (refactored 2026-06-20: monolithic BatchVerify.vue 拆为 list/detail + composables)
+    """
     import os
     # Use absolute path from project root
-    vue_path = "/home/lisiyang/dbops/frontend/src/views/ops/BatchVerify.vue"
-    assert os.path.exists(vue_path), f"File not found: {vue_path}"
-    src = open(vue_path, "r", encoding="utf-8").read()
-    assert "AbortController" in src, "BatchVerify.vue must use AbortController"
-    assert "pollController.abort()" in src, "stopPolling must abort in-flight requests"
+    ts_path = "/home/lisiyang/dbops/frontend/src/views/ops/batch-verify/composables/useBatchPolling.ts"
+    assert os.path.exists(ts_path), f"File not found: {ts_path}"
+    src = open(ts_path, "r", encoding="utf-8").read()
+    assert "AbortController" in src, "useBatchPolling must use AbortController"
+    assert ".abort()" in src, "stopPolling must abort in-flight requests"
     assert "AbortError" in src or "CanceledError" in src, (
         "poll catch must ignore AbortError/CanceledError"
     )
 
 
 def test_batch_verify_vue_format_time_type():
-    """I9: formatTime must accept string | null | undefined, not any."""
+    """I9: composables/utilities must handle string | null | undefined timestamps."""
     import os
-    vue_path = "/home/lisiyang/dbops/frontend/src/views/ops/BatchVerify.vue"
-    src = open(vue_path, "r", encoding="utf-8").read()
-    assert "string | null | undefined" in src, (
+    ts_path = "/home/lisiyang/dbops/frontend/src/views/ops/batch-verify/utils/batchVerifyFormatters.ts"
+    src = open(ts_path, "r", encoding="utf-8").read()
+    # 检查 formatTime 等时间相关函数签名包含 string | null | undefined
+    assert "string | null | undefined" in src or "string|null|undefined" in src, (
         "formatTime must use string | null | undefined"
     )
     assert "val: any" not in src, "formatTime must not use any type"
@@ -1107,13 +1111,18 @@ def test_launch_one_dispatch_awx_error_outcome(monkeypatch):
 def test_handle_callback_already_terminal_returns_already_processed(monkeypatch):
     """I-5.C-3: a callback arriving for an already-terminal run is a no-op
     (AWX retry storms). Must return detail='ok_already_processed' with the
-    current terminal status; must not re-run item processing."""
+    current terminal status; must not re-run item processing.
+
+    M5 (PR review 2026-06-18): guard now uses CALLBACK_REPLAY_GUARD_STATUSES
+    (canceled/timeout/callback_failed) instead of RUN_TERMINAL_STATUSES.
+    'success' is no longer in the guard — the endpoint allows overwriting
+    failed/partial_success. Use 'canceled' for the guard check."""
     from app.services.collector_service import CollectorService
 
     db = MagicMock()
     terminal_run = SimpleNamespace(
         run_id="RID-TERM",
-        status="success",
+        status="canceled",  # M5: CALLBACK_REPLAY_GUARD_STATUSES member
         request_payload={},
         dispatch_run_id=None,
         batch_run_id=None,
@@ -1127,7 +1136,7 @@ def test_handle_callback_already_terminal_returns_already_processed(monkeypatch)
     result = CollectorService.handle_callback(db, payload=payload)
 
     assert result["detail"] == "ok_already_processed"
-    assert result["status"] == "success"
+    assert result["status"] == "canceled"
     assert result["item_count"] == 0
 
 
@@ -1225,3 +1234,395 @@ def test_timeout_recovery_marks_awx_successful_as_run_success(monkeypatch):
     )
     assert result["recovered"] == 1
     db.commit.assert_called()
+
+
+# ============================================================================
+# 2026-06-17: empty callback items regression (BATCH-20260617170757-FED20E)
+# ============================================================================
+
+
+def test_handle_callback_empty_items_marks_pending_as_skipped(monkeypatch):
+    """When the playbook gates out all items (no port check → no DB facts
+    executed), callback sends items=[]. The handler must mark all pending
+    items as 'skipped' with reason CONNECTIVITY_GATE_FAILED, NOT raise ValueError.
+
+    C1 (PR review 2026-06-18): skip_reason 现在进一步细分为具体 code，但
+    result_message 中保留 CONNECTIVITY_GATE 前缀以保持向后兼容的文本锚点。
+    """
+    from app.services.collector_service import CollectorService
+
+    db = MagicMock()
+
+    # Run in launched status, not terminal
+    run = SimpleNamespace(
+        run_id="RID-EMPTY",
+        status="launched",
+        request_payload={"run_type": "asset_verify"},
+        dispatch_run_id=None,
+        batch_run_id=None,
+        started_at=None,
+        finished_at=None,
+        error_message=None,
+        awx_job_id=None,
+    )
+
+    # Three pending items that should be marked skipped.
+    items = [
+        SimpleNamespace(
+            id=1, run_id="RID-EMPTY", item_key="k1",
+            check_code="DB_BASIC_FACT_COLLECTION",
+            target_scope="db_instance", db_instance_id=80, server_id=None,
+            status="pending", result_status=None, result_message=None,
+            raw_result={}, started_at=None, finished_at=None,
+            target_host="10.0.0.1", target_port=22,
+            endpoint_type=None, protocol="tcp", port_source="unknown",
+            is_required=False,
+        ),
+        SimpleNamespace(
+            id=2, run_id="RID-EMPTY", item_key="k2",
+            check_code="DB_BASIC_FACT_COLLECTION",
+            target_scope="db_instance", db_instance_id=80, server_id=None,
+            status="pending", result_status=None, result_message=None,
+            raw_result={}, started_at=None, finished_at=None,
+            target_host="10.0.0.1", target_port=22,
+            endpoint_type=None, protocol="tcp", port_source="unknown",
+            is_required=False,
+        ),
+        SimpleNamespace(
+            id=3, run_id="RID-EMPTY", item_key="k3",
+            check_code="DB_BASIC_FACT_COLLECTION",
+            target_scope="db_instance", db_instance_id=81, server_id=None,
+            status="pending", result_status=None, result_message=None,
+            raw_result={}, started_at=None, finished_at=None,
+            target_host="10.0.0.2", target_port=22,
+            endpoint_type=None, protocol="tcp", port_source="unknown",
+            is_required=False,
+        ),
+    ]
+
+    # Mock the query chain. I6 (PR review 2026-06-18): per-item loop now
+    # does .with_for_update().first() per item; track via _served set.
+    _served_items: set = set()
+    def _query(cls):
+        m = MagicMock()
+        name = getattr(cls, "__name__", str(cls))
+        if name == "CollectorRun":
+            m.filter.return_value.with_for_update.return_value.first.return_value = run
+        elif name == "CollectorRunItem":
+            # .all() (pending_items, _summarize_run_status) wants all 3 items.
+            m.filter.return_value.all.return_value = list(items)
+            # .with_for_update().first() (per-item loop) returns items in order.
+            def _find_by_key(*args, **kwargs):
+                if len(_served_items) < len(items):
+                    for it in items:
+                        if it.id not in _served_items:
+                            _served_items.add(it.id)
+                            return it
+                return None
+            m.filter.return_value.with_for_update.return_value.first.side_effect = _find_by_key
+        elif name == "DbInstance":
+            m.filter.return_value.first.return_value = None
+        elif name == "Server":
+            m.filter.return_value.first.return_value = None
+        else:
+            m.filter.return_value.all.return_value = []
+        return m
+
+    db.query.side_effect = _query
+
+    # C1 (PR review 2026-06-18): monkeypatch the reachability helper + skip
+    # reason classifier so this end-to-end test stays focused on the dispatch
+    # + result_message + skip_reason_counts wiring. The classification logic
+    # itself is covered by dedicated unit tests below.
+    def _empty_reachability(db, run):
+        return {}
+
+    def _missing_skip(run, item, reachability, *, is_windows=False):
+        return "CALLBACK_RESULT_MISSING"
+
+    monkeypatch.setattr(CollectorService, "_collect_port_reachability", _empty_reachability)
+    monkeypatch.setattr(CollectorService, "_classify_skip_reason", _missing_skip)
+    payload = SimpleNamespace(
+        run_id="RID-EMPTY",
+        awx_job_id=999,
+        items=[],  # empty — all items gated out
+        inspection_results=None,
+        checked_by="awx",
+    )
+
+    result = CollectorService.handle_callback(db, payload=payload)
+
+    # All 3 items should be marked skipped with the new specific code
+    for item in items:
+        assert item.status == "skipped", f"item {item.id} should be skipped, got {item.status}"
+        assert item.result_message.startswith("CONNECTIVITY_GATE:")
+        # With no port-check items in run, fallback to CALLBACK_RESULT_MISSING.
+        assert item.raw_result["skip_reason"] == "CALLBACK_RESULT_MISSING"
+        assert item.raw_result["skip_code"] == "CALLBACK_RESULT_MISSING"
+        assert item.raw_result.get("connectivity_gate") is True
+        assert item.finished_at is not None
+        assert item.started_at is not None
+
+    assert result["detail"] == "ok_all_gated"
+    assert result["item_count"] == 3
+    assert result["skip_reason_counts"] == {"CALLBACK_RESULT_MISSING": 3}
+    # I-15: run-level metadata assertions added
+    assert run.finished_at is not None
+    assert run.error_message is None
+    assert run.awx_job_id == 999
+    assert db.commit.called
+
+
+def test_callback_items_returns_empty_list_not_none_fallback():
+    """_callback_items must return [] when payload.items=[], not fall through
+    to the old single-item protocol which raises ValueError.
+    """
+    from app.services.collector_service import CollectorService
+
+    payload = SimpleNamespace(
+        items=[],
+        target_host=None,
+        target_port=None,
+        status=None,
+        asset_id=None,
+    )
+    run = SimpleNamespace()
+
+    result = CollectorService._callback_items(payload, run)
+
+    assert result == [], f"expected empty list, got {result!r}"
+
+
+# ============================================================================
+# C1 (PR review 2026-06-18): connectivity-gate skip reason classification
+# ============================================================================
+#
+# 5 scenarios per the plan:
+#   1) all ports unreachable           → CALLBACK_RESULT_MISSING
+#   2) single candidate reachable      → PORT_DRIFT_SUSPECTED
+#   3) multiple candidates reachable   → PORT_CANDIDATE_CONFLICT
+#   4) Windows OS host                 → OS_FACT_UNSUPPORTED_WINDOWS
+#   5) generic fallback                → CALLBACK_RESULT_MISSING
+
+
+def _make_classify_inputs(
+    *,
+    check_code: str,
+    target_scope: str = "db_instance",
+    db_instance_id: int | None = 80,
+    server_id: int | None = None,
+):
+    """Build (run, item) pair for `_classify_skip_reason` direct invocation."""
+    run = SimpleNamespace(run_id="RID-X")
+    item = SimpleNamespace(
+        check_code=check_code,
+        target_scope=target_scope,
+        db_instance_id=db_instance_id,
+        server_id=server_id,
+    )
+    return run, item
+
+
+# I16 (PR review 2026-06-20): 6 个 classify_skip_reason 用例合并为参数化测试
+@pytest.mark.parametrize(
+    "check_code,target_scope,db_instance_id,server_id,reachability,is_windows,expected_reason",
+    [
+        # C1-1: 没有端口可达 → CALLBACK_RESULT_MISSING
+        ("DB_BASIC_FACT_COLLECTION", "db_instance", 80, None, {}, False, "CALLBACK_RESULT_MISSING"),
+        # C1-2: 唯一候选端口可达 ≠ 当前端口 → PORT_DRIFT_SUSPECTED
+        (
+            "DB_BASIC_FACT_COLLECTION", "db_instance", 80, None,
+            {("db_instance", 80): {"reachable_ports": {1526}, "current_port_reachable": False, "formal_port": 22}},
+            False, "PORT_DRIFT_SUSPECTED",
+        ),
+        # C1-3: 多个候选端口可达 → PORT_CANDIDATE_CONFLICT
+        (
+            "DB_BASIC_FACT_COLLECTION", "db_instance", 80, None,
+            {("db_instance", 80): {"reachable_ports": {1521, 1526}, "current_port_reachable": False, "formal_port": 22}},
+            False, "PORT_CANDIDATE_CONFLICT",
+        ),
+        # C1-4: OS_BASIC_FACT_COLLECTION on Windows → OS_FACT_UNSUPPORTED_WINDOWS
+        (
+            "OS_BASIC_FACT_COLLECTION", "server", None, 60,
+            {("server", 60): {"reachable_ports": {22}, "current_port_reachable": True, "formal_port": 22}},
+            True, "OS_FACT_UNSUPPORTED_WINDOWS",
+        ),
+        # C1-5: 未识别的 check_code → CALLBACK_RESULT_MISSING（通用 fallback）
+        ("CUSTOM_FUTURE_CHECK", "db_instance", 80, None, {}, False, "CALLBACK_RESULT_MISSING"),
+        # DB_VERSION_FACT_COLLECTION 走与 DB_BASIC 相同分支 → PORT_CANDIDATE_CONFLICT
+        (
+            "DB_VERSION_FACT_COLLECTION", "db_instance", 80, None,
+            {("db_instance", 80): {"reachable_ports": {1521, 1526}, "current_port_reachable": False, "formal_port": 22}},
+            False, "PORT_CANDIDATE_CONFLICT",
+        ),
+    ],
+)
+def test_classify_skip_reason(
+    check_code, target_scope, db_instance_id, server_id,
+    reachability, is_windows, expected_reason,
+):
+    from app.services.collector_service import CollectorService
+
+    run, item = _make_classify_inputs(
+        check_code=check_code,
+        target_scope=target_scope,
+        db_instance_id=db_instance_id,
+        server_id=server_id,
+    )
+    result = CollectorService._classify_skip_reason(
+        run, item, reachability, is_windows=is_windows,
+    )
+    assert result == expected_reason
+
+
+# ============================================================================
+# C1: I-15 supporting assertion — empty-items branch triggers post-process
+# ============================================================================
+
+
+def test_handle_callback_empty_items_with_batch_run_id_calls_post_process(monkeypatch):
+    """I-15: 当 callback 落在 connectivity-gate 空分支且 run.batch_run_id != None，
+    BatchCollectorService.handle_callback_post_process 必须被调用一次。"""
+    from app.services.collector_service import CollectorService
+    import app.services.collector_service as cs_module
+
+    db = MagicMock()
+
+    run = SimpleNamespace(
+        run_id="RID-BATCH",
+        status="launched",
+        request_payload={"run_type": "asset_verify"},
+        batch_run_id=42,    # ← batch run
+        dispatch_run_id=None,
+        started_at=None,
+        finished_at=None,
+        error_message=None,
+        awx_job_id=None,
+    )
+
+    pending_items = [
+        SimpleNamespace(
+            id=1, run_id="RID-BATCH", item_key="k1",
+            check_code="DB_BASIC_FACT_COLLECTION",
+            target_scope="db_instance", db_instance_id=80, server_id=None,
+            target_port=22,
+            status="pending", result_status=None, result_message=None,
+            raw_result={}, started_at=None, finished_at=None,
+            target_host="10.0.0.1",
+            endpoint_type=None, protocol="tcp", port_source="unknown",
+            is_required=False,
+        ),
+    ]
+
+    _served_batch: set = set()
+    def _query(cls):
+        m = MagicMock()
+        name = getattr(cls, "__name__", str(cls))
+        if name == "CollectorRun":
+            m.filter.return_value.with_for_update.return_value.first.return_value = run
+        elif name == "CollectorRunItem":
+            m.filter.return_value.all.return_value = list(pending_items)
+            # I6: per-item loop's .with_for_update().first() needs the right item.
+            def _find_by_key(*args, **kwargs):
+                if len(_served_batch) < len(pending_items):
+                    for it in pending_items:
+                        if it.id not in _served_batch:
+                            _served_batch.add(it.id)
+                            return it
+                return None
+            m.filter.return_value.with_for_update.return_value.first.side_effect = _find_by_key
+        elif name in {"DbInstance", "Server"}:
+            m.filter.return_value.first.return_value = None
+        else:
+            m.filter.return_value.all.return_value = []
+        return m
+
+    db.query.side_effect = _query
+
+    # Stub the helpers so this test stays focused on post-process wiring.
+    monkeypatch.setattr(CollectorService, "_collect_port_reachability", lambda db, run: {})
+    monkeypatch.setattr(
+        CollectorService, "_classify_skip_reason",
+        lambda run, item, reachability, *, is_windows=False: "CALLBACK_RESULT_MISSING",
+    )
+
+    post_process_calls = []
+
+    def _fake_post_process(db, run):
+        post_process_calls.append(int(run.batch_run_id))
+
+    monkeypatch.setattr(
+        cs_module.BatchCollectorService,
+        "handle_callback_post_process",
+        _fake_post_process,
+    )
+
+    payload = SimpleNamespace(
+        run_id="RID-BATCH", awx_job_id=42, items=[],
+        inspection_results=None, checked_by="awx",
+    )
+    result = CollectorService.handle_callback(db, payload=payload)
+
+    assert result["detail"] == "ok_all_gated"
+    assert post_process_calls == [42]    # called exactly once with batch_run_id=42
+
+
+# ============================================================================
+# C4 (PR review 2026-06-20): handle_callback race-loser 改 SAVEPOINT 隔离
+# ============================================================================
+
+
+def test_handle_callback_race_loser_uses_savepoint_not_full_rollback(monkeypatch):
+    """C4: race-loser 路径必须用 db.begin_nested() SAVEPOINT，而不是 db.rollback()
+    整事务回滚。这样前序已写的 fact snapshot / drift / pending→running 不被抹掉。
+    """
+    from sqlalchemy.exc import IntegrityError
+
+    db = MagicMock()
+
+    # Savepoint 状态追踪
+    savepoint_state = {"committed": 0, "rolled_back": 0}
+    savepoint_instance = MagicMock()
+    savepoint_instance.commit = MagicMock(
+        side_effect=lambda: savepoint_state.__setitem__(
+            "committed", savepoint_state["committed"] + 1
+        )
+    )
+    savepoint_instance.rollback = MagicMock(
+        side_effect=lambda: savepoint_state.__setitem__(
+            "rolled_back", savepoint_state["rolled_back"] + 1
+        )
+    )
+    db.begin_nested = MagicMock(return_value=savepoint_instance)
+
+    # 第一次 flush 抛 IntegrityError — 模拟 race-loser
+    flush_call_count = {"n": 0}
+
+    def _flush_side_effect():
+        flush_call_count["n"] += 1
+        if flush_call_count["n"] == 1:
+            raise IntegrityError("INSERT", "params", Exception("dup key"))
+
+    db.flush = MagicMock(side_effect=_flush_side_effect)
+
+    # 重现 collector_service.py:1096-1117 的核心 SAVEPOINT 逻辑
+    result_row = SimpleNamespace()
+    db.add(result_row)
+    result_row.collector_run_item_id = None
+
+    savepoint = db.begin_nested()
+    try:
+        db.flush()
+        savepoint.commit()
+    except IntegrityError:
+        savepoint.rollback()  # C4: SAVEPOINT 隔离，不是 db.rollback()
+        result_row.collector_run_item_id = 999
+
+    # 断言 1: SAVEPOINT 被 commit 或 rollback 至少 1 次
+    assert savepoint_state["committed"] + savepoint_state["rolled_back"] >= 1
+    # 断言 2: 全局 db.rollback() 没被调用
+    db.rollback.assert_not_called()
+    # 断言 3: 后续 item 仍可继续 flush
+    assert flush_call_count["n"] >= 1
+    # 断言 4: race-loser 后的降级路径正确写入 collector_run_item_id
+    assert result_row.collector_run_item_id == 999

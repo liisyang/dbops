@@ -8,7 +8,15 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
-from app.constants import RUN_TERMINAL_STATUSES as _RUN_TERMINAL_STATUSES
+from app.constants import (
+    CALLBACK_REPLAY_GUARD_STATUSES as _CALLBACK_REPLAY_GUARD_STATUSES,
+    RUN_TERMINAL_STATUSES as _RUN_TERMINAL_STATUSES,
+    SKIP_REASON_CALLBACK_RESULT_MISSING,
+    SKIP_REASON_CONNECTIVITY_GATE_FAILED,
+    SKIP_REASON_OS_FACT_UNSUPPORTED_WINDOWS,
+    SKIP_REASON_PORT_CANDIDATE_CONFLICT,
+    SKIP_REASON_PORT_DRIFT_SUSPECTED,
+)
 from app.models.dbops_assets import (
     AssetChangeProposal,
     AssetEndpoint,
@@ -728,7 +736,9 @@ class CollectorService:
 
     @staticmethod
     def _callback_items(payload: CollectorCallbackRequest, run: CollectorRun) -> list[CollectorCallbackItem]:
-        if payload.items:
+        # items is explicitly set (including empty list []) → use it.
+        # Only fall through to old single-item protocol when items is None.
+        if payload.items is not None:
             return payload.items
 
         if payload.target_host is None or payload.target_port is None or payload.status is None or payload.asset_id is None:
@@ -914,7 +924,12 @@ class CollectorService:
         # Idempotency at run level: skip if already terminal.
         # AWX may retry the callback after a network blip; we should not
         # double-write run state, item results, snapshots or drift events.
-        if (run.status or "").lower() in _RUN_TERMINAL_STATUSES:
+        # M5 (PR review 2026-06-18): use CALLBACK_REPLAY_GUARD_STATUSES
+        # (canceled/timeout/callback_failed) instead of RUN_TERMINAL_STATUSES.
+        # The broader set includes failed/partial_success which are transient
+        # states the endpoint intentionally allows to be overwritten — the old
+        # check silently no-opped valid retries with ok_already_processed.
+        if (run.status or "").lower() in _CALLBACK_REPLAY_GUARD_STATUSES:
             logger.info(
                 "collector callback ignored: run_id=%s already in terminal status=%s",
                 payload.run_id,
@@ -931,6 +946,59 @@ class CollectorService:
         processed_count = 0
         calibration_results: list[dict[str, Any]] = []
         run_type = (run.request_payload or {}).get("run_type")
+
+        # 资产校验功能优化 v2 — connectivity gate: when the playbook gates out
+        # all DB/OS fact items (because no port check items were dispatched, or
+        # all ports were unreachable), the callback payload contains items=[].
+        # Without this block those pending items stay pending forever, and the
+        # run never reaches a terminal status.
+        #
+        # C1 (PR review 2026-06-18): every gated item gets a SPECIFIC skip
+        # reason (PORT_CANDIDATE_CONFLICT / PORT_DRIFT_SUSPECTED /
+        # OS_FACT_UNSUPPORTED_WINDOWS / CALLBACK_RESULT_MISSING) instead of a
+        # single CONNECTIVITY_GATE_FAILED bucket.
+        #
+        # I6 (PR review 2026-06-18): synthesize 'skipped' callback_items for
+        # each pending item, append to callback_items, and let the normal
+        # per-item loop handle them. This unifies run finalization
+        # (run.status / started_at / finished_at / post_process / commit)
+        # with the regular callback path.
+        skip_reason_counts: dict[str, int] = {}
+        connectivity_gated: bool = False
+        if not callback_items:
+            pending_items = (
+                db.query(CollectorRunItem)
+                .filter(
+                    CollectorRunItem.run_id == payload.run_id,
+                    CollectorRunItem.status.in_(["pending", "running"]),
+                )
+                .all()
+            )
+            reachability = CollectorService._collect_port_reachability(db, run)
+            for item in pending_items:
+                is_windows = CollectorService._is_windows_target(db, item)
+                skip_reason = CollectorService._classify_skip_reason(
+                    run, item, reachability, is_windows=is_windows,
+                )
+                skip_reason_counts[skip_reason] = skip_reason_counts.get(skip_reason, 0) + 1
+                callback_items.append(CollectorCallbackItem(
+                    item_key=item.item_key,
+                    check_code=item.check_code,
+                    target_scope=item.target_scope,
+                    asset_id=int(item.db_instance_id or item.server_id or 0),
+                    target_host=getattr(item, "target_host", "") or "",
+                    target_port=int(getattr(item, "target_port", 0) or 0),
+                    status="skipped",
+                    message=f"CONNECTIVITY_GATE: {skip_reason}",
+                    raw_result={
+                        "skip_reason": skip_reason,
+                        "skip_code": skip_reason,
+                        # Preserve the legacy bucket name in case downstream
+                        # branches on it; the granular code lives in skip_reason.
+                        "connectivity_gate": True,
+                    },
+                ))
+            connectivity_gated = True
 
         for callback_item in callback_items:
             run_item = (
@@ -976,6 +1044,13 @@ class CollectorService:
             if run_item.started_at is None:
                 run_item.started_at = now
 
+            # I6 (PR review 2026-06-18): count each processed item (including
+            # 'skipped' ones from the connectivity-gate synthetic path) BEFORE
+            # the skip check below — without this, connectivity-gate items
+            # never increment processed_count, leaving item_count=0 in the
+            # response.
+            processed_count += 1
+
             # N3: a 'skipped' item maps to (run_item.status='skipped',
             # result_status=None). CollectorRunResult.status is constrained
             # by chk_collector_run_result_status to
@@ -1016,12 +1091,15 @@ class CollectorService:
                     ),
                 )
                 db.add(result)
-                # Defend against a parallel writer winning the (run_id, item_key)
-                # unique index race even when our SELECT missed it.
+                # C4 (PR review 2026-06-20): 改 SAVEPOINT（db.begin_nested）隔离，
+                # 只回滚这条 race-loser，前面已写的 fact snapshot / drift / pending→running
+                # 等不再被 db.rollback() 整事务抹掉。race-loser 路径是预期的并发场景。
+                savepoint = db.begin_nested()
                 try:
                     db.flush()
+                    savepoint.commit()
                 except IntegrityError as exc:
-                    db.rollback()
+                    savepoint.rollback()
                     logger.warning(
                         "collector_run_result race lost for run_id=%s item_key=%s: %s",
                         run.run_id,
@@ -1196,8 +1274,6 @@ class CollectorService:
                         operator=payload.checked_by or "awx",
                     )
 
-            processed_count += 1
-
             # Phase 3.3A: Fact snapshot + drift detection for fact collection items
             if FactSnapshotService.is_fact_collection(run_item.check_code or ""):
                 try:
@@ -1282,6 +1358,22 @@ class CollectorService:
 
         db.commit()
 
+        # I6 (PR review 2026-06-18): connectivity-gate path returns the
+        # legacy `ok_all_gated` detail plus skip_reason_counts for backward
+        # compat with callers that branched on those keys. The regular path
+        # keeps `ok`.
+        if connectivity_gated:
+            logger.info(
+                "collector callback: run_id=%s all %d items gated out → skipped reasons=%s",
+                payload.run_id, processed_count, skip_reason_counts,
+            )
+            return {
+                "detail": "ok_all_gated",
+                "run_id": payload.run_id,
+                "status": run.status,
+                "item_count": processed_count,
+                "skip_reason_counts": skip_reason_counts,
+            }
         return {
             "detail": "ok",
             "run_id": payload.run_id,
@@ -1310,3 +1402,180 @@ class CollectorService:
         if any(s == "success" for s in statuses):
             return "partial_success"
         return "failed"
+
+    # ------------------------------------------------------------------
+    # C1 (PR review 2026-06-18): connectivity-gate skip reason classification
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _is_windows_target(db: Session, item: CollectorRunItem) -> bool:
+        """I6 (PR review 2026-06-18): cheap is_windows check from server.os_version.
+
+        Only meaningful for OS_BASIC_FACT_COLLECTION items; returns False for
+        other check codes. Extracted from the old empty-items branch so the
+        per-item loop and the connectivity-gate path share the same logic.
+        """
+        if item.check_code != "OS_BASIC_FACT_COLLECTION" or item.server_id is None:
+            return False
+        server_row = db.query(Server).filter(Server.id == item.server_id).first()
+        if server_row is None:
+            return False
+        os_name = (
+            (server_row.os_version.os_name or "")
+            if getattr(server_row, "os_version", None)
+            else ""
+        ).lower()
+        return "windows" in os_name
+
+    @staticmethod
+    def _collect_port_reachability(
+        db: Session,
+        run: CollectorRun,
+    ) -> dict[tuple[str, int], dict[str, Any]]:
+        """Aggregate port-check results in the same run by (target_scope, asset_id).
+
+        Returns a map keyed by (scope, asset_id). Each value contains:
+          reachable_ports: set[int] — distinct target_ports that verified reachable
+          current_port_reachable: bool — whether the asset's currently recorded
+            formal port appears in reachable_ports (best-effort; we read
+            DbInstance.port / Server extra_attrs ssh_port as the candidate).
+
+        Only SUCCESS-status items contribute. Items in pending / running /
+        failed / skipped are ignored — the goal is to learn which ports
+        already proved reachable so we can attribute gated-out items to
+        the right skip reason.
+        """
+        port_check_codes = (
+            "DB_PORT_REACHABILITY",
+            "SSH_PORT_REACHABILITY",
+            "PORT_CANDIDATE_REACHABILITY",
+        )
+        items = (
+            db.query(CollectorRunItem)
+            .filter(
+                CollectorRunItem.run_id == run.run_id,
+                CollectorRunItem.check_code.in_(port_check_codes),
+                CollectorRunItem.status == "success",
+            )
+            .all()
+        )
+
+        # I3 (PR review 2026-06-20): 批量预加载 DbInstance / Server，避免 N+1。
+        # 1000 实例下原写法 ~3000 SQL，改后 ~10 SQL。
+        db_ids = {int(item.db_instance_id) for item in items if item.db_instance_id}
+        server_ids = {int(item.server_id) for item in items if item.server_id}
+        db_map: dict[int, DbInstance] = {}
+        server_map: dict[int, Server] = {}
+        if db_ids:
+            for row in db.query(DbInstance).filter(DbInstance.id.in_(db_ids)).all():
+                db_map[row.id] = row
+        if server_ids:
+            for row in db.query(Server).filter(Server.id.in_(server_ids)).all():
+                server_map[row.id] = row
+
+        out: dict[tuple[str, int], dict[str, Any]] = {}
+        for item in items:
+            scope = item.target_scope or ""
+            if scope == "db_instance":
+                asset_id = int(item.db_instance_id or 0)
+                formal_port: int | None = None
+                if item.db_instance_id is not None:
+                    instance = db_map.get(int(item.db_instance_id))
+                    if instance is not None:
+                        formal_port = instance.port
+            elif scope == "server":
+                asset_id = int(item.server_id or 0)
+                formal_port = None
+                if item.server_id is not None:
+                    server = server_map.get(int(item.server_id))
+                    if server is not None:
+                        extra = server.extra_attrs or {}
+                        ssh_port = extra.get("ssh_port")
+                        try:
+                            formal_port = int(ssh_port) if ssh_port is not None else None
+                        except (TypeError, ValueError):
+                            # A9 (PR review 2026-06-20): 解析失败加 warning 保留可观测性
+                            logger.warning(
+                                "_collect_port_reachability: server_id=%s ssh_port=%r not int-convertible",
+                                item.server_id, ssh_port,
+                            )
+                            formal_port = None
+            else:
+                continue
+            if asset_id == 0 or item.target_port is None:
+                continue
+            bucket = out.setdefault(
+                (scope, asset_id),
+                {"reachable_ports": set(), "current_port_reachable": False, "formal_port": formal_port},
+            )
+            bucket["reachable_ports"].add(int(item.target_port))
+
+        for bucket in out.values():
+            formal = bucket.get("formal_port")
+            if formal is not None and int(formal) in bucket["reachable_ports"]:
+                bucket["current_port_reachable"] = True
+        return out
+
+    @staticmethod
+    def _classify_skip_reason(
+        run: CollectorRun,
+        item: CollectorRunItem,
+        reachability: dict[tuple[str, int], dict[str, Any]],
+        *,
+        is_windows: bool = False,
+    ) -> str:
+        """Classify why a pending fact-collection item was gated out by the playbook.
+
+        Returns one of the SKIP_REASON_* constants from app.constants.
+        The branch order matters: more specific reasons win.
+
+        OS_BASIC_FACT_COLLECTION on a Windows host is unsupported regardless of
+        connectivity, so it gets its own reason. For DB/OS fact items the
+        decision is driven by what port checks have already proved reachable
+        for the same (scope, asset_id) pair in this run.
+        """
+        check_code = (item.check_code or "").upper()
+
+        if check_code == "OS_BASIC_FACT_COLLECTION" and is_windows:
+            return SKIP_REASON_OS_FACT_UNSUPPORTED_WINDOWS
+
+        scope = item.target_scope or ""
+        if scope == "db_instance":
+            asset_id = int(item.db_instance_id or 0)
+        elif scope == "server":
+            asset_id = int(item.server_id or 0)
+        else:
+            asset_id = 0
+
+        bucket = reachability.get((scope, asset_id)) if asset_id else None
+        reachable: set[int] = bucket["reachable_ports"] if bucket else set()
+
+        if check_code in {
+            "DB_BASIC_FACT_COLLECTION",
+            "DB_ROLE_FACT_COLLECTION",
+            "DB_VERSION_FACT_COLLECTION",
+        }:
+            if len(reachable) > 1:
+                return SKIP_REASON_PORT_CANDIDATE_CONFLICT
+            if len(reachable) == 1:
+                # H1 (PR review 2026-06-18): old dead guard — else branch
+                # unconditionally returned PORT_DRIFT_SUSPECTED. When the single
+                # reachable port IS the current formal port, fact collection was
+                # gated for another reason (e.g. missing credential); fall back to
+                # CALLBACK_RESULT_MISSING instead.
+                if bucket is not None and not bucket.get("current_port_reachable", False):
+                    return SKIP_REASON_PORT_DRIFT_SUSPECTED
+                # current_port_reachable=True — no drift, gated for other reason
+                return SKIP_REASON_CALLBACK_RESULT_MISSING
+            # Zero reachable ports (or no port check items at all)
+            return SKIP_REASON_CALLBACK_RESULT_MISSING
+
+        # OS fact on non-Windows, or other check codes — fall through
+        if len(reachable) > 1:
+            return SKIP_REASON_PORT_CANDIDATE_CONFLICT
+        if len(reachable) == 1:
+            # H1 (PR review 2026-06-18): same fix as DB-fact branch above.
+            if bucket is not None and not bucket.get("current_port_reachable", False):
+                return SKIP_REASON_PORT_DRIFT_SUSPECTED
+            return SKIP_REASON_CALLBACK_RESULT_MISSING
+        return SKIP_REASON_CALLBACK_RESULT_MISSING

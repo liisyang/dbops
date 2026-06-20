@@ -4,3 +4,6 @@ __pycache__/
 *.db
 *.log
 .env
+backend/nohup.out
+
+# A1 (PR review 2026-06-20): backend 启动日志

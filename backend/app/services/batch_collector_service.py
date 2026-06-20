@@ -990,12 +990,6 @@ class BatchCollectorService:
         if batch_run is None:
             raise LookupError(f"batch_run {batch_run_id} 不存在")
 
-        # 找所有 dispatch_run 的 collector_run_id
-        dispatch_run_ids = [
-            d.id
-            for d in db.query(CollectorBatchRun.dispatch_runs).all()
-            if d.id is not None
-        ] if False else []  # avoid the .dispatch_runs attr access
         # 通过 collector_run 找 items：找所有 collector_run.batch_run_id == batch_run_id
         collector_runs = (
             db.query(CollectorRun)
@@ -1080,26 +1074,104 @@ class BatchCollectorService:
             if item.result_message:
                 g["error_messages"].append(item.result_message)
 
+        # I3 (PR review 2026-06-20): 批量预加载 DbInstance / Server，避免 N+1。
+        # 原写法每个 group 各一次 query，1000 实例 ~2000 SQL；
+        # 改后 ~2 SQL（一次性 in_ 加载）。
+        from sqlalchemy.orm import selectinload
+
+        distinct_db_ids = list({
+            int(g["entity_id"]) for g in groups.values()
+            if g["entity_type"] == "db_instance"
+        })
+        distinct_server_ids = list({
+            int(g["entity_id"]) for g in groups.values()
+            if g["entity_type"] == "server"
+        })
+        db_map: dict[int, DbInstance] = {}
+        server_map: dict[int, Server] = {}
+        if distinct_db_ids:
+            for row in (
+                db.query(DbInstance)
+                .options(selectinload(DbInstance.cluster), selectinload(DbInstance.server))
+                .filter(DbInstance.id.in_(distinct_db_ids))
+                .all()
+            ):
+                db_map[int(row.id)] = row
+        if distinct_server_ids:
+            for row in db.query(Server).filter(Server.id.in_(distinct_server_ids)).all():
+                server_map[int(row.id)] = row
+
         # JOIN DbInstance / Server 取 name + IP
         for key, g in groups.items():
             if g["entity_type"] == "db_instance":
-                obj = db.query(DbInstance).filter(DbInstance.id == int(g["entity_id"])).first()
+                obj = db_map.get(int(g["entity_id"]))
                 if obj is not None:
                     g["entity_name"] = obj.instance_name or obj.code
                     # IP 位于关联的 Server（DbInstance 无 ip_address 列）
                     g["ip_address"] = str(obj.server.ip_address) if obj.server and obj.server.ip_address else None
                     g["cluster_id"] = int(obj.cluster_id) if obj.cluster_id else None
+                    # C3 (PR review 2026-06-18): wire-in cluster_type_suspected
+                    # via DriftDetectionService.build_cluster_type_hint.
+                    latest_facts = BatchCollectorService._load_latest_facts_for_instance(db, obj)
+                    try:
+                        from app.services.drift_detection_service import DriftDetectionService
+                        g["cluster_type_suspected"] = DriftDetectionService.build_cluster_type_hint(
+                            db, obj, latest_facts,
+                        )
+                    except (AttributeError, TypeError):
+                        # A8 (PR review 2026-06-20): 缩窄到具体异常类型，
+                        # 加 warning 保留可观测性，避免 except Exception 静默吞咽。
+                        logger.warning(
+                            "build_cluster_type_hint skipped for db_instance_id=%s",
+                            int(obj.id), exc_info=True,
+                        )
+                        g["cluster_type_suspected"] = None
+                else:
+                    g["cluster_type_suspected"] = None
             elif g["entity_type"] == "server":
-                obj = db.query(Server).filter(Server.id == int(g["entity_id"])).first()
+                obj = server_map.get(int(g["entity_id"]))
                 if obj is not None:
                     g["entity_name"] = obj.hostname
                     g["ip_address"] = obj.ip_address
+                g["cluster_type_suspected"] = None
+
+            # Default to None for assets we couldn't enrich.
+            g.setdefault("cluster_type_suspected", None)
 
         return {
             "batch_run_id": int(batch_run_id),
             "batch_code": batch_run.batch_code,
             "assets": list(groups.values()),
         }
+
+    @staticmethod
+    def _load_latest_facts_for_instance(
+        db: Session,
+        instance: Any,
+    ) -> dict[str, Any]:
+        """Load the most recent successful DB_BASIC_FACT_COLLECTION facts for `instance`.
+
+        Returns the `facts` dict stored on CollectorRunItem.raw_result. Empty
+        dict if no successful fact collection has happened yet for this
+        instance — that lets build_cluster_type_hint safely report no hint.
+        """
+        from app.models.dbops_assets import CollectorRunItem
+
+        latest_item = (
+            db.query(CollectorRunItem)
+            .filter(
+                CollectorRunItem.db_instance_id == int(instance.id),
+                CollectorRunItem.check_code == "DB_BASIC_FACT_COLLECTION",
+                CollectorRunItem.status == "success",
+            )
+            .order_by(CollectorRunItem.finished_at.desc(), CollectorRunItem.id.desc())
+            .first()
+        )
+        if latest_item is None:
+            return {}
+        raw = latest_item.raw_result or {}
+        facts = raw.get("facts") if isinstance(raw, dict) else None
+        return dict(facts) if isinstance(facts, dict) else {}
 
     # === Retry ===
 

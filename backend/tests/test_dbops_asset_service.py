@@ -218,6 +218,48 @@ class _FakeSession:
     def commit(self):
         return None
 
+    def rollback(self):
+        return None
+
+    def begin_nested(self):
+        """SAVEPOINT stub — I8 (PR review 2026-06-20): 真回滚。
+
+        begin_nested 时遍历 store 里 tracked ORM 对象的 dirty 属性做 snapshot，
+        rollback() 恢复。这是 real DB SAVEPOINT 行为的最小子集，足以验证
+        partial-failure 语义：失败条目不能污染成功条目的写入。
+        """
+
+        class _FakeSavepoint:
+            def __init__(self, parent):
+                self.parent = parent
+                # snapshot: {(obj, attr_name): old_value}
+                self.snapshot: dict = {}
+                for rows in parent.store.values():
+                    for obj in rows:
+                        for attr in ("port", "instance_name", "service_name",
+                                     "node_role", "db_size_gb", "db_version_id",
+                                     "hostname", "cpu_cores", "memory_gb",
+                                     "disk_gb", "trust_status", "status"):
+                            if hasattr(obj, attr):
+                                self.snapshot[(id(obj), attr)] = getattr(obj, attr, None)
+
+            def commit(self):
+                self.snapshot.clear()
+
+            def rollback(self):
+                # 真回滚：恢复 begin_nested 时的属性值
+                rows_by_id: dict = {}
+                for rows in self.parent.store.values():
+                    for obj in rows:
+                        rows_by_id[id(obj)] = obj
+                for (oid, attr), old in self.snapshot.items():
+                    obj = rows_by_id.get(oid)
+                    if obj is not None:
+                        setattr(obj, attr, old)
+                self.snapshot.clear()
+
+        return _FakeSavepoint(self)
+
     def refresh(self, obj):
         return obj
 
@@ -1288,6 +1330,83 @@ def test_apply_proposal_resets_instance_status_after_port_change():
     assert instance.reachability_status == "unknown"
 
 
+def test_apply_proposal_rejects_selected_value_for_non_conflict_type():
+    """C4 (PR review 2026-06-18): apply_proposal 入口拒绝非 CONFLICT 的 selected_value。
+
+    之前 PORT_DRIFT_SUSPECTED + selected_value 会被静默忽略，掩盖 API 误用。
+    """
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=5003,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(
+            db, proposal_id=5003, operator="admin", selected_value=1526,
+        )
+        assert False, "expected ValueError for selected_value on PORT_DRIFT_SUSPECTED"
+    except ValueError as exc:
+        msg = str(exc)
+        assert "selected_value 仅允许用于 PORT_CANDIDATE_CONFLICT" in msg
+        assert "PORT_DRIFT_SUSPECTED" in msg
+
+    # PORT_CANDIDATE_CONFLICT 不传 selected_value 仍然报错（保持原行为）
+    conflict_proposal = AssetChangeProposal(
+        id=5004,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value={"port": 22},
+        suggested_value={"value": 1521, "candidates": [1521, 1526]},
+        status="approved",
+    )
+    db.seed(conflict_proposal)
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=5004, operator="admin")
+        assert False, "expected ValueError when CONFLICT missing selected_value"
+    except ValueError as exc:
+        assert "selected_value" in str(exc)
+
+
+def test_apply_proposal_allows_selected_value_for_port_conflict():
+    """C4: 反向用例 — PORT_CANDIDATE_CONFLICT 传 selected_value 仍然正常 apply。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.port = 22
+    proposal = AssetChangeProposal(
+        id=5005,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value={"port": 22},
+        suggested_value={"value": 1521, "candidates": [1521, 1526]},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(
+        db, proposal_id=5005, operator="admin", selected_value=1521,
+    )
+    assert result["status"] == "applied"
+    assert instance.port == 1521
+    assert instance.trust_status == "unverified"
+
+
 def test_port_calibration_creates_drift_proposal_when_current_port_not_a_service_candidate(monkeypatch):
     """port 被错误地设成 OS 管理端口（如 22）时，只要有可达的 DB 服务端口也要生成 PORT_DRIFT_SUSPECTED。"""
     db = _FakeSession()
@@ -1725,3 +1844,1094 @@ def test_to_int_validates_port_range():
     assert PortCalibrationService._to_int(22) == 22
     assert PortCalibrationService._to_int("1521") == 1521
     assert PortCalibrationService._to_int(65535) == 65535
+
+
+# ============================================================================
+# C2 (PR review 2026-06-18): batch_action SAVEPOINT 改造
+# ============================================================================
+
+
+def test_batch_action_uses_savepoint_partial_failure():
+    """C2: 3 个 proposal，第 2 个失败，验证第 1 和第 3 的 success=True 且 DB 已写入。
+
+    旧实现 db.rollback() 会丢掉前序 in-memory 成功状态，success_count 撒谎。
+    """
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.port = 1521
+    server = db.store[Server][0]
+    server.hostname = "old-host"
+
+    # p1: db_instance.port — 成功
+    p1 = AssetChangeProposal(
+        id=6001,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        status="approved",
+    )
+    # p2: db_instance.database_status — 不在白名单 → ValueError（预期失败）
+    p2 = AssetChangeProposal(
+        id=6002,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="database_status",
+        current_value="STARTED",
+        suggested_value="STARTED",
+        status="approved",
+    )
+    # p3: server.hostname — 成功
+    p3 = AssetChangeProposal(
+        id=6003,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="hostname",
+        current_value="old-host",
+        suggested_value="new-host",
+        status="approved",
+    )
+    db.seed(p1, p2, p3)
+
+    result = AssetProposalService.batch_action(
+        db,
+        proposal_ids=[6001, 6002, 6003],
+        action="apply",
+        operator="admin",
+    )
+
+    # 关键断言：success_count = 2, fail_count = 1
+    assert result["success_count"] == 2
+    assert result["fail_count"] == 1
+    assert result["action"] == "apply"
+
+    # p1 / p3 成功 — DB 状态写入；p2 失败 — 状态不变
+    results_by_id = {entry["id"]: entry for entry in result["results"]}
+    assert results_by_id[6001]["success"] is True
+    assert "error" not in results_by_id[6001]
+    assert results_by_id[6002]["success"] is False
+    assert "database_status" in results_by_id[6002]["error"]
+    assert results_by_id[6003]["success"] is True
+
+    # DB 持久化状态：p1 应用了 port，p3 应用了 hostname，p2 未应用
+    assert instance.port == 1526
+    assert p1.status == "applied"
+    assert p2.status == "approved"  # 不变
+    assert p3.status == "applied"
+    assert server.hostname == "new-host"
+
+
+def test_batch_action_unknown_action_rejected():
+    """C2: 未知 action 在每条 proposal 的 savepoint 内被拒绝，整体返回全失败。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    p = AssetChangeProposal(
+        id=6010,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        status="approved",
+    )
+    db.seed(p)
+
+    result = AssetProposalService.batch_action(
+        db,
+        proposal_ids=[6010],
+        action="weird_action",
+        operator="admin",
+    )
+    assert result["success_count"] == 0
+    assert result["fail_count"] == 1
+    assert result["results"][0]["success"] is False
+    assert "未知 action" in result["results"][0]["error"]
+
+
+def test_batch_action_all_approve_succeeds():
+    """C2: 多个 pending proposal 一齐 approve，savepoint.commit() 路径都 OK。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    p1 = AssetChangeProposal(
+        id=6020,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        status="pending",
+    )
+    p2 = AssetChangeProposal(
+        id=6021,
+        entity_type="server",
+        entity_id=70,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="hostname",
+        current_value="old",
+        suggested_value="new",
+        status="pending",
+    )
+    db.seed(p1, p2)
+
+    result = AssetProposalService.batch_action(
+        db,
+        proposal_ids=[6020, 6021],
+        action="approve",
+        operator="admin",
+    )
+    assert result["success_count"] == 2
+    assert result["fail_count"] == 0
+    assert p1.status == "approved"
+    assert p2.status == "approved"
+    assert p1.approved_by == "admin"
+    assert p2.approved_by == "admin"
+
+
+def test_batch_action_rejects_string_override_value():
+    """C2: PORT_CANDIDATE_CONFLICT 时 str 端口号被拒绝（非 int）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    p = AssetChangeProposal(
+        id=6030,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value={"port": 22},
+        suggested_value={"value": 1521, "candidates": [1521, 1526]},
+        status="approved",
+    )
+    db.seed(p)
+
+    result = AssetProposalService.batch_action(
+        db,
+        proposal_ids=[6030],
+        action="apply",
+        operator="admin",
+        override_values={"6030": "1521"},  # 字符串而非整数
+    )
+    assert result["success_count"] == 0
+    assert result["fail_count"] == 1
+    assert "整数端口" in result["results"][0]["error"]
+
+
+def test_batch_action_request_rejects_empty_proposal_ids():
+    """C2 配套：空 proposal_ids 列表返回 success=0, fail=0，不抛错。"""
+    db = _FakeSession()
+    result = AssetProposalService.batch_action(
+        db,
+        proposal_ids=[],
+        action="approve",
+        operator="admin",
+    )
+    assert result["success_count"] == 0
+    assert result["fail_count"] == 0
+    assert result["results"] == []
+
+
+# ============================================================================
+# C4 (PR review 2026-06-18): apply_proposal 入口 guard（已在上面文件中段测试）
+# ============================================================================
+
+
+# ============================================================================
+# I1 (PR review 2026-06-18): apply_proposal 白名单拒绝
+# ============================================================================
+
+
+def test_apply_proposal_rejects_non_whitelisted_field_db_instance():
+    """I1: db_instance.ip_address 不在白名单 → ValueError。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7001,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="IP_DRIFT",
+        proposal_type="IP_DRIFT",
+        field_path="ip_address",  # not in APPLYABLE_FIELDS["db_instance"]
+        current_value="10.0.0.10",
+        suggested_value="10.0.0.11",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7001, operator="admin")
+        assert False, "expected ValueError for non-whitelisted db_instance field"
+    except ValueError as exc:
+        msg = str(exc)
+        assert "db_instance.ip_address" in msg
+        assert "白名单" in msg
+
+
+def test_apply_proposal_rejects_db_instance_database_status():
+    """I1: db_instance.database_status 不在白名单（plan 注释明确禁止）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7002,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="database_status",  # semantic mismatch → not whitelisted
+        current_value="STARTED",
+        suggested_value="STARTED",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7002, operator="admin")
+        assert False, "expected ValueError for database_status"
+    except ValueError as exc:
+        assert "database_status" in str(exc)
+        assert "白名单" in str(exc)
+
+
+def test_apply_proposal_rejects_db_version_id():
+    """I1: entity_type=db_version 完全不在 APPLYABLE_FIELDS → ValueError。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7003,
+        entity_type="db_version",  # unknown entity_type
+        entity_id=31,
+        change_type="DB_FACT_DRIFT_DETECTED",
+        proposal_type="DB_FACT_DRIFT_DETECTED",
+        field_path="version_code",
+        current_value="19c",
+        suggested_value="21c",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7003, operator="admin")
+        assert False, "expected ValueError for db_version entity_type"
+    except ValueError as exc:
+        assert "白名单" in str(exc) or "不支持" in str(exc)
+
+
+def test_apply_proposal_rejects_cluster_cluster_type():
+    """I1: cluster.cluster_type 不在白名单（影响面大，禁止自动 apply）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7004,
+        entity_type="cluster",
+        entity_id=70,
+        change_type="CLUSTER_TYPE_MISMATCH",
+        proposal_type="CLUSTER_TYPE_MISMATCH",
+        field_path="cluster_type",
+        current_value="DATAGUARD",
+        suggested_value="RAC",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7004, operator="admin")
+        assert False, "expected ValueError for cluster.cluster_type"
+    except ValueError as exc:
+        assert "白名单" in str(exc)
+
+
+# ============================================================================
+# I2 (PR review 2026-06-18): apply_proposal 新字段 happy path
+# ============================================================================
+
+
+def test_apply_proposal_writes_instance_name():
+    """I2: db_instance.instance_name apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.instance_name = "OLD_NAME"
+    proposal = AssetChangeProposal(
+        id=7101,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="instance_name",
+        current_value="OLD_NAME",
+        suggested_value="NEW_NAME",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7101, operator="admin")
+
+    assert result["status"] == "applied"
+    assert instance.instance_name == "NEW_NAME"
+    events = [e for e in db.store[AssetEventHistory] if e.event_type == "ASSET_PROPOSAL_APPLIED"]
+    assert len(events) == 1
+    assert events[0].changed_fields["field_path"] == "instance_name"
+
+
+def test_apply_proposal_writes_service_name():
+    """I2: db_instance.service_name apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.service_name = "OLD_SVC"
+    proposal = AssetChangeProposal(
+        id=7102,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="service_name",
+        current_value="OLD_SVC",
+        suggested_value="NEW_SVC",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7102, operator="admin")
+
+    assert result["status"] == "applied"
+    assert instance.service_name == "NEW_SVC"
+
+
+def test_apply_proposal_writes_node_role():
+    """I2: db_instance.node_role apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.node_role = "primary"
+    proposal = AssetChangeProposal(
+        id=7103,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="node_role",
+        current_value="primary",
+        suggested_value="standby",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7103, operator="admin")
+
+    assert result["status"] == "applied"
+    assert instance.node_role == "standby"
+
+
+def test_apply_proposal_writes_server_hostname():
+    """I2: server.hostname apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    server = db.store[Server][0]
+    server.hostname = "old-host"
+    proposal = AssetChangeProposal(
+        id=7201,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="hostname",
+        current_value="old-host",
+        suggested_value="new-host",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7201, operator="admin")
+
+    assert result["status"] == "applied"
+    assert server.hostname == "new-host"
+
+
+def test_apply_proposal_writes_server_cpu_cores():
+    """I2: server.cpu_cores apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    server = db.store[Server][0]
+    server.cpu_cores = 8
+    proposal = AssetChangeProposal(
+        id=7202,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="cpu_cores",
+        current_value=8,
+        suggested_value=16,
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7202, operator="admin")
+
+    assert result["status"] == "applied"
+    assert int(server.cpu_cores) == 16
+
+
+def test_apply_proposal_writes_server_memory_gb():
+    """I2: server.memory_gb apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    server = db.store[Server][0]
+    server.memory_gb = 32
+    proposal = AssetChangeProposal(
+        id=7203,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="memory_gb",
+        current_value=32,
+        suggested_value=64,
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7203, operator="admin")
+
+    assert result["status"] == "applied"
+    assert int(server.memory_gb) == 64
+
+
+def test_apply_proposal_writes_server_disk_gb():
+    """I2: server.disk_gb apply 写入新值。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    server = db.store[Server][0]
+    server.disk_gb = 500
+    proposal = AssetChangeProposal(
+        id=7204,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="disk_gb",
+        current_value=500,
+        suggested_value=1000,
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7204, operator="admin")
+
+    assert result["status"] == "applied"
+    assert int(server.disk_gb) == 1000
+
+
+# ============================================================================
+# I3 (PR review 2026-06-18): PORT_CANDIDATE_CONFLICT 三重校验
+# ============================================================================
+
+
+def test_apply_proposal_port_conflict_requires_selected_value():
+    """I3 (聚焦): PORT_CANDIDATE_CONFLICT 必须传 selected_value。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7301,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value={"port": 22},
+        suggested_value={"value": 1521, "candidates": [1521, 1526]},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7301, operator="admin")
+        assert False, "expected ValueError when CONFLICT missing selected_value"
+    except ValueError as exc:
+        assert "selected_value" in str(exc)
+
+
+def test_apply_proposal_port_conflict_rejects_out_of_range():
+    """I3: selected_value=70000 (>65535) 或 0 → ValueError。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7302,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value={"port": 22},
+        suggested_value={"value": 1521, "candidates": [1521, 1526]},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(
+            db, proposal_id=7302, operator="admin", selected_value=70000,
+        )
+        assert False, "expected ValueError for out-of-range port"
+    except ValueError as exc:
+        assert "1-65535" in str(exc)
+
+    try:
+        AssetProposalService.apply_proposal(
+            db, proposal_id=7302, operator="admin", selected_value=0,
+        )
+        assert False, "expected ValueError for port=0"
+    except ValueError as exc:
+        assert "1-65535" in str(exc)
+
+
+def test_apply_proposal_port_conflict_rejects_unknown_port():
+    """I3: selected_value=9999 不在 candidates → ValueError。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    proposal = AssetChangeProposal(
+        id=7303,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value={"port": 22},
+        suggested_value={"value": 1521, "candidates": [1521, 1526]},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(
+            db, proposal_id=7303, operator="admin", selected_value=9999,
+        )
+        assert False, "expected ValueError for unknown port"
+    except ValueError as exc:
+        assert "9999" in str(exc)
+        assert "候选端口" in str(exc)
+
+
+# ============================================================================
+# I4 (PR review 2026-06-18): list_proposals 按 source_run_id 过滤
+# ============================================================================
+
+
+def test_list_proposals_filters_by_source_run_id():
+    """I4: list_proposals(source_run_id=X) 只返回 X 的 proposals，避免跨批 apply。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    p_run1_a = AssetChangeProposal(
+        id=7401,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        source_run_id="run-1",
+        evidence_run_id="run-1",
+        status="pending",
+    )
+    p_run1_b = AssetChangeProposal(
+        id=7402,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        source_run_id="run-1",
+        evidence_run_id="run-1",
+        status="pending",
+    )
+    p_run2_a = AssetChangeProposal(
+        id=7403,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        source_run_id="run-2",
+        evidence_run_id="run-2",
+        status="pending",
+    )
+    db.seed(p_run1_a, p_run1_b, p_run2_a)
+
+    # 不传 source_run_id：返回全部
+    all_rows = AssetProposalService.list_proposals(db)
+    assert len(all_rows) == 3
+
+    # source_run_id=run-1：只返回 7401, 7402
+    run1_rows = AssetProposalService.list_proposals(db, source_run_id="run-1")
+    assert len(run1_rows) == 2
+    assert {row["id"] for row in run1_rows} == {7401, 7402}
+
+    # source_run_id=run-2：只返回 7403
+    run2_rows = AssetProposalService.list_proposals(db, source_run_id="run-2")
+    assert len(run2_rows) == 1
+    assert run2_rows[0]["id"] == 7403
+
+    # source_run_id=run-999：空
+    none_rows = AssetProposalService.list_proposals(db, source_run_id="run-999")
+    assert none_rows == []
+
+
+def test_list_proposals_source_run_id_with_other_filters():
+    """I4: source_run_id 与 status filter 组合工作。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    p = AssetChangeProposal(
+        id=7410,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        source_run_id="run-7",
+        evidence_run_id="run-7",
+        status="approved",
+    )
+    p2 = AssetChangeProposal(
+        id=7411,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_DRIFT_SUSPECTED",
+        proposal_type="PORT_DRIFT_SUSPECTED",
+        field_path="port",
+        current_value=1521,
+        suggested_value=1526,
+        source_run_id="run-7",
+        evidence_run_id="run-7",
+        status="pending",
+    )
+    db.seed(p, p2)
+
+    rows = AssetProposalService.list_proposals(
+        db, source_run_id="run-7", status="approved",
+    )
+    assert len(rows) == 1
+    assert rows[0]["id"] == 7410
+
+
+# --- PR review 2026-06-20 followup: C1 (Numeric coerce) + C2 (node_role) + C3 (db_version idempotency) ---
+
+
+def test_apply_proposal_writes_memory_gb_decimal_preserved():
+    """C1: server.memory_gb Numeric(10,2) — "64.5" 写入后保留小数位（不再 int() 截断）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    server = db.store[Server][0]
+    server.memory_gb = 32
+    proposal = AssetChangeProposal(
+        id=7301,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="memory_gb",
+        current_value=32,
+        suggested_value="64.5",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7301, operator="admin")
+
+    assert result["status"] == "applied"
+    # 关键断言：64.5 不被截断为 64
+    assert float(server.memory_gb) == 64.5
+
+
+def test_apply_proposal_writes_disk_gb_decimal_preserved():
+    """C1: server.disk_gb Numeric(12,2) — "1500.75" 保留小数。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    server = db.store[Server][0]
+    server.disk_gb = 500
+    proposal = AssetChangeProposal(
+        id=7302,
+        entity_type="server",
+        entity_id=60,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="disk_gb",
+        current_value=500,
+        suggested_value="1500.75",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7302, operator="admin")
+
+    assert result["status"] == "applied"
+    assert float(server.disk_gb) == 1500.75
+
+
+def test_apply_proposal_writes_node_role_lowercases():
+    """C2: node_role "PRIMARY" → "primary"（走 APPLYABLE_NODE_ROLES 白名单，大小写不敏感）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.node_role = "single"
+    proposal = AssetChangeProposal(
+        id=7303,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="node_role",
+        current_value="single",
+        suggested_value="PRIMARY",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7303, operator="admin")
+
+    assert result["status"] == "applied"
+    assert instance.node_role == "primary"
+
+
+def test_apply_proposal_rejects_node_role_invalid_value():
+    """C2: 不在 chk_node_role 白名单的值 → ValueError，不绕过 CHECK 约束。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.node_role = "primary"
+    proposal = AssetChangeProposal(
+        id=7304,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="node_role",
+        current_value="primary",
+        suggested_value="replica",  # not in {primary, standby, single, member, unknown}
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7304, operator="admin")
+    except ValueError as exc:
+        assert "不在允许集合" in str(exc)
+        # 关键断言：原值不变（事务回滚）
+        assert instance.node_role == "primary"
+    else:
+        raise AssertionError("expected ValueError for invalid node_role")
+
+
+def test_apply_proposal_db_version_auto_create_idempotent():
+    """C3: 同一 version_str 连续 apply 两次，只新增 1 行 DbVersion（避免 ghost 行循环）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    # 清空 db_type_id 30 下所有 DbVersion，让两次都触发 auto-create 路径
+    initial_versions = [v for v in db.store[DbVersion] if v.db_type_id == 30]
+    for v in initial_versions:
+        db.delete(v)
+    initial_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    assert initial_count == 0
+
+    proposal1 = AssetChangeProposal(
+        id=7305,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=None,
+        suggested_value="21c",
+        status="approved",
+    )
+    proposal2 = AssetChangeProposal(
+        id=7306,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=None,
+        suggested_value="21c",
+        status="approved",
+    )
+    db.seed(proposal1, proposal2)
+
+    # 第一次：auto-create 1 行
+    AssetProposalService.apply_proposal(db, proposal_id=7305, operator="admin")
+    after_first = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30 and v.version_name == "21c")
+    assert after_first == 1
+
+    # 第二次：recheck 命中已存在行，不重复创建
+    AssetProposalService.apply_proposal(db, proposal_id=7306, operator="admin")
+    after_second = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30 and v.version_name == "21c")
+    assert after_second == 1, "ghost 行：C3 idempotency 未生效"
+
+
+def test_apply_proposal_db_version_rejects_empty_version_str():
+    """C3: 全空白 suggested_value → ValueError（不创建空名 DbVersion 行）。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_version_id = 31
+    proposal = AssetChangeProposal(
+        id=7307,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=31,
+        suggested_value="   ",  # 全空白
+        status="approved",
+    )
+    db.seed(proposal)
+
+    try:
+        AssetProposalService.apply_proposal(db, proposal_id=7307, operator="admin")
+    except ValueError as exc:
+        assert "空白" in str(exc)
+        # 关键断言：原 db_version_id 未被清空（事务回滚）
+        assert instance.db_version_id == 31
+        # 关键断言：没有创建空名 DbVersion
+        empty_rows = [v for v in db.store[DbVersion] if v.db_type_id == 30 and not v.version_name.strip()]
+        assert empty_rows == []
+    else:
+        raise AssertionError("expected ValueError for empty version string")
+
+
+def test_apply_proposal_record_event_captures_real_before_status():
+    """I5: apply 改 port 后，event 记录真实 before=verified, after=unverified。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.trust_status = "verified"
+    instance.port = 1521
+    proposal = AssetChangeProposal(
+        id=7308,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="PORT_CANDIDATE_CONFLICT",
+        proposal_type="PORT_CANDIDATE_CONFLICT",
+        field_path="port",
+        current_value=1521,
+        suggested_value={"value": 1521, "candidates": [1521, 1522]},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    AssetProposalService.apply_proposal(db, proposal_id=7308, operator="admin", selected_value=1521)
+
+    events = [e for e in db.store[AssetEventHistory] if e.event_type == "ASSET_PROPOSAL_APPLIED"]
+    assert len(events) == 1
+    # I5 关键断言：before=verified（应用前真实状态），after=unverified（应用后被覆盖）
+    assert events[0].before_status == "verified"
+    assert events[0].after_status == "unverified"
+
+
+# --- PR review 2026-06-20 C7: db_version / db_size_gb happy-path 测试 ---
+
+
+def test_apply_proposal_db_version_exact_match_on_version_name():
+    """C7: suggested_value 精确匹配 DbVersion.version_name → 不 auto-create，直接 link。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_version_id = None  # 待 apply
+    initial_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    proposal = AssetChangeProposal(
+        id=7401,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=None,
+        suggested_value="19c",  # 精确匹配 seed 中的 DbVersion
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7401, operator="admin")
+
+    assert result["status"] == "applied"
+    # 关键断言：匹配到现有行，没创建新行
+    after_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    assert after_count == initial_count
+    # 关键断言：instance.db_version_id 设为已存在的 31
+    assert instance.db_version_id == 31
+
+
+def test_apply_proposal_db_version_uses_evidence_version_full():
+    """C7: suggested_value 没匹配但 evidence.version_full 命中 → 不 auto-create，link 已有行。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_version_id = None
+    initial_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    proposal = AssetChangeProposal(
+        id=7402,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=None,
+        suggested_value="unknown-label",  # 没匹配
+        evidence={"version_full": "19c"},  # evidence 命中
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7402, operator="admin")
+
+    assert result["status"] == "applied"
+    # 关键断言：evidence 命中，没创建新行
+    after_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    assert after_count == initial_count
+    # 关键断言：link 到已存在的 31
+    assert instance.db_version_id == 31
+
+
+def test_apply_proposal_db_version_auto_creates_when_unmatched():
+    """C7: 字典完全没匹配 → auto-create 新 DbVersion 行。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_version_id = None
+    # 清空所有 db_type_id=30 的 DbVersion
+    for v in [v for v in db.store[DbVersion] if v.db_type_id == 30]:
+        db.delete(v)
+    initial_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    assert initial_count == 0
+
+    proposal = AssetChangeProposal(
+        id=7403,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=None,
+        suggested_value="21c",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7403, operator="admin")
+
+    assert result["status"] == "applied"
+    # 关键断言：auto-create 1 行
+    after_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    assert after_count == 1
+    new_version = [v for v in db.store[DbVersion] if v.db_type_id == 30][0]
+    assert new_version.version_name == "21c"
+    assert new_version.version_code == "21c"
+    # 关键断言：instance.db_version_id 指向新建行
+    assert instance.db_version_id == new_version.id
+
+
+def test_apply_proposal_writes_db_size_gb_float():
+    """C7: db_size_gb Numeric(12,2) 写入 "1024.5" 保留小数。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_size_gb = None
+    proposal = AssetChangeProposal(
+        id=7404,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_size_gb",
+        current_value=None,
+        suggested_value="1024.5",
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7404, operator="admin")
+
+    assert result["status"] == "applied"
+    assert float(instance.db_size_gb) == 1024.5
+
+
+def test_apply_proposal_writes_db_size_gb_from_dict_evidence():
+    """C7: db_size_gb suggested_value 是 dict {"value": ...} 也能解包。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_size_gb = None
+    proposal = AssetChangeProposal(
+        id=7405,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_size_gb",
+        current_value=None,
+        suggested_value={"value": "2048.75", "unit": "GB"},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7405, operator="admin")
+
+    assert result["status"] == "applied"
+    assert float(instance.db_size_gb) == 2048.75
+
+
+def test_apply_proposal_db_version_rejects_unregistered_evidence_only():
+    """C7: suggested_value 不可解析且 evidence.version_full 也不命中 → 走 auto-create。"""
+    db = _FakeSession()
+    db.seed(*_seed_asset_graph())
+    instance = db.store[DbInstance][0]
+    instance.db_version_id = None
+    for v in [v for v in db.store[DbVersion] if v.db_type_id == 30]:
+        db.delete(v)
+    initial_count = sum(1 for v in db.store[DbVersion] if v.db_type_id == 30)
+    assert initial_count == 0
+
+    proposal = AssetChangeProposal(
+        id=7406,
+        entity_type="db_instance",
+        entity_id=80,
+        change_type="ASSET_FACT_DRIFT",
+        proposal_type="ASSET_FACT_DRIFT",
+        field_path="db_version",
+        current_value=None,
+        suggested_value="PostgreSQL 16",
+        evidence={"version_full": "PostgreSQL 16.2"},
+        status="approved",
+    )
+    db.seed(proposal)
+
+    result = AssetProposalService.apply_proposal(db, proposal_id=7406, operator="admin")
+
+    assert result["status"] == "applied"
+    # 关键断言：都未命中 → auto-create
+    after = [v for v in db.store[DbVersion] if v.db_type_id == 30]
+    assert len(after) == 1
+    assert after[0].version_name == "PostgreSQL 16"
+
+

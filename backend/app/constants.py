@@ -107,3 +107,18 @@ AWX_TERMINAL_STATUSES: Final[frozenset[AwxTerminalStatus]] = frozenset(
         "cancelled",
     }  # type: ignore[arg-type]
 )
+
+
+# ---------------------------------------------------------------------------
+# C1 (PR review 2026-06-18): connectivity-gate skip reason codes
+# ---------------------------------------------------------------------------
+# When the playbook gates out fact-collection items because port prerequisites
+# didn't complete (callback arrives with items=[]), every gated item must be
+# tagged with the SPECIFIC reason so the UI can show actionable hints instead
+# of a generic "CONNECTIVITY_GATE_FAILED" for everything.
+SKIP_REASON_PORT_CANDIDATE_CONFLICT = "PORT_CANDIDATE_CONFLICT"
+SKIP_REASON_PORT_DRIFT_SUSPECTED = "PORT_DRIFT_SUSPECTED"
+SKIP_REASON_OS_FACT_UNSUPPORTED_WINDOWS = "OS_FACT_UNSUPPORTED_WINDOWS"
+SKIP_REASON_CALLBACK_RESULT_MISSING = "CALLBACK_RESULT_MISSING"
+# Backward-compatible alias kept for any reader that branches on the old code.
+SKIP_REASON_CONNECTIVITY_GATE_FAILED = "CONNECTIVITY_GATE_FAILED"
