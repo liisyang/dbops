@@ -15,6 +15,9 @@ class InspectionItemCreateRequest(BaseModel):
     enabled: bool = True
     description: Optional[str] = None
     rule_config: dict[str, Any] = Field(default_factory=dict)
+    # Phase 3.5: db_type_code is required when check_code == "DB_READONLY_SQL_EXEC".
+    # When omitted, the SQL safety service rejects the payload with a 400.
+    db_type_code: Optional[str] = None
 
 
 class InspectionItemUpdateRequest(BaseModel):
@@ -25,6 +28,7 @@ class InspectionItemUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
     description: Optional[str] = None
     rule_config: Optional[dict[str, Any]] = None
+    db_type_code: Optional[str] = None
 
 
 class InspectionItemResponse(BaseModel):
@@ -37,8 +41,55 @@ class InspectionItemResponse(BaseModel):
     enabled: bool
     description: Optional[str] = None
     rule_config: dict[str, Any] = Field(default_factory=dict)
+    db_type_code: Optional[str] = None
     created_at: Optional[datetime] = None
     updated_at: Optional[datetime] = None
+
+
+# ----------------------------------------------------------------------
+# Phase 3.5: SQL validate / verify request/response models
+# ----------------------------------------------------------------------
+
+
+class ValidateSqlRequest(BaseModel):
+    db_type_code: str = Field(min_length=1, max_length=50)
+    sql_text: str = Field(min_length=1)
+
+
+class ValidateSqlResponse(BaseModel):
+    valid: bool
+    sql_hash: str
+    message: str
+    errors: list[str] = Field(default_factory=list)
+
+
+class VerifySqlRequest(BaseModel):
+    instance_id: int = Field(ge=1)
+    db_type_code: str = Field(min_length=1, max_length=50)
+    sql_text: str = Field(min_length=1)
+    timeout_seconds: int = Field(default=30, ge=1, le=120)
+    max_rows: int = Field(default=200, ge=1, le=1000)
+
+
+class VerifySqlResponse(BaseModel):
+    verify_run_id: int
+    collector_run_id: str
+    status: str
+    awx_job_id: Optional[int] = None
+    message: Optional[str] = None
+
+
+class VerifySqlResultResponse(BaseModel):
+    success: bool
+    verified: bool
+    status: str
+    sql_hash: Optional[str] = None
+    duration_ms: Optional[int] = None
+    columns: list[str] = Field(default_factory=list)
+    rows: list[list[Any]] = Field(default_factory=list)
+    message: Optional[str] = None
+    error_code: Optional[str] = None
+    connector: Optional[str] = None
 
 
 class InspectionTaskCreateRequest(BaseModel):

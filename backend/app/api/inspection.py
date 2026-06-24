@@ -15,6 +15,11 @@ from app.schemas.inspection import (
     InspectionTaskCreateRequest,
     InspectionTaskCreateResponse,
     InspectionTaskResponse,
+    ValidateSqlRequest,
+    ValidateSqlResponse,
+    VerifySqlRequest,
+    VerifySqlResponse,
+    VerifySqlResultResponse,
 )
 from app.services.inspection_service import InspectionService
 
@@ -53,6 +58,83 @@ async def update_inspection_item(
         return InspectionService.update_item(db, item_id=item_id, payload=payload)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.patch("/inspection/items/{item_id}", response_model=InspectionItemResponse)
+async def patch_inspection_item(
+    item_id: int,
+    payload: InspectionItemUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """P0: PATCH endpoint used for soft-disable (set enabled=false).
+
+    A dedicated DELETE endpoint is intentionally NOT provided because
+    inspection items are referenced by inspection_task.item_codes and
+    inspection_result; hard-deleting would break history.
+    """
+    try:
+        return InspectionService.update_item(db, item_id=item_id, payload=payload)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/inspection/items/validate-sql", response_model=ValidateSqlResponse)
+async def validate_inspection_sql(
+    payload: ValidateSqlRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """Phase 3.5: pure SQL safety check (no DB connection)."""
+    return InspectionService.validate_sql(
+        db=None,
+        db_type_code=payload.db_type_code,
+        sql_text=payload.sql_text,
+    )
+
+
+@router.post("/inspection/items/verify-sql", response_model=VerifySqlResponse)
+async def verify_inspection_sql(
+    payload: VerifySqlRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Phase 3.5: launch an AWX one-shot SQL verify against the given instance.
+
+    Polling endpoint: GET /inspection/items/verify-sql/{verify_run_id}.
+    """
+    try:
+        return InspectionService.verify_sql(
+            db,
+            instance_id=payload.instance_id,
+            db_type_code=payload.db_type_code,
+            sql_text=payload.sql_text,
+            timeout_seconds=payload.timeout_seconds,
+            max_rows=payload.max_rows,
+            requested_by=current_user.username,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/inspection/items/verify-sql/{verify_run_id}", response_model=VerifySqlResultResponse)
+async def get_verify_sql_result(
+    verify_run_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Phase 3.5: poll the latest state of a verify-sql AWX run."""
+    try:
+        return InspectionService.get_verify_sql_result(db, verify_run_id=verify_run_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/inspection/tasks", response_model=InspectionTaskCreateResponse)

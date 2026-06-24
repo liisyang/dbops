@@ -121,6 +121,11 @@ class CheckItemBuilderRegistry:
             "FACT_COLLECTION_FAILED",
             "CREDENTIAL_AUTH_FAILED",
         ],
+        # Phase 3.5: DB_READONLY_SQL_EXEC has no implicit inspection-item
+        # mapping — the inspection_result row is built directly from the
+        # item_code carried in the callback. We keep an empty list here so
+        # the registry still treats it as a known check_code.
+        "DB_READONLY_SQL_EXEC": [],
     }
 
     @classmethod

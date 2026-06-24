@@ -10,14 +10,20 @@ from app.models.dbops_assets import (
     CollectorBatchRun,
     CollectorRun,
     CollectorRunItem,
+    CollectorRunResult,
+    DbInstance,
     InspectionItem,
     InspectionResult,
     InspectionTask,
+    Server,
+    DbType,
 )
 from app.schemas.collector import BatchRunCreateRequest, BatchRunFiltersRequest, CollectorCallbackItem, CollectorInspectionCallbackItem
 from app.schemas.inspection import InspectionItemCreateRequest, InspectionItemUpdateRequest, InspectionTaskCreateRequest
+from app.services.awx_service import AwxService, AwxServiceError
 from app.services.batch_collector_service import BatchCollectorService
 from app.services.check_item_builder_registry import CheckItemBuilderRegistry
+from app.services.sql_safety_service import SqlSafetyService
 
 
 class InspectionService:
@@ -71,6 +77,7 @@ class InspectionService:
             "enabled": bool(item.enabled),
             "description": item.description,
             "rule_config": item.rule_config or {},
+            "db_type_code": item.db_type_code,
             "created_at": item.created_at,
             "updated_at": item.updated_at,
         }
@@ -167,7 +174,11 @@ class InspectionService:
         if existing:
             raise ValueError(f"item_code 已存在: {payload.item_code}")
 
-        row = InspectionItem(**payload.model_dump(mode="json"))
+        # Phase 3.5: SQL safety gate for DB_READONLY_SQL_EXEC items.
+        InspectionService._validate_sql_item_payload(payload.check_code, payload.rule_config, payload.db_type_code)
+
+        data = payload.model_dump(mode="json")
+        row = InspectionItem(**data)
         db.add(row)
         db.commit()
         db.refresh(row)
@@ -180,11 +191,273 @@ class InspectionService:
             raise LookupError(f"巡检项不存在: {item_id}")
 
         data = payload.model_dump(exclude_unset=True, mode="json")
+        # Re-run SQL safety if check_code/rule_config/db_type_code changes
+        # touch a DB_READONLY_SQL_EXEC item.
+        effective_check = data.get("check_code") or row.check_code
+        if effective_check == "DB_READONLY_SQL_EXEC" and (
+            "rule_config" in data or "db_type_code" in data
+        ):
+            rule = data.get("rule_config") or row.rule_config or {}
+            db_type = data.get("db_type_code") or row.db_type_code
+            InspectionService._validate_sql_item_payload(
+                effective_check, rule, db_type
+            )
+
         for key, value in data.items():
             setattr(row, key, value)
         db.commit()
         db.refresh(row)
         return InspectionService._item_to_dict(row)
+
+    @staticmethod
+    def disable_item(db: Session, *, item_id: int) -> dict[str, Any]:
+        """P0: disable an item (soft-delete) instead of hard-deleting.
+
+        Inspection items are referenced by inspection_task.item_codes and
+        inspection_result rows; hard-deleting would break history.
+        """
+        row = db.query(InspectionItem).filter(InspectionItem.id == item_id).first()
+        if not row:
+            raise LookupError(f"巡检项不存在: {item_id}")
+        row.enabled = False
+        db.commit()
+        db.refresh(row)
+        return InspectionService._item_to_dict(row)
+
+    @staticmethod
+    def _validate_sql_item_payload(
+        check_code: str,
+        rule_config: dict[str, Any] | None,
+        db_type_code: str | None,
+    ) -> None:
+        """Validate that a DB_READONLY_SQL_EXEC item has a safe SQL payload.
+
+        Raises ``ValueError`` with a user-readable message when the
+        payload is invalid. The caller converts that to HTTP 400.
+        """
+        if (check_code or "").strip().upper() != "DB_READONLY_SQL_EXEC":
+            return
+        if not db_type_code:
+            raise ValueError("DB_READONLY_SQL_EXEC 巡检项必须指定 db_type_code")
+        if not rule_config or not rule_config.get("sql_text"):
+            raise ValueError("DB_READONLY_SQL_EXEC 巡检项必须提供 rule_config.sql_text")
+        executor_type = (rule_config.get("executor_type") or "db_sql_readonly").strip()
+        if executor_type != "db_sql_readonly":
+            raise ValueError(
+                f"DB_READONLY_SQL_EXEC 巡检项的 executor_type 必须是 db_sql_readonly（当前: {executor_type}）"
+            )
+        check = SqlSafetyService.validate_rule_config(rule_config, db_type_code)
+        if not check["valid"]:
+            raise ValueError("SQL 安全校验未通过: " + "; ".join(check["errors"]))
+
+    @staticmethod
+    def validate_sql(db: Session, *, db_type_code: str, sql_text: str) -> dict[str, Any]:
+        """Phase 3.5: pure SQL safety check, no DB connection."""
+        return SqlSafetyService.validate_sql_readonly(sql_text, db_type_code)
+
+    @staticmethod
+    def verify_sql(
+        db: Session,
+        *,
+        instance_id: int,
+        db_type_code: str,
+        sql_text: str,
+        timeout_seconds: int,
+        max_rows: int,
+        requested_by: str | None,
+    ) -> dict[str, Any]:
+        """Phase 3.5: AWX async SQL verify via one-shot Collector EE job.
+
+        Stores the run state in the existing ``collector_run`` table
+        (job_type=SQL_VERIFY, request_payload.run_type=sql_verify). The
+        callback updates ``collector_run_result`` and the frontend polls
+        :meth:`get_verify_sql_result` for the latest state.
+        """
+        check = SqlSafetyService.validate_sql_readonly(sql_text, db_type_code)
+        if not check["valid"]:
+            raise ValueError("SQL 安全校验未通过: " + "; ".join(check["errors"]))
+
+        instance = db.query(DbInstance).filter(DbInstance.id == instance_id).first()
+        if not instance:
+            raise LookupError(f"实例不存在: {instance_id}")
+        server = db.query(Server).filter(Server.id == instance.server_id).first()
+        if not server:
+            raise LookupError(f"实例关联服务器不存在: {instance_id}")
+        db_type = db.query(DbType).filter(DbType.id == instance.db_type_id).first()
+        actual_db_type = (db_type.type_code or "").lower() if db_type else db_type_code.lower()
+        if actual_db_type != (db_type_code or "").lower():
+            raise ValueError(
+                f"实例 db_type 与请求 db_type_code 不一致: instance={actual_db_type}, request={db_type_code}"
+            )
+        target_host = str(server.ip_address)
+        target_port = int(instance.port or 0)
+        if target_port < 1 or target_port > 65535:
+            raise ValueError(f"实例端口无效: {target_port}")
+
+        # Resolve DB credential via the standard resolver. If no credential
+        # is bound, we still launch the AWX job — the EE will return an
+        # AUTHENTICATION_FAILED in the callback so the operator sees it
+        # rather than silently dropping the request.
+        from app.services.credential_resolver_service import CredentialResolverService
+
+        credential = CredentialResolverService.resolve_for_item(
+            db,
+            target_scope="db_instance",
+            asset={"id": int(instance.id), "server_id": int(instance.server_id)},
+            check_code="DB_READONLY_SQL_EXEC",
+        )
+
+        # Build the AWX extra_vars payload mirroring the existing
+        # CollectorBatchRun/launch_collector_run flow.
+        run_id = f"verify-{secrets.token_hex(6)}"
+        item_key = f"inspection_verify:{run_id}:{instance_id}"
+        item: dict[str, Any] = {
+            "item_key": item_key,
+            "check_code": "DB_READONLY_SQL_EXEC",
+            "executor_type": "db_sql_readonly",
+            "business_domain": "inspection_verify",
+            "target_scope": "db_instance",
+            "asset_id": int(instance.id),
+            "target_host": target_host,
+            "target_port": target_port,
+            "db_type_code": db_type_code.lower(),
+            "database_name": instance.database_name or "master",
+            "service_name": instance.service_name,
+            "timeout_seconds": int(timeout_seconds),
+            "rule_config": {
+                "sql_text": sql_text,
+                "timeout_seconds": int(timeout_seconds),
+                "max_rows": int(max_rows),
+                "severity": "warning",
+            },
+            "task_id": None,
+            "inspection_item_id": None,
+            "item_code": None,
+        }
+        if credential:
+            item.update(
+                {
+                    "credential_profile_id": credential["credential_profile_id"],
+                    "credential_code": credential["profile_code"],
+                    "awx_credential_id": credential["awx_credential_id"],
+                    "credential_role": credential["binding_role"],
+                    "credential_type": credential["credential_type"],
+                }
+            )
+
+        # Compute callback URL — same convention used by CollectorService.
+        from app.config import get_settings
+        settings = get_settings()
+        base = settings.DBOPS_CALLBACK_BASE_URL or settings.DBOPS_API_BASE_URL
+        callback_url = f"{base.rstrip('/')}/api/v1/collector/callback/"
+
+        run = CollectorRun(
+            run_id=run_id,
+            db_instance_id=int(instance.id),
+            server_id=int(instance.server_id),
+            job_type="SQL_VERIFY",
+            target_scope="db_instance",
+            target_host=target_host,
+            target_port=target_port,
+            request_payload={
+                "run_type": "sql_verify",
+                "business_domain": "inspection_verify",
+                "check_codes": ["DB_READONLY_SQL_EXEC"],
+                "items": [item],
+                "sql_text": sql_text,
+                "sql_hash": check["sql_hash"],
+                "db_type_code": db_type_code.lower(),
+                "instance_id": int(instance.id),
+                "requested_by": requested_by,
+            },
+            extra_vars={"items": [item]},
+            status="pending",
+            created_at=InspectionService._now(),
+        )
+        db.add(run)
+        db.commit()
+        db.refresh(run)
+
+        # Launch the AWX job (one-shot). On failure, mark the run failed
+        # so the polling endpoint reflects reality immediately.
+        try:
+            launch = AwxService.launch_job(
+                extra_vars={
+                    "schema_version": 1,
+                    "run_id": run_id,
+                    "run_type": "sql_verify",
+                    "callback_url": callback_url,
+                    "items": [item],
+                }
+            )
+            awx_job_id = launch.get("awx_job_id")
+            run.awx_job_id = awx_job_id
+            run.status = "launched"
+            db.commit()
+            return {
+                "verify_run_id": int(run.id),
+                "collector_run_id": run_id,
+                "status": "launched",
+                "awx_job_id": awx_job_id,
+            }
+        except AwxServiceError as exc:
+            run.status = "failed"
+            run.error_message = str(exc)
+            db.commit()
+            return {
+                "verify_run_id": int(run.id),
+                "collector_run_id": run_id,
+                "status": "failed",
+                "awx_job_id": None,
+                "message": str(exc),
+            }
+
+    @staticmethod
+    def get_verify_sql_result(db: Session, *, verify_run_id: int) -> dict[str, Any]:
+        """Phase 3.5: poll endpoint for an in-flight SQL verify run."""
+        run = db.query(CollectorRun).filter(CollectorRun.id == verify_run_id).first()
+        if not run:
+            raise LookupError(f"verify run 不存在: {verify_run_id}")
+        run_type = (run.request_payload or {}).get("run_type") or ""
+        if run_type != "sql_verify":
+            raise ValueError("该 run 不是 sql_verify 类型")
+
+        # Pull the latest result row for this run.
+        result_row = (
+            db.query(CollectorRunResult)
+            .filter(CollectorRunResult.run_id == run.run_id)
+            .order_by(CollectorRunResult.id.desc())
+            .first()
+        )
+        raw = (result_row.raw_result if result_row else {}) or {}
+        columns = raw.get("columns") or []
+        rows = raw.get("rows") or []
+
+        if run.status in {"pending", "launched", "running"}:
+            status = "running"
+            verified = False
+            success = False
+        elif run.status == "failed":
+            status = "failed"
+            verified = False
+            success = False
+        else:
+            status = run.status
+            verified = bool(columns or rows)
+            success = verified
+
+        return {
+            "success": success,
+            "verified": verified,
+            "status": status,
+            "sql_hash": raw.get("sql_hash"),
+            "duration_ms": raw.get("duration_ms"),
+            "columns": columns,
+            "rows": rows,
+            "message": run.error_message or raw.get("message"),
+            "error_code": raw.get("error_code"),
+            "connector": raw.get("connector"),
+        }
 
     @staticmethod
     def create_task(
@@ -385,6 +658,18 @@ class InspectionService:
     ) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         for callback_item in callback_items:
+            normalized_check = (callback_item.check_code or "").strip().upper()
+            # Phase 3.5: DB_READONLY_SQL_EXEC results carry their business
+            # identity at the TOP LEVEL of the callback item (task_id /
+            # inspection_item_id / item_code / business_domain). Build the
+            # inspection_result row directly from those fields instead of
+            # routing through the generic check_code→item mapping, which
+            # does not understand SQL-backed items.
+            if normalized_check == "DB_READONLY_SQL_EXEC":
+                rows.extend(
+                    InspectionService._build_sql_readonly_result_row(callback_item)
+                )
+                continue
             rows.extend(
                 CheckItemBuilderRegistry.build_inspection_results_from_callback(
                     check_code=callback_item.check_code,
@@ -397,6 +682,58 @@ class InspectionService:
                 )
             )
         return rows
+
+    @staticmethod
+    def _build_sql_readonly_result_row(
+        callback_item: CollectorCallbackItem,
+    ) -> list[dict[str, Any]]:
+        """Build inspection_result rows for a single DB_READONLY_SQL_EXEC callback item.
+
+        Uses the explicit business fields at the top level of the callback
+        item (``task_id``, ``inspection_item_id``, ``item_code``,
+        ``business_domain``). Falls back to ``item_code`` parsed from the
+        evidence payload if the top-level fields are missing (defensive —
+        should never happen with the Phase 3.5 AWX playbook).
+        """
+        raw = dict(callback_item.raw_result or {})
+        item_code = callback_item.item_code or raw.get("item_code")
+        inspection_item_id = callback_item.inspection_item_id or raw.get("inspection_item_id")
+        severity = raw.get("severity") or "warning"
+        result_status = InspectionService._normalize_result_status(
+            raw.get("result_status") or "unknown"
+        )
+        # Empty rows → caller passed valid SQL that returned nothing → normal.
+        if not raw.get("rows") and result_status == "unknown":
+            result_status = "normal"
+        message = (
+            raw.get("message")
+            or callback_item.message
+            or "no abnormal rows"
+        )
+        evidence = {
+            "collector_item_key": callback_item.item_key,
+            "columns": raw.get("columns") or [],
+            "rows": raw.get("rows") or [],
+            "duration_ms": raw.get("duration_ms"),
+            "sql_hash": raw.get("sql_hash"),
+            "connector": raw.get("connector"),
+            "stderr": (raw.get("stderr") or "")[:4000],
+            "rc": raw.get("rc"),
+            "raw_result": raw,
+        }
+        return [
+            {
+                "item_code": item_code or "SQL_READONLY",
+                "result_code": item_code or callback_item.check_code,
+                "result_status": result_status,
+                "target_scope": callback_item.target_scope,
+                "asset_id": int(callback_item.asset_id),
+                "severity": severity,
+                "message": message,
+                "check_code": callback_item.check_code,
+                "evidence": evidence,
+            }
+        ]
 
     @staticmethod
     def save_callback_results(

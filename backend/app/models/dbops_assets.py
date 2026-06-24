@@ -745,6 +745,9 @@ class InspectionItem(DbopsAssetBase):
     enabled = Column(Boolean, nullable=False, server_default=text("true"))
     description = Column(Text)
     rule_config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    # Phase 3.5: required when check_code == "DB_READONLY_SQL_EXEC" so the
+    # SQL safety service can choose the right allow-list of lead keywords.
+    db_type_code = Column(String(32))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
 

@@ -159,6 +159,22 @@ class CollectorCallbackItem(BaseModel):
     message: Optional[str] = None
     raw_result: dict[str, Any] = Field(default_factory=dict)
 
+    # ------------------------------------------------------------------
+    # Phase 3.5: DB_READONLY_SQL_EXEC dispatch metadata. These fields are
+    # passed by the AWX playbook at the TOP LEVEL of each callback item so
+    # the backend callback dispatcher can route results without re-parsing
+    # ``item_key`` (which is fragile). ``business_domain`` decides the
+    # destination table — inspection_result / backup_status_snapshot /
+    # verify-only / etc.
+    # ------------------------------------------------------------------
+    executor_type: Optional[str] = None
+    business_domain: Optional[str] = None
+    task_id: Optional[int] = None
+    inspection_item_id: Optional[int] = None
+    item_code: Optional[str] = None
+    policy_id: Optional[int] = None
+    backup_type: Optional[str] = None
+
 
 class CollectorInspectionCallbackItem(BaseModel):
     item_code: str = Field(min_length=1, max_length=100)
