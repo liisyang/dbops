@@ -327,6 +327,48 @@ export const assetsApi = {
   ): Promise<InspectionResultRow[]> =>
     request.get('/v1/inspection/results', { params }),
 
+  // Phase 3.5: SQL safety + verify-sql endpoints (frontend polls
+  // verify_sql_result while AWX runs the one-shot SQL).
+  validateInspectionSql: (payload: {
+    db_type_code: string
+    sql_text: string
+  }): Promise<{
+    valid: boolean
+    sql_hash: string
+    message: string
+    errors: string[]
+  }> => request.post('/v1/inspection/items/validate-sql', payload),
+
+  verifyInspectionSql: (payload: {
+    instance_id: number
+    db_type_code: string
+    sql_text: string
+    timeout_seconds?: number
+    max_rows?: number
+  }): Promise<{
+    verify_run_id: number
+    collector_run_id: string
+    status: string
+    awx_job_id: number | null
+  }> => request.post('/v1/inspection/items/verify-sql', payload),
+
+  getVerifySqlResult: (verifyRunId: number): Promise<{
+    success: boolean
+    verified: boolean
+    sql_hash: string
+    duration_ms: number
+    columns: string[]
+    rows: unknown[]
+    message: string
+    status: string
+  }> => request.get(`/v1/inspection/items/verify-sql/${verifyRunId}`),
+
+  // P0 soft-disable only; no hard delete per plan (history-preserving).
+  patchInspectionItem: (
+    id: number | string,
+    data: Partial<InspectionItemUpdatePayload>,
+  ): Promise<InspectionItemRow> => request.patch(`/v1/inspection/items/${id}`, data),
+
   // 资产校验功能优化 v2 / 2026-06-17: 批量 proposal 操作 + asset report
   batchActionProposals: (
     payload: {

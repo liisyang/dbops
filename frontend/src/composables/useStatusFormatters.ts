@@ -109,3 +109,18 @@ export function getInspectionStatusClass(status: Status): string {
   }
   return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
 }
+
+/**
+ * Phase 3.5: backup status badge classes.
+ * Distinct from getInspectionStatusClass because backup status enum is
+ * ``success / failed / warning / unknown`` rather than the inspection
+ * ``normal / abnormal / warning / unknown``. Used by backup/Jobs.vue.
+ */
+export function getBackupStatusClass(status: Status): string {
+  const normalized = (status || '').trim().toLowerCase()
+  if (normalized === 'success') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+  if (normalized === 'warning') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+  if (normalized === 'failed') return 'border-red-400/30 bg-red-400/10 text-red-200'
+  if (normalized === 'unknown') return 'border-slate-400/30 bg-slate-400/10 text-slate-200'
+  return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
+}

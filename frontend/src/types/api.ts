@@ -137,6 +137,7 @@ export interface InstanceRow {
   source_node_role?: string | null
   server_id: number
   server_ip?: string | null
+  port?: number | null
   hostname?: string | null
   country?: string | null
   factory_area?: string | null
@@ -898,6 +899,7 @@ export interface InspectionItemRow {
   enabled: boolean
   description?: string | null
   rule_config?: Record<string, any>
+  db_type_code?: string | null
   created_at?: string | null
   updated_at?: string | null
 }
@@ -911,6 +913,7 @@ export interface InspectionItemCreatePayload {
   enabled?: boolean
   description?: string | null
   rule_config?: Record<string, any>
+  db_type_code?: string | null
 }
 
 export interface InspectionItemUpdatePayload {
@@ -921,6 +924,7 @@ export interface InspectionItemUpdatePayload {
   enabled?: boolean
   description?: string | null
   rule_config?: Record<string, any>
+  db_type_code?: string | null
 }
 
 export interface InspectionTaskRow {
