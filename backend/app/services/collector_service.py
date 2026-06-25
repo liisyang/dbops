@@ -1343,6 +1343,27 @@ class CollectorService:
                 explicit_results=payload.inspection_results,
             )
 
+        # Phase 3.5: backup_status callback dispatch. Independent of
+        # inspection — backup runs (``run_type=="backup_status"``) only
+        # write ``backup_status_snapshot`` rows and never touch
+        # ``inspection_result``. The call is wrapped in try/except so a
+        # backup save failure cannot break the surrounding transaction.
+        if run_type == "backup_status" or any(
+            (getattr(cb, "business_domain", None) or "") == "backup_status"
+            for cb in callback_items
+        ):
+            try:
+                from app.services.backup_service import save_snapshot
+
+                save_snapshot(db, run=run, callback_items=callback_items)
+            except Exception as _exc:
+                # Defensive — log via the standard channel and continue.
+                import logging as _logging
+
+                _logging.getLogger(__name__).exception(
+                    "backup snapshot save failed: run_id=%s err=%s", run.run_id, _exc
+                )
+
         run.status = CollectorService._summarize_run_status(
             db.query(CollectorRunItem).filter(CollectorRunItem.run_id == run.run_id).all()
         )

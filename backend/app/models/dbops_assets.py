@@ -833,6 +833,50 @@ class InspectionTask(DbopsAssetBase):
     )
 
 
+class BackupStatusSnapshot(DbopsAssetBase):
+    """Phase 3.5: backup status snapshot row.
+
+    Written by the ``business_domain=backup_status`` branch of the
+    collector callback (see :class:`BackupService`). Each row is a
+    point-in-time observation of one instance / backup_type pair.
+    """
+
+    __tablename__ = "backup_status_snapshot"
+
+    id = Column(BigInteger, primary_key=True)
+    instance_id = Column(BigInteger, ForeignKey("db_instance.id", ondelete="CASCADE"), nullable=False)
+    policy_id = Column(BigInteger, ForeignKey("backup_policy.id"))
+    collector_run_id = Column(BigInteger)
+    collector_run_item_id = Column(BigInteger)
+    backup_type = Column(String(50))
+    source_type = Column(String(50), nullable=False, server_default=text("'db_sql'"))
+    last_status = Column(String(20), nullable=False, server_default=text("'unknown'"))
+    last_success_at = Column(DateTime)
+    last_failure_at = Column(DateTime)
+    recovery_point_at = Column(DateTime)
+    age_minutes = Column(Integer)
+    duration_seconds = Column(Integer)
+    backup_size_mb = Column(Numeric(18, 2))
+    message = Column(Text)
+    evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    collected_at = Column(DateTime, nullable=False, default=datetime.now)
+    created_at = Column(DateTime, default=datetime.now)
+
+    __table_args__ = (
+        CheckConstraint(
+            "last_status IN ('success','failed','warning','unknown')",
+            name="chk_backup_status_last_status",
+        ),
+        CheckConstraint(
+            "source_type IN ('db_sql','agent','manual','external')",
+            name="chk_backup_status_source_type",
+        ),
+        Index("idx_backup_status_snapshot_instance_collected", "instance_id", collected_at.desc()),
+        Index("idx_backup_status_snapshot_last_status", "last_status"),
+        Index("idx_backup_status_snapshot_policy", "policy_id"),
+    )
+
+
 class InspectionResult(DbopsAssetBase):
     __tablename__ = "inspection_result"
 
@@ -1281,6 +1325,7 @@ __all__ = [
     "ResourceTag",
     "BackupPolicy",
     "InstanceBackupPolicy",
+    "BackupStatusSnapshot",
     "InspectionItem",
     "InspectionSchedule",
     "InspectionTask",
