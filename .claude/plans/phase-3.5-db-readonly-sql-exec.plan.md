@@ -3,8 +3,29 @@
 **Source**: User PRD `# 1 DBOPS Phase 3.4 / 3.5 P0 实施任务`
 **Scope**: P0-1, P0-2, P0-3 only (不含 Dify/MCP/AI Agent/大屏/恢复流程)
 **Complexity**: Large
-**Date**: 2026-06-24
-**Status**: ✅ Plan confirmed, ready to implement
+**Date**: 2026-06-24 (plan)；2026-06-25 (last progress sync)
+**Status**: ✅ Phase 3.5 P0 全部 5 个 commit 完成、pushed to origin/main；dbops HEAD `a1e8760` + ansible-playbooks `b6221b7`；vue-tsc 0 错、verify.sh 223 passed、22/22 SQL safety 用例 pass
+
+## 当前进度（2026-06-25 续会话完成态）
+
+| Commit | 范围 | 状态 | 说明 |
+|---|---|---|---|
+| 1 | `roles/db_sql_readonly_collect` + playbook 路由 | ✅ 已 commit `be84847` push | ansible-playbooks repo |
+| 2 | collector-client `db_sql_readonly` executor | ✅ 已 commit `b6221b7` push | ansible-playbooks repo（dbops-collector 同步留底） |
+| 3 | backend SQL safety + inspection dispatch | ✅ 已 commit `1d5ec9b` | dbops repo |
+| 4 | backend P0-3 backup | ✅ 已 commit `3e10b22` | DDL 已应用测试库，4 endpoint smoke test 通过 |
+| 5 | frontend P0 | ✅ 已 commit `a1e8760` | 4.1/4.2/4.3/4.4 全部完成；vue-tsc 0 错，verify.sh 223 passed |
+
+**Commit 4 已完成文件**（5 新增，3 修改）：
+- 新增：`backend/db/dbops_phase3_5_backup_status.sql`、`backend/db/rollback_phase3_5_backup_status.sql`、`backend/app/schemas/backup.py`、`backend/app/services/backup_service.py`、`backend/app/api/backup.py`
+- 修改：`backend/app/main.py`、`backend/app/models/dbops_assets.py`（加 `BackupStatusSnapshot` ORM）、`backend/app/services/collector_service.py`（加 backup_status callback 分流）
+
+**Commit 5 已完成文件**（3 新增，6 修改）：
+- 新增：`frontend/src/api/backup.ts`、`frontend/src/components/ops/OpsDrawer.vue`（共享 slide-in drawer 组件，Teleport + Transition + width sm/md/lg/xl/full）
+- 修改：`frontend/src/api/assets.ts`（+4 methods）、`frontend/src/composables/useStatusFormatters.ts`（+`getBackupStatusClass`）、`frontend/src/views/inspection/Items.vue`（SQL editor + verify modal + needsVerificationForEnable gate）、`frontend/src/views/inspection/Reports.vue`（+OpsDrawer evidence columns/rows/duration/sql_hash/connector/stderr + raw JSON toggle）、`frontend/src/views/backup/Jobs.vue`（filter bar + status badge via getBackupStatusClass + 历史/采集 modals）、`frontend/src/components/ops/index.ts`（export OpsDrawer）、`frontend/src/types/api.ts`（InspectionItem* 加 db_type_code，InstanceRow 加 port）
+
+**dbops repo 剩余工作**：
+- 端到端冒烟（手工插 inspection_item → 后端 → AWX → callback → Reports 看到 evidence → Jobs 看到 backup 状态）— 需 AWX 可达 + 至少一个目标 DB 可连通
 
 ## 环境确认
 
