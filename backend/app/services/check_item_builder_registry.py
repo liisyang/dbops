@@ -178,12 +178,47 @@ class CheckItemBuilderRegistry:
         return rows
 
     @classmethod
-    def resolve_check_codes_for_inspection_items(cls, item_codes: list[str]) -> list[str]:
+    def resolve_check_codes_for_inspection_items(
+        cls,
+        item_codes: list[str],
+        db: Session | None = None,
+    ) -> list[str]:
+        """Resolve the check_codes needed to dispatch the given item_codes.
+
+        Two sources are unioned:
+
+        1. Legacy mapping ``_checkcode_to_inspection_items`` — each
+           builder-check_code advertises the inspection-item codes it
+           knows how to dispatch implicitly.
+        2. Direct lookup on ``inspection_item.check_code`` for any item
+           not covered by (1). This is required for Phase 3.5
+           ``DB_READONLY_SQL_EXEC`` items, where each inspection item IS
+           the dispatch target (no implicit fan-out).
+
+        When ``db`` is None, source (2) is skipped and only legacy
+        mapping is consulted (preserves callers that don't pass a
+        session, e.g. unit tests).
+        """
         code_set = set(item_codes)
         check_codes: list[str] = []
+
         for check_code, mapped_items in cls._checkcode_to_inspection_items.items():
-            if code_set.intersection(mapped_items):
+            if mapped_items and code_set.intersection(mapped_items):
                 check_codes.append(check_code)
+
+        if db is not None and code_set:
+            # Local import to avoid circular import at module load time.
+            from app.models.dbops_assets import InspectionItem
+
+            rows = (
+                db.query(InspectionItem.check_code)
+                .filter(InspectionItem.item_code.in_(code_set))
+                .all()
+            )
+            for (cc,) in rows:
+                if cc:
+                    check_codes.append(cc)
+
         return sorted(set(check_codes))
 
     @staticmethod
@@ -733,6 +768,188 @@ class _DbRoleFactCollectionBuilder(_DbFactCollectionBuilderBase):
     _check_code = "DB_ROLE_FACT_COLLECTION"
 
 
+class _DbReadonlySqlExecBuilder(BaseCheckItemBuilder):
+    """Generate dispatch items for ``DB_READONLY_SQL_EXEC``.
+
+    For each db_instance asset, scan all enabled ``inspection_item`` rows
+    whose ``check_code`` is ``DB_READONLY_SQL_EXEC`` and whose
+    ``db_type_code`` matches the instance's db type (or is NULL — meaning
+    the item is db-agnostic). Each (instance, item) pair becomes one
+    dispatch item carrying the SQL payload under ``rule_config`` plus the
+    business fields (``item_code``, ``inspection_item_id``,
+    ``business_domain='inspection'``) at the top level so the AWX role
+    can echo them back into the callback without ambiguity.
+    """
+
+    _check_code = "DB_READONLY_SQL_EXEC"
+
+    def build(self, db, *, assets, options):
+        from app.models.dbops_assets import DbInstance, DbType, InspectionItem, Server
+        from app.services.credential_resolver_service import CredentialResolverService
+
+        timeout_seconds = int(options.get("timeout_seconds") or 30)
+        items: list[dict[str, Any]] = []
+
+        # Pull every enabled SQL item once; per-asset filter happens in-memory.
+        sql_items = (
+            db.query(InspectionItem)
+            .filter(
+                InspectionItem.check_code == self._check_code,
+                InspectionItem.enabled == True,  # noqa: E712
+            )
+            .all()
+        )
+
+        for asset in assets:
+            target_scope = asset.get("target_scope", "db_instance")
+            if target_scope != "db_instance":
+                continue
+
+            instance_id = int(asset["id"])
+            instance = db.query(DbInstance).filter(DbInstance.id == instance_id).first()
+            if not instance:
+                continue
+
+            server = db.query(Server).filter(Server.id == instance.server_id).first()
+            if not server:
+                continue
+
+            db_type = db.query(DbType).filter(DbType.id == instance.db_type_id).first()
+            db_type_code = (db_type.type_code or "").lower() if db_type else ""
+
+            target_host = str(server.ip_address)
+            target_port = int(instance.port or 0)
+            if target_port < 1 or target_port > 65535:
+                continue
+
+            # Phase 3.5: pick a default database_name per db type so the
+            # connector can open an initial session. SQL Server and PG
+            # need a real db name; Oracle uses service_name (TNS alias);
+            # MySQL uses 'mysql'. The connector falls back to its own
+            # default if database_name is empty, but supplying one here
+            # keeps the payload explicit.
+            db_defaults = {
+                "mssql": "master",
+                "sqlserver": "master",
+                "postgresql": "postgres",
+                "postgres": "postgres",
+                "mysql": "mysql",
+                "oracle": instance.service_name or "",
+            }
+            database_name = db_defaults.get(db_type_code, "master")
+
+            # Filter SQL items to those whose db_type_code matches (or is NULL).
+            for sql_item in sql_items:
+                if sql_item.db_type_code and (sql_item.db_type_code or "").lower() != db_type_code:
+                    continue
+
+                rule = sql_item.rule_config or {}
+                sql_text = rule.get("sql_text") or ""
+                if not sql_text:
+                    # Defensive: schema validation in
+                    # InspectionService._validate_sql_item_payload should
+                    # already reject rows without sql_text. Skip silently
+                    # so the rest of the batch can proceed.
+                    continue
+
+                item_timeout = int(rule.get("timeout_seconds") or timeout_seconds)
+                item_max_rows = int(rule.get("max_rows") or 100)
+
+                # Resolve credential via the standard resolver so the EE
+                # can authenticate to the target DB.
+                credential = CredentialResolverService.resolve_for_item(
+                    db,
+                    target_scope="db_instance",
+                    asset={"id": int(instance.id), "server_id": int(instance.server_id)},
+                    check_code=self._check_code,
+                )
+
+                if not credential:
+                    items.append(
+                        self._build_skipped_item(
+                            item={
+                                "item_key": (
+                                    f"db_instance:{instance_id}:{self._check_code}:"
+                                    f"{sql_item.item_code}:{target_host}:{target_port}"
+                                ),
+                                "check_code": self._check_code,
+                                "executor_type": "db_sql_readonly",
+                                "business_domain": "inspection",
+                                "target_scope": "db_instance",
+                                "db_instance_id": instance_id,
+                                "server_id": int(server.id),
+                                "asset_id": instance_id,
+                                "target_host": target_host,
+                                "target_port": target_port,
+                                "protocol": "tcp",
+                                "endpoint_type": "DB_SERVICE_PORT",
+                                "port_source": "db_instance_port",
+                                "is_required": True,
+                                "timeout_seconds": item_timeout,
+                                "asset_name": instance.instance_name or str(instance_id),
+                                "db_type_code": db_type_code,
+                                "database_name": db_defaults.get(db_type_code, "master"),
+                                "service_name": instance.service_name or "",
+                                "rule_config": rule,
+                                "inspection_item_id": int(sql_item.id),
+                                "item_code": sql_item.item_code,
+                                "severity": sql_item.severity or "warning",
+                            },
+                            reason="CREDENTIAL_MISSING",
+                        )
+                    )
+                    continue
+
+                item_key = (
+                    f"db_instance:{instance_id}:{self._check_code}:"
+                    f"{sql_item.item_code}:{target_host}:{target_port}"
+                )
+
+                database_name = db_defaults.get(db_type_code, "master")
+
+                items.append(
+                    {
+                        "item_key": item_key,
+                        "check_code": self._check_code,
+                        "executor_type": "db_sql_readonly",
+                        "business_domain": "inspection",
+                        "target_scope": "db_instance",
+                        "db_instance_id": instance_id,
+                        "server_id": int(server.id),
+                        "asset_id": instance_id,
+                        "target_host": target_host,
+                        "target_port": target_port,
+                        "protocol": "tcp",
+                        "endpoint_type": "DB_SERVICE_PORT",
+                        "port_source": "db_instance_port",
+                        "is_required": True,
+                        "timeout_seconds": item_timeout,
+                        "asset_name": instance.instance_name or str(instance_id),
+                        "db_type_code": db_type_code,
+                        "database_name": database_name,
+                        "service_name": instance.service_name or "",
+                        "rule_config": {
+                            "sql_text": sql_text,
+                            "timeout_seconds": item_timeout,
+                            "max_rows": item_max_rows,
+                            "result_status_column": rule.get("result_status_column") or "",
+                            "message_column": rule.get("message_column") or "",
+                            "severity": sql_item.severity or "warning",
+                        },
+                        "inspection_item_id": int(sql_item.id),
+                        "item_code": sql_item.item_code,
+                        "severity": sql_item.severity or "warning",
+                        "credential_profile_id": credential["credential_profile_id"],
+                        "credential_code": credential["profile_code"],
+                        "awx_credential_id": credential["awx_credential_id"],
+                        "credential_role": credential["binding_role"],
+                        "credential_type": credential["credential_type"],
+                    }
+                )
+
+        return items
+
+
 # Register built-in builders
 CheckItemBuilderRegistry.register("DB_PORT_REACHABILITY", _DbPortReachabilityBuilder())
 CheckItemBuilderRegistry.register("SSH_PORT_REACHABILITY", _SshPortReachabilityBuilder())
@@ -741,3 +958,4 @@ CheckItemBuilderRegistry.register("OS_BASIC_FACT_COLLECTION", _OsBasicFactCollec
 CheckItemBuilderRegistry.register("DB_BASIC_FACT_COLLECTION", _DbBasicFactCollectionBuilder())
 CheckItemBuilderRegistry.register("DB_VERSION_FACT_COLLECTION", _DbVersionFactCollectionBuilder())
 CheckItemBuilderRegistry.register("DB_ROLE_FACT_COLLECTION", _DbRoleFactCollectionBuilder())
+CheckItemBuilderRegistry.register("DB_READONLY_SQL_EXEC", _DbReadonlySqlExecBuilder())

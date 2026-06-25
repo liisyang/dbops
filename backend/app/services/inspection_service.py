@@ -482,7 +482,7 @@ class InspectionService:
         if missing:
             raise ValueError(f"巡检项不存在或未启用: {missing}")
 
-        check_codes = CheckItemBuilderRegistry.resolve_check_codes_for_inspection_items(requested_item_codes)
+        check_codes = CheckItemBuilderRegistry.resolve_check_codes_for_inspection_items(requested_item_codes, db=db)
         if not check_codes:
             raise ValueError("无法为所选巡检项解析 check_codes")
 
