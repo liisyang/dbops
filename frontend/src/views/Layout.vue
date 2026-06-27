@@ -121,14 +121,33 @@
 <script setup lang="ts">
 import { computed, ref, onMounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { loadAiCapabilities } from '@/api/ai'
 
 const route = useRoute()
 const router = useRouter()
 
 const username = ref(localStorage.getItem('username') || 'Admin')
 
-// Menu items
-const menuItems = [
+// Phase 3.6 C4：AI Copilot capabilities 灰度
+// 默认 false，onMounted 时异步拉取；拉取失败保留 false（隐藏 AI 入口）
+const chatEnabled = ref(false)
+
+interface MenuChild {
+  icon: string
+  label: string
+  path: string
+}
+
+interface MenuItem {
+  key: string
+  icon: string
+  label: string
+  path?: string
+  children?: MenuChild[]
+}
+
+// 基础菜单项（不含 AI Copilot，按 capabilities 动态追加）
+const baseMenuItems: MenuItem[] = [
   { key: 'dashboard', icon: 'dashboard', label: '仪表盘', path: '/dashboard' },
   {
     key: 'ops',
@@ -206,6 +225,13 @@ const menuItems = [
   { key: 'knowledge', icon: 'menu_book', label: '知识库', path: '/knowledge' },
 ]
 
+// AI Copilot 菜单项（chat_enabled=true 时追加到基础菜单尾部）
+const aiMenuItem: MenuItem = { key: 'ai', icon: 'auto_awesome', label: 'AI Copilot', path: '/ai/chat' }
+
+const menuItems = computed<MenuItem[]>(() =>
+  chatEnabled.value ? [...baseMenuItems, aiMenuItem] : baseMenuItems,
+)
+
 const openSubmenus = ref<Record<string, boolean>>({})
 
 const topTabs = [
@@ -218,6 +244,7 @@ const topTabs = [
   { key: 'audit', label: '审计与安全', path: '/audit/operations', match: ['/audit'] },
   { key: 'credentials', label: '凭证中心', path: '/credentials/profiles', match: ['/credentials'] },
   { key: 'knowledge', label: '知识库', path: '/knowledge', match: ['/knowledge'] },
+  { key: 'ai', label: 'AI Copilot', path: '/ai/chat', match: ['/ai'] },
 ] as const
 
 function isActive(path: string) {
@@ -229,7 +256,7 @@ function isTopTabActive(tab: { path: string; match: readonly string[] }) {
 }
 
 const activeSidebarKey = computed(() => {
-  const matched = menuItems.find((item) => {
+  const matched = menuItems.value.find((item) => {
     if (!item.children) return false
     return item.children.some((child) => route.path === child.path || route.path.startsWith(`${child.path}/`))
   })
@@ -246,8 +273,17 @@ function handleLogout() {
   router.push('/login')
 }
 
-onMounted(() => {
+onMounted(async () => {
   username.value = localStorage.getItem('username') || 'Admin'
+  // Phase 3.6 C4：拉取 AI capabilities 决定菜单灰度
+  // loadAiCapabilities 失败时内部已兜底为全 false，不会抛
+  try {
+    const caps = await loadAiCapabilities()
+    chatEnabled.value = caps.chat_enabled
+  } catch {
+    // 兜底：保留 false（不显示 AI 入口）
+    chatEnabled.value = false
+  }
 })
 
 watch(

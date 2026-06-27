@@ -257,6 +257,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/knowledge/Index.vue'),
         meta: { title: '知识库' }
       },
+      // AI Copilot（Phase 3.6 C4）：菜单按钮由 Layout.vue 按 capabilities.chat_enabled 灰度
+      {
+        path: 'ai/chat',
+        name: 'AiChat',
+        component: () => import('@/views/ai/Chat.vue'),
+        meta: { title: 'AI Copilot', parent: 'AI 助手' }
+      },
       {
         path: 'ui-preview/assets',
         name: 'UiPreviewAssets',
