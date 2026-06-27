@@ -357,6 +357,10 @@ class BatchRunCreateRequest(BaseModel):
     include_related_server: bool = True
     max_items_per_dispatch: int = Field(default=100, ge=1, le=500)
     timeout_seconds: int = Field(default=3, ge=1, le=60)
+    # Phase 3.5: inspection service forwards the user-selected
+    # InspectionItem.item_code subset so the DB_READONLY_SQL_EXEC builder
+    # does not dispatch every enabled inspection item to every instance.
+    inspection_item_codes: Optional[list[str]] = None
 
 
 class DispatchRunSummary(BaseModel):

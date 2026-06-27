@@ -14,6 +14,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import INET, JSONB
@@ -733,25 +734,40 @@ class InstanceBackupPolicy(DbopsAssetBase):
     policy_id = Column(BigInteger, ForeignKey("backup_policy.id"), nullable=False)
 
 
+# =========================================================================
+# Inspection v5.1 models (refactored 2026-06-25)
+# =========================================================================
+
+
 class InspectionItem(DbopsAssetBase):
+    """巡检项定义 — rule configuration for a single check."""
+
     __tablename__ = "inspection_item"
 
     id = Column(BigInteger, primary_key=True)
     item_code = Column(String(100), nullable=False, unique=True)
     item_name = Column(String(200), nullable=False)
     check_code = Column(String(100), nullable=False)
+    executor_type = Column(String(32))
     target_scope = Column(String(32), nullable=False, server_default=text("'db_instance'"))
+    db_type_code = Column(String(32))
+    category = Column(String(50))
+    inspection_type = Column(String(100))
+    item_kind = Column(String(32), nullable=False, server_default=text("'state'"))
+    evaluator_type = Column(String(32), nullable=False, server_default=text("'none'"))
     severity = Column(String(20), nullable=False, server_default=text("'warning'"))
+    weight = Column(Integer, nullable=False, server_default=text("10"))
+    rule_version = Column(String(20))
+    rule_config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    applicability = Column(JSONB)
     enabled = Column(Boolean, nullable=False, server_default=text("true"))
     description = Column(Text)
-    rule_config = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    # Phase 3.5: required when check_code == "DB_READONLY_SQL_EXEC" so the
-    # SQL safety service can choose the right allow-list of lead keywords.
-    db_type_code = Column(String(32))
+    sql_hash = Column(String(64))
+    rule_hash = Column(String(64))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
 
-    results = relationship("InspectionResult", back_populates="item")
+    task_items = relationship("InspectionTaskItem", back_populates="inspection_item")
 
     __table_args__ = (
         CheckConstraint(
@@ -759,15 +775,27 @@ class InspectionItem(DbopsAssetBase):
             name="chk_inspection_item_target_scope",
         ),
         CheckConstraint(
+            "item_kind IN ('information', 'metric', 'state', 'count', 'composite')",
+            name="chk_inspection_item_kind",
+        ),
+        CheckConstraint(
+            "evaluator_type IN ('none', 'range', 'equals', 'not_equals', 'in', 'not_in', 'boolean', 'status_column')",
+            name="chk_inspection_item_evaluator",
+        ),
+        CheckConstraint(
             "severity IN ('info', 'warning', 'critical')",
             name="chk_inspection_item_severity",
         ),
         Index("idx_inspection_item_enabled", "enabled"),
         Index("idx_inspection_item_check_code", "check_code"),
+        Index("idx_inspection_item_db_type", "db_type_code"),
+        Index("idx_inspection_item_category", "category"),
     )
 
 
 class InspectionSchedule(DbopsAssetBase):
+    """巡检调度配置."""
+
     __tablename__ = "inspection_schedule"
 
     id = Column(BigInteger, primary_key=True)
@@ -778,13 +806,11 @@ class InspectionSchedule(DbopsAssetBase):
     is_enabled = Column(Boolean, nullable=False, server_default=text("true"))
     next_run_at = Column(DateTime)
     last_run_at = Column(DateTime)
-    last_task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="SET NULL"))
+    last_task_id = Column(BigInteger)
     options = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
     created_by = Column(String(100))
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
-
-    tasks = relationship("InspectionTask", back_populates="schedule", foreign_keys="InspectionTask.schedule_id")
 
     __table_args__ = (
         Index("idx_inspection_schedule_enabled", "is_enabled"),
@@ -793,12 +819,14 @@ class InspectionSchedule(DbopsAssetBase):
 
 
 class InspectionTask(DbopsAssetBase):
+    """巡检任务 — 1:N task_items, 1:N task_targets, 1:1 report."""
+
     __tablename__ = "inspection_task"
 
     id = Column(BigInteger, primary_key=True)
     task_code = Column(String(100), nullable=False, unique=True)
     task_name = Column(String(200), nullable=False)
-    schedule_id = Column(BigInteger, ForeignKey("inspection_schedule.id", ondelete="SET NULL"))
+    schedule_id = Column(BigInteger)
     batch_run_id = Column(BigInteger, ForeignKey("collector_batch_run.id", ondelete="SET NULL"))
     run_type = Column(String(50), nullable=False, server_default=text("'inspection'"))
     target_scope = Column(String(32), nullable=False, server_default=text("'db_instance'"))
@@ -814,9 +842,11 @@ class InspectionTask(DbopsAssetBase):
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
 
-    schedule = relationship("InspectionSchedule", back_populates="tasks", foreign_keys=[schedule_id])
     batch_run = relationship("CollectorBatchRun", foreign_keys=[batch_run_id])
+    task_items = relationship("InspectionTaskItem", back_populates="task", cascade="all, delete-orphan")
+    task_targets = relationship("InspectionTaskTarget", back_populates="task", cascade="all, delete-orphan")
     results = relationship("InspectionResult", back_populates="task", cascade="all, delete-orphan")
+    report = relationship("InspectionReport", back_populates="task", uselist=False, cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint(
@@ -827,9 +857,119 @@ class InspectionTask(DbopsAssetBase):
             "status IN ('pending', 'running', 'success', 'partial_success', 'failed', 'cancelled')",
             name="chk_inspection_task_status",
         ),
-        Index("idx_inspection_task_status", "status"),
+        Index("idx_inspection_task_status_created", "status", created_at.desc()),
         Index("idx_inspection_task_batch_run", "batch_run_id"),
         Index("idx_inspection_task_created_at", created_at.desc()),
+    )
+
+
+class InspectionTaskItem(DbopsAssetBase):
+    """任务巡检项快照 — frozen copy of InspectionItem at task creation time."""
+
+    __tablename__ = "inspection_task_item"
+
+    id = Column(BigInteger, primary_key=True)
+    task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="CASCADE"), nullable=False)
+    inspection_item_id = Column(BigInteger, ForeignKey("inspection_item.id", ondelete="SET NULL"))
+    item_code = Column(String(100), nullable=False)
+    item_name = Column(String(200), nullable=False)
+    check_code = Column(String(100), nullable=False)
+    executor_type = Column(String(32))
+    target_scope = Column(String(32), nullable=False)
+    db_type_code = Column(String(32))
+    category = Column(String(50))
+    inspection_type = Column(String(100))
+    item_kind = Column(String(32), nullable=False)
+    evaluator_type = Column(String(32), nullable=False)
+    severity = Column(String(20), nullable=False, server_default=text("'warning'"))
+    weight = Column(Integer, nullable=False, server_default=text("10"))
+    rule_version = Column(String(20))
+    rule_config_snapshot = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
+    applicability_snapshot = Column(JSONB)
+    enabled_snapshot = Column(Boolean, nullable=False, server_default=text("true"))
+    description_snapshot = Column(Text)
+    sql_hash = Column(String(64))
+    rule_hash = Column(String(64))
+    check_order = Column(Integer, nullable=False, server_default=text("0"))
+    created_at = Column(DateTime, default=datetime.now)
+
+    task = relationship("InspectionTask", back_populates="task_items")
+    inspection_item = relationship("InspectionItem", back_populates="task_items")
+    results = relationship("InspectionResult", back_populates="task_item")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "item_code", name="uq_task_item"),
+        CheckConstraint(
+            "item_kind IN ('information', 'metric', 'state', 'count', 'composite')",
+            name="chk_task_item_kind",
+        ),
+        CheckConstraint(
+            "evaluator_type IN ('none', 'range', 'equals', 'not_equals', 'in', 'not_in', 'boolean', 'status_column')",
+            name="chk_task_item_evaluator",
+        ),
+        CheckConstraint(
+            "severity IN ('info', 'warning', 'critical')",
+            name="chk_task_item_severity",
+        ),
+        Index("idx_task_item_task", "task_id", "check_order", "id"),
+    )
+
+
+class InspectionTaskTarget(DbopsAssetBase):
+    """任务目标快照 — dual state machine (dispatch_status + execution_status)."""
+
+    __tablename__ = "inspection_task_target"
+
+    id = Column(BigInteger, primary_key=True)
+    task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="CASCADE"), nullable=False)
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    target_name_snapshot = Column(String(200))
+    host_snapshot = Column(String(100))
+    port_snapshot = Column(Integer)
+    db_type_code_snapshot = Column(String(32))
+    business_system_snapshot = Column(String(200))
+    site_snapshot = Column(String(200))
+    asset_snapshot = Column(JSONB, server_default=text("'{}'::jsonb"))
+    dispatch_status = Column(String(20), nullable=False, server_default=text("'pending'"))
+    skip_code = Column(String(50))
+    skip_reason = Column(String(500))
+    execution_status = Column(String(20), nullable=False, server_default=text("'pending'"))
+    collector_run_id = Column(BigInteger)
+    attempt_no = Column(Integer, nullable=False, server_default=text("1"))
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime)
+    last_callback_at = Column(DateTime)
+    error_code = Column(String(50))
+    error_message = Column(Text)
+    created_at = Column(DateTime, default=datetime.now)
+
+    task = relationship("InspectionTask", back_populates="task_targets")
+    results = relationship("InspectionResult", back_populates="task_target")
+    instance_reports = relationship("InspectionInstanceReport", back_populates="task_target")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "target_type", "target_id", name="uq_task_target"),
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance')",
+            name="chk_task_target_type",
+        ),
+        CheckConstraint(
+            "dispatch_status IN ('pending', 'dispatched', 'dispatch_failed', 'skipped')",
+            name="chk_dispatch_status",
+        ),
+        CheckConstraint(
+            "execution_status IN ('pending', 'running', 'success', 'partial_success', 'failed', 'cancelled')",
+            name="chk_execution_status",
+        ),
+        CheckConstraint(
+            "skip_code IN ('NOT_APPLICABLE', 'POLICY_EXCLUDED', 'ASSET_DISABLED', 'NO_CREDENTIAL', 'USER_CANCELLED', 'DISPATCH_REJECTED', 'UNKNOWN')",
+            name="chk_skip_code",
+        ),
+        Index("idx_task_target_task_execution", "task_id", "execution_status"),
+        Index("idx_task_target_filter_db_type", "task_id", "db_type_code_snapshot"),
+        Index("idx_task_target_filter_business", "task_id", "business_system_snapshot"),
+        Index("idx_task_target_filter_site", "task_id", "site_snapshot"),
     )
 
 
@@ -878,49 +1018,144 @@ class BackupStatusSnapshot(DbopsAssetBase):
 
 
 class InspectionResult(DbopsAssetBase):
+    """巡检结果 — one row = task_item × task_target. UNIQUE(task_id, task_item_id, task_target_id)."""
+
     __tablename__ = "inspection_result"
 
     id = Column(BigInteger, primary_key=True)
     task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="CASCADE"), nullable=False)
-    item_id = Column(BigInteger, ForeignKey("inspection_item.id", ondelete="SET NULL"))
-    batch_run_id = Column(BigInteger, ForeignKey("collector_batch_run.id", ondelete="SET NULL"))
-    collector_run_id = Column(BigInteger, ForeignKey("collector_run.id", ondelete="SET NULL"))
-    collector_run_item_id = Column(BigInteger, ForeignKey("collector_run_item.id", ondelete="SET NULL"))
+    task_item_id = Column(BigInteger, ForeignKey("inspection_task_item.id", ondelete="CASCADE"), nullable=False)
+    task_target_id = Column(BigInteger, ForeignKey("inspection_task_target.id", ondelete="CASCADE"), nullable=False)
+    collector_run_id = Column(BigInteger)
+    collector_run_item_id = Column(BigInteger)
     target_type = Column(String(32), nullable=False)
     target_id = Column(BigInteger, nullable=False)
     result_code = Column(String(100), nullable=False)
-    result_status = Column(String(32), nullable=False)
-    severity = Column(String(20), nullable=False, server_default=text("'warning'"))
+    execution_status = Column(String(32), nullable=False, server_default=text("'success'"))
+    evaluation_status = Column(String(32), nullable=False, server_default=text("'not_evaluated'"))
     message = Column(Text)
     evidence = Column(JSONB, nullable=False, server_default=text("'{}'::jsonb"))
-    detected_at = Column(DateTime, nullable=False, default=datetime.now)
+    attempt_no = Column(Integer, nullable=False, server_default=text("1"))
+    received_at = Column(DateTime, nullable=False, server_default=func.now())
+    detected_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_at = Column(DateTime, default=datetime.now)
+
+    task = relationship("InspectionTask", back_populates="results")
+    task_item = relationship("InspectionTaskItem", back_populates="results")
+    task_target = relationship("InspectionTaskTarget", back_populates="results")
+
+    __table_args__ = (
+        UniqueConstraint("task_id", "task_item_id", "task_target_id", name="uq_result"),
+        CheckConstraint(
+            "target_type IN ('server', 'db_instance')",
+            name="chk_result_target_type",
+        ),
+        CheckConstraint(
+            "execution_status IN ('success', 'failed', 'timeout', 'skipped', 'permission_denied', 'connection_failed', 'parse_failed')",
+            name="chk_execution_status_result",
+        ),
+        CheckConstraint(
+            "evaluation_status IN ('normal', 'warning', 'critical', 'unknown', 'not_evaluated')",
+            name="chk_evaluation_status",
+        ),
+        CheckConstraint("attempt_no >= 0", name="chk_attempt_no_ge_0"),
+        Index("idx_result_task_target", "task_id", "task_target_id"),
+        Index("idx_result_task_item", "task_id", "task_item_id"),
+    )
+
+
+class InspectionReport(DbopsAssetBase):
+    """巡检报告 — 1:1 with task. Aggregated from instance reports."""
+
+    __tablename__ = "inspection_report"
+
+    id = Column(BigInteger, primary_key=True)
+    report_code = Column(String(100), nullable=False, unique=True)
+    task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="CASCADE"), nullable=False, unique=True)
+    report_status = Column(String(32), nullable=False, server_default=text("'generating'"))
+    health_level = Column(String(32))
+    health_score = Column(Numeric(5, 2))
+    total_target_count = Column(Integer, nullable=False, server_default=text("0"))
+    healthy_count = Column(Integer, nullable=False, server_default=text("0"))
+    warning_count = Column(Integer, nullable=False, server_default=text("0"))
+    critical_count = Column(Integer, nullable=False, server_default=text("0"))
+    unknown_count = Column(Integer, nullable=False, server_default=text("0"))
+    not_assessed_count = Column(Integer, nullable=False, server_default=text("0"))
+    normal_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    warning_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    critical_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    unknown_item_count = Column(Integer, nullable=False, server_default=text("0"))
+    collection_failed_count = Column(Integer, nullable=False, server_default=text("0"))
+    missing_result_count = Column(Integer, nullable=False, server_default=text("0"))
+    summary = Column(JSONB, server_default=text("'{}'::jsonb"))
+    rule_engine_version = Column(String(50))
+    source_data_hash = Column(String(64))
+    source_result_count = Column(Integer, nullable=False, server_default=text("0"))
+    generated_reason = Column(String(32), nullable=False, server_default=text("'auto'"))
+    generated_by = Column(String(100))
+    generated_at = Column(DateTime)
     created_at = Column(DateTime, default=datetime.now)
     updated_at = Column(DateTime, default=datetime.now)
 
-    task = relationship("InspectionTask", back_populates="results")
-    item = relationship("InspectionItem", back_populates="results")
-    batch_run = relationship("CollectorBatchRun", foreign_keys=[batch_run_id])
-    collector_run = relationship("CollectorRun", foreign_keys=[collector_run_id])
-    collector_run_item = relationship("CollectorRunItem", foreign_keys=[collector_run_item_id])
+    task = relationship("InspectionTask", back_populates="report")
+    instance_reports = relationship("InspectionInstanceReport", back_populates="report", cascade="all, delete-orphan")
 
     __table_args__ = (
         CheckConstraint(
+            "report_status IN ('generating', 'ready', 'partial', 'failed')",
+            name="chk_report_status",
+        ),
+        CheckConstraint(
+            "health_level IN ('healthy', 'warning', 'critical', 'unknown', 'not_assessed')",
+            name="chk_health_level",
+        ),
+        CheckConstraint(
+            "generated_reason IN ('auto', 'manual', 'regenerate')",
+            name="chk_generated_reason",
+        ),
+        Index("idx_report_status_generated", "report_status", generated_at.desc()),
+    )
+
+
+class InspectionInstanceReport(DbopsAssetBase):
+    """实例维度报告 — N:1 with report. Per-target aggregation."""
+
+    __tablename__ = "inspection_instance_report"
+
+    id = Column(BigInteger, primary_key=True)
+    report_id = Column(BigInteger, ForeignKey("inspection_report.id", ondelete="CASCADE"), nullable=False)
+    task_id = Column(BigInteger, ForeignKey("inspection_task.id", ondelete="CASCADE"), nullable=False)
+    task_target_id = Column(BigInteger, ForeignKey("inspection_task_target.id", ondelete="SET NULL"), nullable=False)
+    target_type = Column(String(32), nullable=False)
+    target_id = Column(BigInteger, nullable=False)
+    health_level = Column(String(32))
+    health_score = Column(Numeric(5, 2))
+    normal_count = Column(Integer, nullable=False, server_default=text("0"))
+    warning_count = Column(Integer, nullable=False, server_default=text("0"))
+    critical_count = Column(Integer, nullable=False, server_default=text("0"))
+    unknown_count = Column(Integer, nullable=False, server_default=text("0"))
+    not_evaluated_count = Column(Integer, nullable=False, server_default=text("0"))
+    collection_failed_count = Column(Integer, nullable=False, server_default=text("0"))
+    missing_result_count = Column(Integer, nullable=False, server_default=text("0"))
+    summary = Column(JSONB, server_default=text("'{}'::jsonb"))
+    generated_at = Column(DateTime)
+    created_at = Column(DateTime, default=datetime.now)
+
+    report = relationship("InspectionReport", back_populates="instance_reports")
+    task = relationship("InspectionTask", foreign_keys=[task_id])
+    task_target = relationship("InspectionTaskTarget", back_populates="instance_reports")
+
+    __table_args__ = (
+        UniqueConstraint("report_id", "task_target_id", name="uq_instance_report"),
+        CheckConstraint(
             "target_type IN ('server', 'db_instance')",
-            name="chk_inspection_result_target_type",
+            name="chk_instance_target_type",
         ),
         CheckConstraint(
-            "result_status IN ('normal', 'abnormal', 'warning', 'unknown')",
-            name="chk_inspection_result_status",
+            "health_level IN ('healthy', 'warning', 'critical', 'unknown', 'not_assessed')",
+            name="chk_instance_health_level",
         ),
-        CheckConstraint(
-            "severity IN ('info', 'warning', 'critical')",
-            name="chk_inspection_result_severity",
-        ),
-        Index("idx_inspection_result_task", "task_id"),
-        Index("idx_inspection_result_item", "item_id"),
-        Index("idx_inspection_result_target", "target_type", "target_id"),
-        Index("idx_inspection_result_status", "result_status"),
-        Index("idx_inspection_result_detected_at", detected_at.desc()),
+        Index("idx_instance_report_report_health", "report_id", "health_level", "health_score"),
     )
 
 
@@ -1329,7 +1564,11 @@ __all__ = [
     "InspectionItem",
     "InspectionSchedule",
     "InspectionTask",
+    "InspectionTaskItem",
+    "InspectionTaskTarget",
     "InspectionResult",
+    "InspectionReport",
+    "InspectionInstanceReport",
     "BizScoreRule",
     "BizScoreResult",
     "BizScoreResultDetail",

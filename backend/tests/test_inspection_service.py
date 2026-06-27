@@ -189,8 +189,10 @@ def test_list_tasks_syncs_status_from_batch():
 
 
 def test_save_callback_results_from_explicit_payload():
+    from app.models.dbops_assets import InspectionTaskItem, InspectionTaskTarget
     db = _FakeSession()
     task = InspectionTask(
+        id=1,
         task_code="INSP-EXPLICIT",
         task_name="显式回调",
         run_type="inspection",
@@ -203,14 +205,27 @@ def test_save_callback_results_from_explicit_payload():
         request_payload={},
         created_at=datetime.utcnow(),
     )
-    item = InspectionItem(
+    task_item = InspectionTaskItem(
+        id=1,
+        task_id=1,
         item_code="CONNECTIVITY_PORT_REACHABLE",
         item_name="端口连通性可达",
         check_code="DB_PORT_REACHABILITY",
         target_scope="db_instance",
+        item_kind="state",
+        evaluator_type="status_column",
         severity="critical",
-        enabled=True,
-        created_at=datetime.utcnow(),
+        rule_config_snapshot={"evaluator": {"type": "status_column"}},
+        check_order=0,
+    )
+    task_target = InspectionTaskTarget(
+        id=1,
+        task_id=1,
+        target_type="db_instance",
+        target_id=963,
+        target_name_snapshot="test-instance",
+        dispatch_status="dispatched",
+        execution_status="running",
     )
     run = CollectorRun(
         id=100,
@@ -220,7 +235,7 @@ def test_save_callback_results_from_explicit_payload():
         batch_run_id=5,
         created_at=datetime.utcnow(),
     )
-    db.seed(task, item, run)
+    db.seed(task, task_item, task_target, run)
 
     explicit = [
         CollectorInspectionCallbackItem(
@@ -230,7 +245,7 @@ def test_save_callback_results_from_explicit_payload():
             asset_id=963,
             severity="critical",
             message="PORT_UNREACHABLE",
-            evidence={"reason": "timeout"},
+            evidence={"reason": "timeout", "raw_result": {"status": "failed", "error_code": "TIMEOUT"}},
         )
     ]
     saved = InspectionService.save_callback_results(
@@ -242,13 +257,15 @@ def test_save_callback_results_from_explicit_payload():
     assert saved == 1
     rows = db.store.get(InspectionResult, [])
     assert len(rows) == 1
-    assert rows[0].result_status == "abnormal"
+    assert rows[0].execution_status == "failed"
     assert rows[0].target_id == 963
 
 
 def test_save_callback_results_derived_from_callback_items():
+    from app.models.dbops_assets import InspectionTaskItem, InspectionTaskTarget
     db = _FakeSession()
     task = InspectionTask(
+        id=1,
         task_code="INSP-DERIVED",
         task_name="派生回调",
         run_type="inspection",
@@ -261,28 +278,39 @@ def test_save_callback_results_derived_from_callback_items():
         request_payload={},
         created_at=datetime.utcnow(),
     )
-    db.seed(
-        task,
-        InspectionItem(
+    task_items = [
+        InspectionTaskItem(
+            id=1, task_id=1,
             item_code="FACT_COLLECTION_FAILED",
             item_name="事实采集失败",
             check_code="DB_BASIC_FACT_COLLECTION",
             target_scope="db_instance",
+            item_kind="state",
+            evaluator_type="status_column",
             severity="critical",
-            enabled=True,
-            created_at=datetime.utcnow(),
+            rule_config_snapshot={"evaluator": {"type": "status_column"}},
+            check_order=0,
         ),
-        InspectionItem(
+        InspectionTaskItem(
+            id=2, task_id=1,
             item_code="CREDENTIAL_AUTH_FAILED",
             item_name="凭证认证失败",
             check_code="DB_BASIC_FACT_COLLECTION",
             target_scope="db_instance",
+            item_kind="state",
+            evaluator_type="status_column",
             severity="critical",
-            enabled=True,
-            created_at=datetime.utcnow(),
+            rule_config_snapshot={"evaluator": {"type": "status_column"}},
+            check_order=1,
         ),
+    ]
+    task_target = InspectionTaskTarget(
+        id=1, task_id=1,
+        target_type="db_instance", target_id=1,
+        target_name_snapshot="test-instance",
+        dispatch_status="dispatched",
+        execution_status="running",
     )
-
     run = CollectorRun(
         id=200,
         run_id="RUN-200",
@@ -304,7 +332,7 @@ def test_save_callback_results_derived_from_callback_items():
         status="failed",
         created_at=datetime.utcnow(),
     )
-    db.seed(run, run_item)
+    db.seed(task, *task_items, task_target, run, run_item)
 
     callback_items = [
         CollectorCallbackItem(
@@ -317,7 +345,7 @@ def test_save_callback_results_derived_from_callback_items():
             endpoint_type="DB_SERVICE_PORT",
             status="failed",
             message="ORA-01017",
-            raw_result={"error_code": "AUTHENTICATION_FAILED"},
+            raw_result={"error_code": "AUTHENTICATION_FAILED", "status": "failed"},
         )
     ]
     saved = InspectionService.save_callback_results(
@@ -325,10 +353,11 @@ def test_save_callback_results_derived_from_callback_items():
         run=run,
         callback_items=callback_items,
     )
-    assert saved >= 2
+    assert saved >= 1
     rows = db.store.get(InspectionResult, [])
-    statuses = sorted({row.result_status for row in rows})
-    assert "abnormal" in statuses
+    # v5.1: execution_status reflects collector status
+    statuses = sorted({row.execution_status for row in rows})
+    assert "failed" in statuses
 
 
 def test_registry_contains_phase34_inspection_items():
@@ -341,3 +370,162 @@ def test_registry_contains_phase34_inspection_items():
     assert "FACT_COLLECTION_FAILED" in codes
     assert "CREDENTIAL_AUTH_FAILED" in codes
     assert "SERVER_OS_COLLECTED" in codes
+
+
+def test_get_instance_report_results_filters_by_db_type():
+    """Bug5 regression (2026-06-26): Oracle instances must not see MSSQL_*
+    results and vice versa, even when the task was created with "all DB
+    types + all inspection items". Mirrors what InspectionService does at
+    aggregation time via _is_task_item_applicable.
+    """
+    from app.models.dbops_assets import (
+        InspectionReport,
+        InspectionResult,
+        InspectionTaskItem,
+        InspectionTaskTarget,
+    )
+    db = _FakeSession()
+    task = InspectionTask(
+        id=15,
+        task_code="INSP-CROSS-DB-ISOLATION",
+        task_name="bug5 fixture",
+        run_type="inspection",
+        target_scope="db_instance",
+        status="ready",
+        batch_run_id=1,
+        check_codes=[],
+        item_codes=[],
+        asset_ids=[],
+        request_payload={},
+        created_at=datetime.utcnow(),
+    )
+    ora_items = [
+        InspectionTaskItem(
+            id=100 + i,
+            task_id=15,
+            item_code=f"ORA_ITEM_{i}",
+            item_name=f"oracle item {i}",
+            check_code="ORA_PROBE",
+            target_scope="db_instance",
+            db_type_code="oracle",
+            item_kind="information",
+            evaluator_type="none",
+            severity="info",
+            rule_config_snapshot={"evaluator": {"type": "none"}},
+            check_order=i,
+        )
+        for i in range(5)
+    ]
+    mssql_items = [
+        InspectionTaskItem(
+            id=200 + i,
+            task_id=15,
+            item_code=f"MSSQL_ITEM_{i}",
+            item_name=f"mssql item {i}",
+            check_code="MSSQL_PROBE",
+            target_scope="db_instance",
+            db_type_code="mssql",
+            item_kind="information",
+            evaluator_type="none",
+            severity="info",
+            rule_config_snapshot={"evaluator": {"type": "none"}},
+            check_order=10 + i,
+        )
+        for i in range(5)
+    ]
+    ora_target = InspectionTaskTarget(
+        id=24,
+        task_id=15,
+        target_type="db_instance",
+        target_id=961,
+        target_name_snapshot="oracle-target",
+        db_type_code_snapshot="oracle",
+        dispatch_status="dispatched",
+        execution_status="success",
+    )
+    mssql_target = InspectionTaskTarget(
+        id=25,
+        task_id=15,
+        target_type="db_instance",
+        target_id=963,
+        target_name_snapshot="mssql-target",
+        db_type_code_snapshot="mssql",
+        dispatch_status="dispatched",
+        execution_status="success",
+    )
+    report = InspectionReport(id=11, task_id=15, report_code="RPT-FIXTURE", report_status="ready")
+    db.seed(task, *ora_items, *mssql_items, ora_target, mssql_target, report)
+
+    # Real cross-dispatch scenario: Oracle items land on the MSSQL target
+    # as skipped; MSSQL items land on the Oracle target as success.
+    results: list[InspectionResult] = []
+    for i, ti in enumerate(ora_items):
+        results.append(InspectionResult(
+            id=1000 + i,
+            task_id=15,
+            task_item_id=int(ti.id),
+            task_target_id=int(mssql_target.id),
+            target_type="db_instance",
+            target_id=int(mssql_target.target_id),
+            result_code=ti.item_code,
+            execution_status="skipped",
+            evaluation_status="not_evaluated",
+            message="cross-dispatch skipped",
+            attempt_no=1,
+        ))
+        results.append(InspectionResult(
+            id=1100 + i,
+            task_id=15,
+            task_item_id=int(ti.id),
+            task_target_id=int(ora_target.id),
+            target_type="db_instance",
+            target_id=int(ora_target.target_id),
+            result_code=ti.item_code,
+            execution_status="success",
+            evaluation_status="normal",
+            message="oracle ran",
+            attempt_no=1,
+        ))
+    for i, ti in enumerate(mssql_items):
+        results.append(InspectionResult(
+            id=2000 + i,
+            task_id=15,
+            task_item_id=int(ti.id),
+            task_target_id=int(ora_target.id),
+            target_type="db_instance",
+            target_id=int(ora_target.target_id),
+            result_code=ti.item_code,
+            execution_status="success",
+            evaluation_status="not_evaluated",
+            message="cross-dispatch succeeded",
+            attempt_no=1,
+        ))
+        results.append(InspectionResult(
+            id=2100 + i,
+            task_id=15,
+            task_item_id=int(ti.id),
+            task_target_id=int(mssql_target.id),
+            target_type="db_instance",
+            target_id=int(mssql_target.target_id),
+            result_code=ti.item_code,
+            execution_status="success",
+            evaluation_status="normal",
+            message="mssql ran",
+            attempt_no=1,
+        ))
+    for r in results:
+        db.seed(r)
+
+    ora_results = InspectionService.get_instance_report_results(
+        db, report_id=11, target_type="db_instance", target_id=961,
+    )
+    assert len(ora_results) == 5, f"Oracle target should see exactly 5 rows, got {len(ora_results)}"
+    assert all(r["result_code"].startswith("ORA_ITEM_") for r in ora_results)
+    assert all(not r["result_code"].startswith("MSSQL_ITEM_") for r in ora_results)
+
+    mssql_results = InspectionService.get_instance_report_results(
+        db, report_id=11, target_type="db_instance", target_id=963,
+    )
+    assert len(mssql_results) == 5, f"MSSQL target should see exactly 5 rows, got {len(mssql_results)}"
+    assert all(r["result_code"].startswith("MSSQL_ITEM_") for r in mssql_results)
+    assert all(not r["result_code"].startswith("ORA_ITEM_") for r in mssql_results)
