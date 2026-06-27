@@ -160,7 +160,7 @@
 | GET | `/api/v1/collector/batch-runs/{batch_run_id}/items` | `api/collector.py` | BatchCollectorService | JWT | 已实现（Phase 3.2） | `backend/app/api/collector.py` |
 | POST | `/api/v1/collector/batch-runs/{batch_run_id}/retry-failed` | `api/collector.py` | BatchCollectorService | JWT | 已实现（Phase 3.2） | `backend/app/api/collector.py` |
 
-### 2.15 巡检中心（Phase 3.4, prefix: `/api/v1/inspection`）
+### 2.15 巡检中心（Phase 3.5, prefix: `/api/v1/inspection`）
 
 | 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
 |---|---|---|---|---|---|---|
@@ -172,6 +172,24 @@
 | GET | `/api/v1/inspection/tasks/{task_id}` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
 | GET | `/api/v1/inspection/results` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.4） | `backend/app/api/inspection.py` |
 
+#### 2.15.A Phase 3.5 新增端点（动态 SQL / 报告 / 导出）
+
+| 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
+|---|---|---|---|---|---|---|
+| GET | `/api/v1/inspection/types` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:49` |
+| POST | `/api/v1/inspection/items/batch-disable` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:105` |
+| POST | `/api/v1/inspection/items/validate-sql` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:118` |
+| POST | `/api/v1/inspection/items/verify-sql` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:131` |
+| GET | `/api/v1/inspection/items/verify-sql/{verify_run_id}` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:157` |
+| GET | `/api/v1/inspection/reports` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:234` |
+| GET | `/api/v1/inspection/reports/task/{task_id}` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:250` |
+| GET | `/api/v1/inspection/reports/{report_id}` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:262` |
+| GET | `/api/v1/inspection/reports/{report_id}/instances` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:274` |
+| GET | `/api/v1/inspection/reports/{report_id}/instances/{target_type}/{target_id}/results` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5，含 bug5 db_type 隔离） | `backend/app/api/inspection.py:286` |
+| POST | `/api/v1/inspection/reports/{report_id}/regenerate` | `api/inspection.py` | InspectionService | JWT | 已实现（Phase 3.5） | `backend/app/api/inspection.py:302` |
+| POST | `/api/v1/inspection/reports/{report_id}/export` | `api/inspection.py` | ReportExportService | JWT | 已实现（Phase 3.5，DOCX 导出） | `backend/app/api/inspection.py:331` + `backend/app/services/report_export_service.py` |
+| POST | `/api/v1/inspection/reports/{report_id}/instances/{target_type}/{target_id}/export` | `api/inspection.py` | ReportExportService | JWT | 已实现（Phase 3.5，单实例 DOCX 导出） | `backend/app/api/inspection.py:382` + `backend/app/services/report_export_service.py` |
+
 > `POST /api/v1/collector/callback/` 兼容扩展 `inspection_results[]`，用于显式回写巡检结果；未传时由后端根据 callback `items[]` 派生基础巡检结论。
 
 #### 2.15.1 关键字段
@@ -179,6 +197,23 @@
 | 接口 | 字段 | 类型 | 默认 | 含义 | 代码依据 |
 |---|---|---|---|---|---|
 | `POST /api/v1/inspection/tasks` | `confirm_fleet_scan` | bool | `false` | 任务请求里 `asset_ids` 和 `db_type_code` 都为空时，后端会回退到"全量扫描该 scope 下所有资产"；调用方必须显式置 `true` 二次确认，否则后端 raise 422。用于防止误触发大规模 dispatch。 | `backend/app/schemas/inspection.py:58`、`backend/app/services/inspection_service.py` (create_task guard) |
+| `GET /api/v1/inspection/reports/{id}/instances/{type}/{id}/results` | `db_type` 过滤 | enum | None | 单实例结果列表按 `task_item.db_type` + `task_target.db_type` 双重过滤；bug5 修复后 Oracle/MSSQL 互不污染。 | `backend/app/services/inspection_service.py` (get_instance_report_results) |
+| `POST /api/v1/inspection/reports/{id}/export` | DOCX 报表 | bytes | - | 按 report 维度导出整份 DOCX；评估引擎 `inspection_evaluator_service` 注入结论，DOCX 构造在 `report_export_service.build_report_docx`。 | `backend/app/services/report_export_service.py:build_report_docx` |
+
+#### 2.15.B 巡检评估引擎
+
+| 组件 | 入口 | 状态 | 代码依据 |
+|---|---|---|---|
+| InspectionEvaluatorService | `backend/app/services/inspection_evaluator_service.py` | 已实现（Phase 3.5） | baseline / dynamic / custom 评估策略 + result summary 落库 |
+
+#### 2.15.C 前端新增视图
+
+| 视图 | 路由 | 状态 | 代码依据 |
+|---|---|---|---|
+| InstanceReport | `/inspection/reports/:reportId/instances/:targetType/:targetId` | 已实现（Phase 3.5） | `frontend/src/views/inspection/InstanceReport.vue` + `frontend/src/router/index.ts` |
+| ReportDetail | `/inspection/reports/:reportId` | 已实现（Phase 3.5） | `frontend/src/views/inspection/ReportDetail.vue` + `frontend/src/router/index.ts` |
+| ResultEvidencePanel | 嵌入 ReportDetail / InstanceReport | 已实现（Phase 3.5） | `frontend/src/views/inspection/ResultEvidencePanel.vue` |
+| OpsInstancePicker | 通用实例选择器组件 | 已实现（Phase 3.5） | `frontend/src/components/ops/OpsInstancePicker.vue` + `frontend/src/components/ops/index.ts` |
 
 ## 3. 前端 API 封装清单
 

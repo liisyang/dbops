@@ -1201,3 +1201,84 @@ GROUP BY table_name;
 
 - **状态**：✅ 已完成 A 路径 DROP 治理（13 字段分 3 批全部清空）；`inspection_item` 11 列 + `inspection_result` 16 列，与 ORM 100% 对齐；`docs/db/schema-snapshot.md` 7.20 / 7.22 / 16 节已同步移除"漏记字段"标注。
 
+
+## 6. Phase 3.5 DDL（v5.1 重构 + v5.2 inspection_type 分类）
+
+### 6.1 治理背景
+
+Phase 3.5 巡检中心重构 + 动态 SQL 调度上线，触发 2 次结构变更：
+
+1. **v5.1** — 巡检表整体重构（8 表 DROP + 重建），引入 evidence 存储 / report / instance_report / schedule / task_target 维度。
+2. **v5.2** — 增量 ALTER，给 `inspection_item` + `inspection_task_item` 加 `inspection_type` 业务分组标签。
+
+两段 DDL 均落在 dev/test 库（10.134.185.85:5432/dbops）验证通过；v5.1 已在 SQL Server id=964 跑通 live 链路（inspection_result 落库带 evidence.columns/rows/sql_hash）。
+
+### 6.2 v5.1 巡检表重构 DDL
+
+**来源**：`backend/db/dbops_inspection_v5_1.sql`（369 行）
+**配套**：`docs/db/schema-snapshot.md` §7（待 §3.5 闭环 PR 合并后同步刷新）
+
+**变更范围**（child → parent 顺序 DROP，无 CASCADE）：
+
+| 顺序 | 表 | 动作 |
+|---|---|---|
+| 1 | `inspection_result` | DROP + CREATE（新增 evidence jsonb、result_summary） |
+| 2 | `inspection_instance_report` | DROP + CREATE（实例级巡检报告） |
+| 3 | `inspection_report` | DROP + CREATE（任务级聚合报告） |
+| 4 | `inspection_task_item` | DROP + CREATE（任务-巡检项快照） |
+| 5 | `inspection_task_target` | DROP + CREATE（任务-巡检目标快照） |
+| 6 | `inspection_schedule` | DROP + CREATE（巡检调度） |
+| 7 | `inspection_task` | DROP + CREATE（巡检任务） |
+| 8 | `inspection_item` | DROP + CREATE（巡检项 + 评估规则） |
+
+**v5.1 新增关键字段**（按表）：
+
+- `inspection_item`：item_kind / evaluator_type / severity / weight / rule_version / rule_config jsonb / inspection_type 业务标签
+- `inspection_task` / `inspection_task_target` / `inspection_task_item`：任务/目标/项三表快照
+- `inspection_report` / `inspection_instance_report`：报告两级聚合
+- `inspection_result`：evidence jsonb（columns/rows/sql_hash） + result_summary jsonb
+
+**执行风险**：
+
+- 必须在 prod 应用前 dry-run + 全量备份；脚本内含 BEGIN/COMMIT，**禁止先 DROP 再单独 COMMIT**
+- 数据迁移：v5.1 是 DROP + 重建，**历史 inspection 数据不保留**；如需保留历史，由 DBA 单独评估导出方案
+
+### 6.3 v5.2 inspection_type 分类 DDL
+
+**来源**：`backend/db/dbops_inspection_v5_2_inspection_type.sql`（36 行）
+**配套回滚**：`backend/db/rollback_inspection_v5_2_inspection_type.sql`（13 行）
+
+**变更范围**（增量 ALTER，**非破坏性**）：
+
+```sql
+-- inspection_item
+ALTER TABLE dbops.inspection_item
+    ADD COLUMN IF NOT EXISTS inspection_type VARCHAR(100);
+CREATE INDEX IF NOT EXISTS idx_inspection_item_inspection_type
+    ON dbops.inspection_item(inspection_type) WHERE inspection_type IS NOT NULL;
+
+-- inspection_task_item（任务创建时从 inspection_item 快照）
+ALTER TABLE dbops.inspection_task_item
+    ADD COLUMN IF NOT EXISTS inspection_type VARCHAR(100);
+```
+
+**回滚**（如需）：
+
+```sql
+BEGIN;
+DROP INDEX IF EXISTS dbops.idx_inspection_item_inspection_type;
+ALTER TABLE dbops.inspection_item DROP COLUMN IF EXISTS inspection_type;
+ALTER TABLE dbops.inspection_task_item DROP COLUMN IF EXISTS inspection_type;
+COMMIT;
+```
+
+**典型值**：`Oracle基础巡检` / `SQL Server基础巡检`；可为空（未分类项显示为「未分类」）。
+
+### 6.4 治理决策记录
+
+| 时间 | 决策点 | 选择 | 理由 |
+|---|---|---|---|
+| 2026-06-25 | v5.1 8 表 DROP+重建 | **保留路径**（保留 v5.1 之前所有表） | Phase 3.5 巡检中心重构需要；历史数据由导出方案单独处理（v5.1 之前 dev 库无业务数据） |
+| 2026-06-26 | v5.2 inspection_type 业务标签 | **B 路径：新增可空列 + 业务回填** | 业务分组需求（Oracle 基础 / SQL Server 基础）；不破坏已有数据；回填脚本可后续追加 |
+
+- **状态**：✅ v5.1 + v5.2 已在 test 库（10.134.185.85:5432/dbops）应用并验证；v5.1 已在 SQL Server id=964 跑通 live 链路；prod 应用待 DBA 现场评估。

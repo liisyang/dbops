@@ -219,3 +219,37 @@ curl -s http://127.0.0.1:60801/openapi.json \
 - PostgreSQL 连接信息（`10.134.185.85:5432`）是否为当前测试库
 - 生产环境 `SECRET_KEY` 是否已从默认值 `dev-secret-key-change-in-production` 变更
 - 端口 61088/50801 是其他用户(feng)的实例，排查时注意区分
+
+## 7. Phase 3.5 巡检中心 排障入口
+
+### 7.1 动态 SQL 调度
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| `POST /api/v1/inspection/items/validate-sql` 返回 400 拒绝 | SQL 是否含写操作关键字 | `readonly_sql_safety` 模块检测到 `INSERT/UPDATE/DELETE/MERGE/DROP/TRUNCATE/CREATE/ALTER/GRANT/REVOKE` | 改写为只读查询；多语句需在 `;` 后换行且每条都需为 SELECT | `backend/app/services/inspection_service.py` (validate_sql) |
+| `POST /api/v1/inspection/items/verify-sql` 返回 verify_run 持续 pending | AWX Job 是否调度成功 / collector callback 是否到达 | 任务未真正派发到 AWX / callback URL 配置错 / network 不通 | 检查 `dispatch_status` 状态机；`collector/callback/` 日志 | `backend/app/api/inspection.py:131` + `backend/app/services/inspection_evaluator_service.py` |
+| 巡检任务 dispatch 后 batch_run 长期 running 但 callback 不来 | AWX Job 模板 `INSPECTION_SQL_RUN` 是否被覆盖；EE 容器 `LD_LIBRARY_PATH` | 同 §2 collector 排障入口 | 同 §2 | `ansible-playbooks/playbooks/roles/db_fact_collect/tasks/main.yml` |
+
+### 7.2 报告 / 导出
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| `GET /api/v1/inspection/reports/{id}/instances/{type}/{id}/results` 返回空 | `task_item.db_type` 与 `task_target.db_type` 是否一致；bug5 隔离是否生效 | Oracle/MSSQL 任务目标混排时，过滤后无匹配 | 确认 `inspection_service.get_instance_report_results` 按 db_type 双重过滤；待 v5.1/v5.2 治理稳态后回归 | `backend/app/services/inspection_service.py` (get_instance_report_results) |
+| `POST /api/v1/inspection/reports/{id}/export` 报 500 / DOCX 损坏 | 评估引擎是否抛异常；evidence jsonb 是否含 `columns/rows` 键 | `InspectionEvaluatorService` 注入 summary 失败 / 模板渲染异常 | 检查 `report_export_service.build_report_docx`；evidence 缺列时回退到空表 | `backend/app/services/report_export_service.py:build_report_docx` |
+| DOCX 导出漏掉实例行 | `inspection_instance_report` 是否都已生成 | 评估未跑 / `regenerate` 端点未调用 | 调用 `POST /api/v1/inspection/reports/{id}/regenerate` 重新生成实例报告 | `backend/app/api/inspection.py:302` |
+| 单实例 DOCX 导出按钮点击无反应 | 前端 `InstanceReport.vue` 是否传 `targetType/targetId` | 路由参数缺失 | 检查 `frontend/src/router/index.ts` 路由 `/inspection/reports/:reportId/instances/:targetType/:targetId` | `frontend/src/views/inspection/InstanceReport.vue` + `frontend/src/router/index.ts` |
+
+### 7.3 评估引擎
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| `inspection_result.result_summary` 为 null | 评估器是否对该 `item_kind` / `evaluator_type` 实现 | 巡检项是 dynamic / custom 但 evaluator 走 baseline 分支 | 检查 `InspectionEvaluatorService` 的 evaluator_type 路由表 | `backend/app/services/inspection_evaluator_service.py` |
+| `dispatch_status` 一直 `pending` 不变 | callback 是否真的到达；`pending → running → success` 状态机 | callback 处理事务未提交 | 检查 `inspection_service.handle_callback` 是否抛异常；事务是否 rollback | `backend/app/services/inspection_service.py` (handle_callback) |
+
+### 7.4 DDL 治理
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| v5.1 重建后历史 inspection 数据丢失 | 备份是否完整；migration 顺序 | v5.1 脚本内含 DROP TABLE（无 CASCADE） | 回滚路径：恢复备份后回退到 3.4 schema；prod 应用前需 DBA 现场评估 | `backend/db/dbops_inspection_v5_1.sql:25-32` |
+| v5.2 `inspection_type` 索引失败 | `inspection_item` 表是否已建 | v5.1 未先跑 / v5.2 在 v5.1 之前应用 | 先跑 v5.1 → 再跑 v5.2 | `backend/db/dbops_inspection_v5_2_inspection_type.sql` |
+| v5.2 回滚 | `idx_inspection_item_inspection_type` 索引是否存在 | IF EXISTS 防护 | 直接执行 `backend/db/rollback_inspection_v5_2_inspection_type.sql` | `backend/db/rollback_inspection_v5_2_inspection_type.sql` |
