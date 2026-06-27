@@ -11,6 +11,8 @@ from app.models.dbops_assets import (
     InspectionItem, InspectionTask, InspectionResult,
     BizScoreRule, BizScoreResult, BizScoreResultDetail, StagingExcelImport,
 )
+# Phase 3.6 AI Copilot models (C2 范围：chat)
+from app.models.ai import AiChatSession, AiChatMessage
 
 db = SessionLocal
 
@@ -27,4 +29,6 @@ __all__ = [
     'InstanceBackupPolicy', 'InspectionItem', 'InspectionTask',
     'InspectionResult', 'BizScoreRule', 'BizScoreResult',
     'BizScoreResultDetail', 'StagingExcelImport',
+    # Phase 3.6 AI Copilot
+    'AiChatSession', 'AiChatMessage',
 ]
