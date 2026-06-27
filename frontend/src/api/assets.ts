@@ -53,6 +53,9 @@ import type {
   InspectionTaskCreatePayload,
   InspectionTaskCreateResponse,
   InspectionResultRow,
+  InspectionReportRow,
+  InspectionReportListResponse,
+  InspectionInstanceReportRow,
 } from '@/types/api'
 
 export const assetsApi = {
@@ -304,8 +307,12 @@ export const assetsApi = {
     }),
 
   // Phase 3.4 — Inspection center
-  listInspectionItems: (params?: { enabled?: boolean }): Promise<InspectionItemRow[]> =>
+  listInspectionItems: (params?: { enabled?: boolean; db_type_code?: string; source?: string; inspection_type?: string }): Promise<InspectionItemRow[]> =>
     request.get('/v1/inspection/items', { params }),
+  listInspectionTypes: (): Promise<string[]> =>
+    request.get('/v1/inspection/types'),
+  batchDisableInspectionItems: (item_ids: number[]): Promise<{ disabled: number[]; skipped: number[]; total: number }> =>
+    request.post('/v1/inspection/items/batch-disable', { item_ids }),
   createInspectionItem: (data: InspectionItemCreatePayload): Promise<InspectionItemRow> =>
     request.post('/v1/inspection/items', data),
   updateInspectionItem: (id: number | string, data: InspectionItemUpdatePayload): Promise<InspectionItemRow> =>
@@ -340,14 +347,14 @@ export const assetsApi = {
   }> => request.post('/v1/inspection/items/validate-sql', payload),
 
   verifyInspectionSql: (payload: {
-    instance_id: number
+    instance_ids: number[]
     db_type_code: string
     sql_text: string
     timeout_seconds?: number
     max_rows?: number
   }): Promise<{
-    verify_run_id: number
-    collector_run_id: string
+    verify_run_ids: number[]
+    collector_run_ids: string[]
     status: string
     awx_job_id: number | null
   }> => request.post('/v1/inspection/items/verify-sql', payload),
@@ -368,6 +375,76 @@ export const assetsApi = {
     id: number | string,
     data: Partial<InspectionItemUpdatePayload>,
   ): Promise<InspectionItemRow> => request.patch(`/v1/inspection/items/${id}`, data),
+
+  // v5.1 Report endpoints
+  listInspectionReports: (params?: {
+    page?: number
+    page_size?: number
+    health_level?: string
+    report_status?: string
+  }): Promise<InspectionReportListResponse> =>
+    request.get('/v1/inspection/reports', { params }),
+
+  getInspectionReport: (reportId: number | string): Promise<InspectionReportRow> =>
+    request.get(`/v1/inspection/reports/${reportId}`),
+
+  getInspectionReportByTask: (taskId: number | string): Promise<InspectionReportRow> =>
+    request.get(`/v1/inspection/reports/task/${taskId}`),
+
+  listInstanceReports: (
+    reportId: number | string,
+    params?: { health_level?: string },
+  ): Promise<InspectionInstanceReportRow[]> =>
+    request.get(`/v1/inspection/reports/${reportId}/instances`, { params }),
+
+  getInstanceReportResults: (
+    reportId: number | string,
+    targetType: string,
+    targetId: number,
+  ): Promise<InspectionResultRow[]> =>
+    request.get(`/v1/inspection/reports/${reportId}/instances/${targetType}/${targetId}/results`),
+
+  regenerateReport: (reportId: number | string): Promise<InspectionReportRow> =>
+    request.post(`/v1/inspection/reports/${reportId}/regenerate`),
+
+  /**
+   * Download the report as a DOCX file. Bypasses the shared axios response
+   * interceptor (which would treat the binary blob as an error) and uses
+   * fetch + Authorization header directly. Triggers a browser download via
+   * a temporary <a download> element. Honors Content-Disposition filename
+   * when the server provides it.
+   */
+  exportReport: async (
+    reportId: number | string,
+    opts?: { includeEvidence?: boolean },
+  ): Promise<void> => {
+    const params = new URLSearchParams()
+    if (opts?.includeEvidence) params.set('include_evidence', 'true')
+    const qs = params.toString()
+    const url = `/api/v1/inspection/reports/${reportId}/export${qs ? `?${qs}` : ''}`
+    await _downloadInspectionReportDocx(url, `inspection-report-${reportId}.docx`)
+  },
+
+  /**
+   * Export a single instance's slice of the report (post-verification 2026-06-26).
+   * Identical download mechanics to exportReport; only the URL is constrained
+   * to a (target_type, target_id) tuple.
+   */
+  exportInstanceReport: async (
+    reportId: number | string,
+    targetType: string,
+    targetId: number | string,
+    opts?: { includeEvidence?: boolean },
+  ): Promise<void> => {
+    const params = new URLSearchParams()
+    if (opts?.includeEvidence) params.set('include_evidence', 'true')
+    const qs = params.toString()
+    const url = `/api/v1/inspection/reports/${reportId}/instances/${encodeURIComponent(targetType)}/${targetId}/export${qs ? `?${qs}` : ''}`
+    await _downloadInspectionReportDocx(
+      url,
+      `inspection-report-${reportId}-instance-${targetId}.docx`,
+    )
+  },
 
   // 资产校验功能优化 v2 / 2026-06-17: 批量 proposal 操作 + asset report
   batchActionProposals: (
@@ -415,4 +492,46 @@ export const assetsApi = {
     request.get(`/v1/collector/batch-runs/${batchRunId}/asset-report`, {
       suppressErrorToast: options?.suppressErrorToast,
     }),
+}
+
+/**
+ * Shared DOCX download helper for the inspection report export endpoints.
+ * Uses fetch (not the shared axios interceptor) to avoid the response
+ * interceptor treating the binary blob as a JSON error envelope, and
+ * surfaces the server's detail message on failure.
+ */
+async function _downloadInspectionReportDocx(
+  url: string,
+  fallbackFilename: string,
+): Promise<void> {
+  const token = localStorage.getItem('token')
+  const resp = await fetch(url, {
+    method: 'POST',
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  })
+  if (!resp.ok) {
+    const text = await resp.text()
+    let detail = text
+    try {
+      const parsed = JSON.parse(text)
+      detail = parsed.detail || parsed.message || text
+    } catch {
+      // not JSON, keep raw text
+    }
+    throw new Error(`导出失败 (${resp.status}): ${detail}`)
+  }
+  const blob = await resp.blob()
+  const disp = resp.headers.get('Content-Disposition') || ''
+  const m = /filename\*=UTF-8''([^;]+)|filename="?([^";]+)"?/i.exec(disp)
+  const filename = decodeURIComponent(m?.[1] || m?.[2] || fallbackFilename)
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  setTimeout(() => {
+    URL.revokeObjectURL(a.href)
+    a.remove()
+  }, 0)
 }

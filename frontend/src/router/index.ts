@@ -197,6 +197,23 @@ const routes: RouteRecordRaw[] = [
         meta: { title: '巡检报告', parent: '巡检与健康' }
       },
       {
+        path: 'inspection/reports/:id',
+        name: 'InspectionReportDetail',
+        component: () => import('@/views/inspection/ReportDetail.vue'),
+        meta: { title: '巡检报告详情', parent: '巡检与健康' }
+      },
+      {
+        path: 'inspection/reports/:id/instances/:targetType/:targetId',
+        name: 'InspectionInstanceReport',
+        component: () => import('@/views/inspection/InstanceReport.vue'),
+        meta: { title: '巡检实例详情', parent: '巡检与健康' },
+        props: (route) => ({
+          id: String(route.params.id ?? ''),
+          targetType: String(route.params.targetType ?? ''),
+          targetId: Number(route.params.targetId ?? 0),
+        }),
+      },
+      {
         path: 'inspection/health',
         name: 'InspectionHealth',
         component: () => import('@/views/inspection/Health.vue'),

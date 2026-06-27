@@ -131,6 +131,7 @@ export interface InstanceRow {
   cluster_name?: string | null
   cluster_type?: string | null
   db_type?: string | null
+  db_type_code?: string | null
   db_version?: string | null
   node_role: string
   engine_role?: string | null
@@ -900,6 +901,7 @@ export interface InspectionItemRow {
   description?: string | null
   rule_config?: Record<string, any>
   db_type_code?: string | null
+  inspection_type?: string | null
   created_at?: string | null
   updated_at?: string | null
 }
@@ -914,6 +916,7 @@ export interface InspectionItemCreatePayload {
   description?: string | null
   rule_config?: Record<string, any>
   db_type_code?: string | null
+  inspection_type?: string | null
 }
 
 export interface InspectionItemUpdatePayload {
@@ -925,6 +928,7 @@ export interface InspectionItemUpdatePayload {
   description?: string | null
   rule_config?: Record<string, any>
   db_type_code?: string | null
+  inspection_type?: string | null
 }
 
 export interface InspectionTaskRow {
@@ -944,6 +948,9 @@ export interface InspectionTaskRow {
   error_message?: string | null
   started_at?: string | null
   finished_at?: string | null
+  report_status?: string | null
+  health_level?: string | null
+  report_id?: number | null
   created_at?: string | null
   updated_at?: string | null
 }
@@ -978,22 +985,90 @@ export interface InspectionTaskCreateResponse {
 export interface InspectionResultRow {
   id: number
   task_id: number
-  item_id?: number | null
-  item_code?: string | null
-  item_name?: string | null
-  batch_run_id?: number | null
+  task_item_id: number
+  task_target_id: number
   collector_run_id?: number | null
   collector_run_item_id?: number | null
   target_type: 'db_instance' | 'server'
   target_id: number
   result_code: string
-  result_status: 'normal' | 'abnormal' | 'warning' | 'unknown' | string
-  severity: 'info' | 'warning' | 'critical' | string
+  execution_status: string
+  evaluation_status: string
   message?: string | null
   evidence?: Record<string, any>
+  attempt_no: number
+  received_at?: string | null
   detected_at?: string | null
   created_at?: string | null
+  // Joined fields
+  item_code?: string | null
+  item_name?: string | null
+  item_kind?: string | null
+  category?: string | null
+  target_name?: string | null
+}
+
+// v5.1 Report types
+export interface InspectionReportRow {
+  id: number
+  report_code: string
+  task_id: number
+  report_status: 'generating' | 'ready' | 'partial' | 'failed'
+  health_level: 'healthy' | 'warning' | 'critical' | 'unknown' | 'not_assessed' | null
+  health_score: number | null
+  total_target_count: number
+  healthy_count: number
+  warning_count: number
+  critical_count: number
+  unknown_count: number
+  not_assessed_count: number
+  normal_item_count: number
+  warning_item_count: number
+  critical_item_count: number
+  unknown_item_count: number
+  collection_failed_count: number
+  missing_result_count: number
+  summary?: Record<string, any>
+  rule_engine_version?: string | null
+  source_data_hash?: string | null
+  source_result_count: number
+  generated_reason: 'auto' | 'manual' | 'regenerate'
+  generated_by?: string | null
+  generated_at?: string | null
+  created_at?: string | null
   updated_at?: string | null
+}
+
+export interface InspectionReportListResponse {
+  items: InspectionReportRow[]
+  page: number
+  page_size: number
+  total: number
+  total_pages: number
+}
+
+export interface InspectionInstanceReportRow {
+  id: number
+  report_id: number
+  task_id: number
+  task_target_id: number
+  target_type: string
+  target_id: number
+  // Joined from task_target snapshot (post-verification 2026-06-26)
+  host_snapshot?: string | null
+  db_type_code_snapshot?: string | null
+  health_level: 'healthy' | 'warning' | 'critical' | 'unknown' | 'not_assessed' | null
+  health_score: number | null
+  normal_count: number
+  warning_count: number
+  critical_count: number
+  unknown_count: number
+  not_evaluated_count: number
+  collection_failed_count: number
+  missing_result_count: number
+  summary?: Record<string, any>
+  generated_at?: string | null
+  created_at?: string | null
 }
 
 // ============================================================================

@@ -1,7 +1,8 @@
 /*
  * useBatchRuns — 列表页批次列表加载
  *
- * 封装 assetsApi.listBatchRuns({ limit: 20 })，无轮询。
+ * 封装 assetsApi.listBatchRuns({ limit: 20, run_type: 'asset_verify' })，
+ * 显式过滤掉 inspection run，避免巡检任务的 batch_run 串到批量校验列表里。
  * 失败时不静默，写入 error.value 给 BatchRunTable 渲染错误态。
  */
 
@@ -18,7 +19,11 @@ export function useBatchRuns() {
     loading.value = true
     error.value = ''
     try {
-      batches.value = await assetsApi.listBatchRuns({ limit: 20 }, opts)
+      // 显式过滤 run_type，避免 inspection 任务出现在批量校验列表
+      batches.value = await assetsApi.listBatchRuns(
+        { limit: 20, run_type: 'asset_verify' },
+        opts,
+      )
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return
       if (e instanceof Error && e.name === 'CanceledError') return

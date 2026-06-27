@@ -8,9 +8,35 @@
       attached
       @update:keyword="keyword = $event"
       @search="loadItems"
-      @reset="keyword = ''; loadItems()"
+      @reset="keyword = ''; dbTypeFilter = ''; sourceFilter = ''; inspectionTypeFilter = ''; loadItems()"
     >
+      <template #tools>
+        <select v-model="sourceFilter" class="field-input w-36 text-xs" @change="loadItems">
+          <option value="">全部来源</option>
+          <option value="custom">自定义 SQL</option>
+          <option value="batch_verify">批量校验</option>
+        </select>
+        <select v-model="dbTypeFilter" class="field-input w-36 text-xs" @change="loadItems">
+          <option value="">全部 DB 类型</option>
+          <option value="ORACLE">Oracle</option>
+          <option value="SQLSERVER">SQL Server</option>
+          <option value="MYSQL">MySQL</option>
+          <option value="POSTGRESQL">PostgreSQL</option>
+        </select>
+        <select v-model="inspectionTypeFilter" class="field-input w-40 text-xs" @change="loadItems">
+          <option value="">全部巡检类型</option>
+          <option v-for="t in inspectionTypes" :key="t" :value="t">{{ t }}</option>
+        </select>
+      </template>
       <template #actions>
+        <button
+          v-if="selectedIds.length"
+          type="button"
+          class="ops-danger-button"
+          @click="batchDisable"
+        >
+          批量禁用 ({{ selectedIds.length }})
+        </button>
         <button type="button" class="ops-secondary-button" @click="loadItems">
           <span class="material-symbols-outlined text-[18px]">refresh</span>
           刷新
@@ -39,7 +65,12 @@
           </label>
           <label class="block field-card">
             <span class="field-label">check_code <span class="text-red-400">*</span></span>
-            <input v-model.trim="form.check_code" class="field-input" required />
+            <select v-model="form.check_code" class="field-input" :disabled="isCheckCodeLocked">
+              <option value="DB_READONLY_SQL_EXEC">DB_READONLY_SQL_EXEC</option>
+            </select>
+            <span v-if="isCheckCodeLocked" class="mt-1 text-xs text-on-surface-variant">
+              系统默认项不可修改 check_code
+            </span>
           </label>
           <label class="block field-card">
             <span class="field-label">目标范围</span>
@@ -55,8 +86,53 @@
               <option value="ORACLE">Oracle</option>
               <option value="POSTGRESQL">PostgreSQL</option>
               <option value="MYSQL">MySQL</option>
-              <option value="MSSQL">SQL Server</option>
+              <option value="SQLSERVER">SQL Server</option>
             </select>
+          </label>
+          <label class="block field-card">
+            <span class="field-label">巡检类型</span>
+            <div class="flex items-center gap-2">
+              <select v-model="form.inspection_type" class="field-input flex-1">
+                <option value="">（不指定）</option>
+                <option v-for="t in inspectionTypes" :key="t" :value="t">{{ t }}</option>
+              </select>
+              <button
+                v-if="!showNewTypeInput"
+                type="button"
+                class="ops-secondary-button"
+                title="新增巡检类型"
+                @click="showNewTypeInput = true"
+              >
+                <span class="material-symbols-outlined text-[16px]">add</span>
+              </button>
+              <template v-else>
+                <input
+                  v-model.trim="newTypeDraft"
+                  class="field-input flex-1"
+                  maxlength="64"
+                  placeholder="输入新类型回车确认"
+                  @keydown.enter.prevent="confirmNewType"
+                  @keydown.esc.prevent="cancelNewType"
+                />
+                <button
+                  type="button"
+                  class="ops-primary-button"
+                  title="确认"
+                  :disabled="!newTypeDraft"
+                  @click="confirmNewType"
+                >
+                  <span class="material-symbols-outlined text-[16px]">check</span>
+                </button>
+                <button
+                  type="button"
+                  class="ops-secondary-button"
+                  title="取消"
+                  @click="cancelNewType"
+                >
+                  <span class="material-symbols-outlined text-[16px]">close</span>
+                </button>
+              </template>
+            </div>
           </label>
           <label class="block field-card">
             <span class="field-label">严重级别</span>
@@ -150,24 +226,47 @@
         <div v-if="verifyError" class="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-sm text-red-200">
           {{ verifyError }}
         </div>
-        <label class="block field-card">
-          <span class="field-label">目标实例</span>
-          <select v-model.number="verifyForm.instance_id" class="field-input" :disabled="verifyRunning">
-            <option :value="0">请选择实例</option>
-            <option v-for="i in filteredInstances" :key="i.id" :value="i.id">
-              {{ i.instance_name }} ({{ i.db_type }} / {{ i.server_ip }}:{{ i.port }})
-            </option>
-          </select>
-        </label>
-        <label class="block field-card">
-          <span class="field-label">DB 类型</span>
-          <select v-model="verifyForm.db_type_code" class="field-input" :disabled="verifyRunning">
-            <option value="ORACLE">Oracle</option>
-            <option value="POSTGRESQL">PostgreSQL</option>
-            <option value="MYSQL">MySQL</option>
-            <option value="MSSQL">SQL Server</option>
-          </select>
-        </label>
+        <div class="field-card">
+          <div class="flex items-center justify-between mb-2">
+            <span class="field-label mb-0">
+              目标实例
+              <span class="text-xs text-on-surface-variant ml-1">({{ verifyForm.db_type_code }} — 已选 {{ verifyForm.selectedInstanceIds.length }})</span>
+            </span>
+            <button type="button" class="text-xs text-primary hover:underline" @click="toggleSelectAllInstances">
+              {{ verifyForm.selectedInstanceIds.length === filteredInstances.length ? '取消全选' : '全选' }}
+            </button>
+          </div>
+          <input
+            v-model="verifyInstanceSearch"
+            type="text"
+            class="field-input mb-2 text-xs"
+            placeholder="搜索实例名称或 IP..."
+            :disabled="verifyRunning"
+          />
+          <div class="max-h-[220px] overflow-y-auto space-y-1 rounded border border-outline-variant/40 p-2">
+            <label
+              v-for="i in filteredInstances"
+              :key="i.id"
+              class="flex items-center gap-2 rounded px-2 py-1.5 text-xs cursor-pointer hover:bg-surface-container-high transition-colors"
+              :class="verifyForm.selectedInstanceIds.includes(i.id) ? 'bg-primary/10' : ''"
+            >
+              <input
+                type="checkbox"
+                :value="i.id"
+                :checked="verifyForm.selectedInstanceIds.includes(i.id)"
+                @change="toggleInstanceSelection(i.id)"
+                :disabled="verifyRunning"
+                class="rounded"
+              />
+              <span class="font-mono text-on-surface">{{ i.instance_name }}</span>
+              <span class="text-on-surface-variant">{{ i.server_ip }}:{{ i.port }}</span>
+              <span class="text-on-surface-variant/60 text-[10px]">{{ i.cluster_type || '-' }}</span>
+              <span class="text-on-surface-variant/60 text-[10px]">{{ i.node_role }}</span>
+              <span class="text-on-surface-variant/60 text-[10px]">{{ i.db_version || '-' }}</span>
+            </label>
+            <p v-if="!filteredInstances.length" class="text-xs text-on-surface-variant px-2 py-2">无匹配实例</p>
+          </div>
+        </div>
         <label class="block field-card">
           <span class="field-label">超时 (秒)</span>
           <input v-model.number="verifyForm.timeout_seconds" type="number" min="1" max="120" class="field-input" :disabled="verifyRunning" />
@@ -222,7 +321,7 @@
           <button
             type="button"
             class="ops-primary-button"
-            :disabled="verifyRunning || !verifyForm.instance_id"
+            :disabled="verifyRunning || !verifyForm.selectedInstanceIds.length"
             @click="onRunVerify"
           >
             {{ verifyRunning ? '执行中...' : (verifyResult ? '再次执行' : '执行') }}
@@ -235,6 +334,9 @@
       <table class="w-full text-sm">
         <thead class="bg-surface-container text-left text-xs uppercase text-on-surface-variant">
           <tr>
+            <th class="whitespace-nowrap px-4 py-3 w-10">
+              <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" class="rounded" />
+            </th>
             <th class="whitespace-nowrap px-4 py-3">编码</th>
             <th class="whitespace-nowrap px-4 py-3">名称</th>
             <th class="whitespace-nowrap px-4 py-3">check_code</th>
@@ -247,6 +349,9 @@
         </thead>
         <tbody>
           <tr v-for="item in filteredItems" :key="item.id" class="border-t border-outline-variant/30 transition-colors hover:bg-surface-container-high">
+            <td class="whitespace-nowrap px-4 py-3">
+              <input type="checkbox" :checked="selectedIds.includes(item.id)" @change="toggleItemSelection(item.id)" class="rounded" />
+            </td>
             <td class="whitespace-nowrap px-4 py-3 font-mono text-xs">{{ item.item_code }}</td>
             <td class="whitespace-nowrap px-4 py-3">{{ item.item_name }}</td>
             <td class="whitespace-nowrap px-4 py-3 font-mono text-xs">{{ item.check_code }}</td>
@@ -299,6 +404,29 @@ const loading = ref(false)
 const saving = ref(false)
 const validating = ref(false)
 const keyword = ref('')
+const dbTypeFilter = ref('')
+const sourceFilter = ref('')
+const inspectionTypeFilter = ref('')
+const inspectionTypes = ref<string[]>([])
+const showNewTypeInput = ref(false)
+const newTypeDraft = ref('')
+
+function confirmNewType() {
+  const value = newTypeDraft.value.trim()
+  if (!value) return
+  if (!inspectionTypes.value.includes(value)) {
+    inspectionTypes.value = [...inspectionTypes.value, value].sort()
+  }
+  form.inspection_type = value
+  newTypeDraft.value = ''
+  showNewTypeInput.value = false
+}
+
+function cancelNewType() {
+  newTypeDraft.value = ''
+  showNewTypeInput.value = false
+}
+const selectedIds = ref<number[]>([])
 const items = ref<InspectionItemRow[]>([])
 const showEditor = ref(false)
 const editingId = ref<number | null>(null)
@@ -331,17 +459,30 @@ const verifyResult = ref<{
 let verifyPollTimer: ReturnType<typeof setInterval> | null = null
 
 const verifyForm = reactive({
-  instance_id: 0,
-  db_type_code: 'ORACLE',
+  selectedInstanceIds: [] as number[],
+  db_type_code: '',
   sql_text: '',
   timeout_seconds: 30,
   max_rows: 200,
 })
 
+const verifyInstanceSearch = ref('')
 const instances = ref<InstanceRow[]>([])
-const filteredInstances = computed(() =>
-  instances.value.filter((i) => !verifyForm.db_type_code || i.db_type === verifyForm.db_type_code),
-)
+const filteredInstances = computed(() => {
+  let list = instances.value
+  if (verifyForm.db_type_code) {
+    list = list.filter((i) => (i.db_type_code || '').toUpperCase() === verifyForm.db_type_code.toUpperCase())
+  }
+  const kw = verifyInstanceSearch.value.trim().toLowerCase()
+  if (kw) {
+    list = list.filter((i) =>
+      (i.instance_name || '').toLowerCase().includes(kw)
+      || (i.server_ip || '').toLowerCase().includes(kw)
+      || (i.instance_code || '').toLowerCase().includes(kw)
+    )
+  }
+  return list
+})
 
 interface ItemForm {
   item_code: string
@@ -352,6 +493,7 @@ interface ItemForm {
   enabled: boolean
   description: string
   db_type_code: string
+  inspection_type: string
 }
 
 const form = reactive<ItemForm>({
@@ -363,10 +505,16 @@ const form = reactive<ItemForm>({
   enabled: true,
   description: '',
   db_type_code: '',
+  inspection_type: '',
 })
 
 const needsVerificationForEnable = computed(
   () => form.check_code === 'DB_READONLY_SQL_EXEC' && !sqlValidationResult.value?.valid,
+)
+
+// Plan 2026-06-26: 编辑系统默认项时锁定 check_code 字段（不允许改）
+const isCheckCodeLocked = computed(
+  () => !!editingId.value && form.check_code !== 'DB_READONLY_SQL_EXEC',
 )
 
 const filteredItems = computed(() => {
@@ -382,12 +530,14 @@ const filteredItems = computed(() => {
 function resetForm() {
   form.item_code = ''
   form.item_name = ''
-  form.check_code = ''
+  // Plan 2026-06-26: 默认 DB_READONLY_SQL_EXEC，点新增直接进 SQL 模式
+  form.check_code = 'DB_READONLY_SQL_EXEC'
   form.target_scope = 'db_instance'
   form.severity = 'warning'
   form.enabled = true
   form.description = ''
   form.db_type_code = ''
+  form.inspection_type = ''
   sqlForm.sql_text = ''
   sqlForm.timeout_seconds = 30
   sqlForm.max_rows = 200
@@ -401,7 +551,11 @@ function resetForm() {
 async function loadItems() {
   loading.value = true
   try {
-    items.value = await assetsApi.listInspectionItems()
+    const params: { enabled?: boolean; db_type_code?: string; source?: string; inspection_type?: string } = {}
+    if (dbTypeFilter.value) params.db_type_code = dbTypeFilter.value
+    if (sourceFilter.value) params.source = sourceFilter.value
+    if (inspectionTypeFilter.value) params.inspection_type = inspectionTypeFilter.value
+    items.value = await assetsApi.listInspectionItems(params)
   } finally {
     loading.value = false
   }
@@ -409,10 +563,18 @@ async function loadItems() {
 
 async function loadInstances() {
   try {
-    const res = await assetsApi.listInstances({ limit: 500 })
+    const res = await assetsApi.listInstances({ page_size: 500 })
     instances.value = res.items || []
   } catch {
     instances.value = []
+  }
+}
+
+async function loadInspectionTypes() {
+  try {
+    inspectionTypes.value = await assetsApi.listInspectionTypes()
+  } catch {
+    inspectionTypes.value = []
   }
 }
 
@@ -539,7 +701,8 @@ function openVerifyModal() {
   verifyForm.sql_text = sqlForm.sql_text
   verifyForm.timeout_seconds = sqlForm.timeout_seconds
   verifyForm.max_rows = sqlForm.max_rows
-  verifyForm.instance_id = 0
+  verifyForm.selectedInstanceIds = []
+  verifyInstanceSearch.value = ''
   verifyError.value = ''
   verifyResult.value = null
   verifyRunId.value = null
@@ -557,8 +720,8 @@ function closeVerifyModal() {
 }
 
 async function onRunVerify() {
-  if (!verifyForm.instance_id) {
-    verifyError.value = '请选择目标实例'
+  if (!verifyForm.selectedInstanceIds.length) {
+    verifyError.value = '请选择至少一个目标实例'
     return
   }
   verifyRunning.value = true
@@ -566,14 +729,15 @@ async function onRunVerify() {
   verifyResult.value = null
   try {
     const launch = await assetsApi.verifyInspectionSql({
-      instance_id: verifyForm.instance_id,
+      instance_ids: verifyForm.selectedInstanceIds,
       db_type_code: verifyForm.db_type_code,
       sql_text: verifyForm.sql_text,
       timeout_seconds: verifyForm.timeout_seconds,
       max_rows: verifyForm.max_rows,
     })
-    verifyRunId.value = launch.verify_run_id
-    startVerifyPolling(launch.verify_run_id)
+    // Poll the first verify run; the result shows per-instance status
+    verifyRunId.value = launch.verify_run_ids[0]
+    if (verifyRunId.value) startVerifyPolling(verifyRunId.value)
   } catch (e) {
     const err = e as { response?: { data?: { detail?: string } } }
     verifyError.value = err?.response?.data?.detail || '提交验证失败'
@@ -614,6 +778,23 @@ function startVerifyPolling(runId: number) {
   }, 2500)
 }
 
+function toggleInstanceSelection(id: number) {
+  const idx = verifyForm.selectedInstanceIds.indexOf(id)
+  if (idx >= 0) {
+    verifyForm.selectedInstanceIds.splice(idx, 1)
+  } else {
+    verifyForm.selectedInstanceIds.push(id)
+  }
+}
+
+function toggleSelectAllInstances() {
+  if (verifyForm.selectedInstanceIds.length === filteredInstances.value.length) {
+    verifyForm.selectedInstanceIds = []
+  } else {
+    verifyForm.selectedInstanceIds = filteredInstances.value.map((i) => i.id)
+  }
+}
+
 function formatCell(v: unknown): string {
   if (v === null || v === undefined) return '-'
   if (typeof v === 'object') {
@@ -624,6 +805,40 @@ function formatCell(v: unknown): string {
     }
   }
   return String(v)
+}
+
+const allSelected = computed(() =>
+  filteredItems.value.length > 0 && filteredItems.value.every((i) => selectedIds.value.includes(i.id))
+)
+
+function toggleItemSelection(id: number) {
+  const idx = selectedIds.value.indexOf(id)
+  if (idx >= 0) selectedIds.value.splice(idx, 1)
+  else selectedIds.value.push(id)
+}
+
+function toggleSelectAll() {
+  if (allSelected.value) {
+    const visible = new Set(filteredItems.value.map((i) => i.id))
+    selectedIds.value = selectedIds.value.filter((id) => !visible.has(id))
+  } else {
+    const existing = new Set(selectedIds.value)
+    for (const i of filteredItems.value) existing.add(i.id)
+    selectedIds.value = Array.from(existing)
+  }
+}
+
+async function batchDisable() {
+  if (!selectedIds.value.length) return
+  if (!confirm(`确认禁用 ${selectedIds.value.length} 个巡检项？`)) return
+  try {
+    const result = await assetsApi.batchDisableInspectionItems(selectedIds.value)
+    alert(`已禁用 ${result.disabled.length} 个${result.skipped.length ? `，${result.skipped.length} 个已是禁用状态` : ''}`)
+    selectedIds.value = []
+    await loadItems()
+  } catch (e: any) {
+    alert(e?.response?.data?.detail || '批量禁用失败')
+  }
 }
 
 async function onDisable(item: InspectionItemRow) {
@@ -678,5 +893,8 @@ async function submitForm() {
   }
 }
 
-onMounted(loadItems)
+onMounted(() => {
+  loadItems()
+  loadInspectionTypes()
+})
 </script>

@@ -18,10 +18,7 @@
           </label>
         </div>
 
-        <label class="block field-card">
-          <span class="field-label">资产 ID（可选，留空默认巡检全部）</span>
-          <input v-model.trim="assetIdsInput" class="field-input" placeholder="1,2,3" />
-        </label>
+        <OpsInstancePicker v-model="selectedAssetIds" />
 
         <label v-if="form.target_scope === 'db_instance'" class="block field-card">
           <span class="field-label">DB 类型</span>
@@ -35,15 +32,30 @@
 
         <div class="field-card">
           <div class="field-label">巡检项</div>
-          <div class="field-value flex flex-wrap gap-3">
-            <label
-              v-for="item in selectableItems"
-              :key="item.item_code"
-              class="flex items-center gap-2 rounded-xl border border-outline-variant/40 bg-surface-container-high px-4 py-3 cursor-pointer hover:bg-surface-container-highest transition-colors"
-            >
-              <input v-model="form.item_codes" type="checkbox" :value="item.item_code" class="h-4 w-4" />
-              <span class="text-sm">{{ item.item_name }} ({{ item.item_code }})</span>
-            </label>
+          <div class="space-y-4">
+            <div v-for="(group, groupKey) in groupedItems" :key="groupKey" class="border border-outline-variant/30 rounded-xl p-3">
+              <label class="flex items-center gap-2 mb-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  :checked="isGroupSelected(groupKey as string)"
+                  :indeterminate.prop="isGroupIndeterminate(groupKey as string)"
+                  @change="toggleGroup(groupKey as string)"
+                  class="h-4 w-4"
+                />
+                <span class="text-sm font-medium">{{ groupKey }}</span>
+                <span class="text-xs text-on-surface-variant">({{ group.items.length }} 项)</span>
+              </label>
+              <div class="flex flex-wrap gap-2 ml-6">
+                <label
+                  v-for="item in group.items"
+                  :key="item.item_code"
+                  class="flex items-center gap-2 rounded-lg border border-outline-variant/30 bg-surface-container-high px-3 py-2 cursor-pointer hover:bg-surface-container-highest transition-colors"
+                >
+                  <input v-model="form.item_codes" type="checkbox" :value="item.item_code" class="h-3.5 w-3.5" />
+                  <span class="text-xs">{{ item.item_name }} ({{ item.item_code }})</span>
+                </label>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -98,10 +110,12 @@
               <th class="whitespace-nowrap px-4 py-3">任务名称</th>
               <th class="whitespace-nowrap px-4 py-3">范围</th>
               <th class="whitespace-nowrap px-4 py-3">状态</th>
+              <th class="whitespace-nowrap px-4 py-3">报告</th>
               <th class="whitespace-nowrap px-4 py-3">资产数</th>
               <th class="whitespace-nowrap px-4 py-3">检查项</th>
               <th class="whitespace-nowrap px-4 py-3">批次ID</th>
               <th class="whitespace-nowrap px-4 py-3">创建时间</th>
+              <th class="whitespace-nowrap px-4 py-3">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -114,10 +128,29 @@
                   {{ task.status }}
                 </span>
               </td>
-              <td class="whitespace-nowrap px-4 py-3">{{ (task.asset_ids || []).length }}</td>
+              <td class="whitespace-nowrap px-4 py-3">
+                <span v-if="task.health_level" class="inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-medium" :class="getHealthClass(task.health_level)">
+                  {{ task.health_level }}
+                </span>
+                <span v-else-if="task.report_status" class="text-xs text-on-surface-variant">{{ task.report_status }}</span>
+                <span v-else class="text-xs text-on-surface-variant">-</span>
+              </td>
+              <td class="whitespace-nowrap px-4 py-3">{{ getTaskAssetCount(task) }}</td>
               <td class="px-4 py-3 text-xs">{{ (task.item_codes || []).join(', ') || '-' }}</td>
               <td class="whitespace-nowrap px-4 py-3 font-mono text-xs">{{ task.batch_run_id || '-' }}</td>
               <td class="whitespace-nowrap px-4 py-3 text-xs text-on-surface-variant">{{ formatTime(task.created_at) }}</td>
+              <td class="whitespace-nowrap px-4 py-3 text-xs">
+                <button
+                  v-if="task.report_id"
+                  type="button"
+                  class="ops-secondary-button !px-2 !py-1"
+                  @click="$router.push(`/inspection/reports/${task.report_id}`)"
+                >
+                  <span class="material-symbols-outlined text-[16px]">assessment</span>
+                  报告
+                </button>
+                <span v-else class="text-xs text-on-surface-variant">-</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -133,6 +166,7 @@ import OpsPageHeader from '@/components/ops/OpsPageHeader.vue'
 import OpsSectionCard from '@/components/ops/OpsSectionCard.vue'
 import OpsTableShell from '@/components/ops/OpsTableShell.vue'
 import OpsConfirmDialog from '@/components/ops/OpsConfirmDialog.vue'
+import OpsInstancePicker from '@/components/ops/OpsInstancePicker.vue'
 import { assetsApi } from '@/api/assets'
 import type { InspectionItemRow, InspectionTaskCreatePayload, InspectionTaskRow, DbTypeRow } from '@/types/api'
 import { formatInTz } from '@/utils/timezone'
@@ -145,7 +179,7 @@ const createError = ref('')
 const items = ref<InspectionItemRow[]>([])
 const tasks = ref<InspectionTaskRow[]>([])
 const dbTypes = ref<DbTypeRow[]>([])
-const assetIdsInput = ref('')
+const selectedAssetIds = ref<number[]>([])
 const dbTypeFilter = ref('')
 const fleetScanConfirmOpen = ref(false)
 
@@ -160,11 +194,75 @@ const form = reactive<InspectionTaskCreatePayload>({
 })
 
 const selectableItems = computed(() =>
-  items.value.filter((item) => item.enabled && item.target_scope === form.target_scope)
+  items.value.filter((item) => {
+    if (!item.enabled || item.target_scope !== form.target_scope) return false
+    if (!dbTypeFilter.value) return true
+    const itemDb = (item as any).db_type_code || null
+    // show items matching the DB type OR items without a specific DB type (batch verify items)
+    if (!itemDb) return true
+    return itemDb.toUpperCase() === dbTypeFilter.value.toUpperCase()
+  })
 )
+
+interface ItemGroup {
+  items: InspectionItemRow[]
+}
+
+const groupedItems = computed(() => {
+  const groups: Record<string, ItemGroup> = {}
+  for (const item of selectableItems.value) {
+    const key = item.inspection_type || '未分类'
+    if (!groups[key]) groups[key] = { items: [] }
+    groups[key].items.push(item)
+  }
+  return groups
+})
+
+function isGroupSelected(groupKey: string): boolean {
+  const group = groupedItems.value[groupKey]
+  if (!group) return false
+  return group.items.length > 0 && group.items.every((item) => form.item_codes.includes(item.item_code))
+}
+
+function isGroupIndeterminate(groupKey: string): boolean {
+  const group = groupedItems.value[groupKey]
+  if (!group) return false
+  const selected = group.items.filter((item) => form.item_codes.includes(item.item_code))
+  return selected.length > 0 && selected.length < group.items.length
+}
+
+function toggleGroup(groupKey: string): void {
+  const group = groupedItems.value[groupKey]
+  if (!group) return
+  const allSelected = group.items.every((item) => form.item_codes.includes(item.item_code))
+  if (allSelected) {
+    form.item_codes = form.item_codes.filter((code) => !group.items.some((item) => item.item_code === code))
+  } else {
+    for (const item of group.items) {
+      if (!form.item_codes.includes(item.item_code)) {
+        form.item_codes.push(item.item_code)
+      }
+    }
+  }
+}
+
+function getTaskAssetCount(task: InspectionTaskRow): number | string {
+  const fromIds = (task.asset_ids || []).length
+  if (fromIds > 0) return fromIds
+  const batch = (task as any).request_payload?.batch_result
+  return batch?.total_asset_count ?? 0
+}
 
 function formatTime(value: string | null | undefined): string {
   return value ? formatInTz(value) : '-'
+}
+
+function getHealthClass(level: string | null | undefined): string {
+  const l = (level || '').toLowerCase()
+  if (l === 'critical') return 'border-red-400/30 bg-red-400/10 text-red-200'
+  if (l === 'warning') return 'border-amber-400/30 bg-amber-400/10 text-amber-200'
+  if (l === 'healthy') return 'border-emerald-400/30 bg-emerald-400/10 text-emerald-200'
+  return 'border-outline-variant/40 bg-surface-container-high text-on-surface-variant'
 }
 
 // I12: switching target_scope changes the selectable item pool; the user's
@@ -189,36 +287,12 @@ async function loadTasks() {
   }
 }
 
-function parseAssetIds(): { ids: number[]; invalidTokens: string[] } {
-  const invalidTokens: string[] = []
-  const ids = assetIdsInput.value
-    .split(',')
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0)
-    .map((value) => {
-      const parsed = Number.parseInt(value, 10)
-      if (!Number.isFinite(parsed) || parsed <= 0) {
-        invalidTokens.push(value)
-        return NaN
-      }
-      return parsed
-    })
-    .filter((value) => Number.isFinite(value))
-  return { ids, invalidTokens }
-}
-
 async function submitTask() {
   createError.value = ''
   createMessage.value = ''
 
-  const parsed = parseAssetIds()
   if (!form.task_name) {
     createError.value = '任务名称不能为空'
-    return
-  }
-  if (parsed.invalidTokens.length) {
-    // I11: surface the bad tokens instead of silently dropping them
-    createError.value = `资产 ID 输入非法: ${parsed.invalidTokens.join(', ')}（需为正整数）`
     return
   }
   if (!form.item_codes.length) {
@@ -226,24 +300,22 @@ async function submitTask() {
     return
   }
 
-  // I9: fleet-scan footgun guard — when neither asset_ids nor db_type_code
-  // is set, the backend would scan every asset in scope. Ask the user to
-  // confirm before submitting.
-  const isFleetScan = parsed.ids.length === 0 && !dbTypeFilter.value
+  const ids = selectedAssetIds.value
+  const isFleetScan = ids.length === 0 && !dbTypeFilter.value
   if (isFleetScan) {
     fleetScanConfirmOpen.value = true
     return
   }
-  await doCreateTask(parsed.ids, false)
+  await doCreateTask(ids, false)
 }
 
-async function doCreateTask(parsedAssetIds: number[], confirmFleetScan: boolean) {
+async function doCreateTask(assetIds: number[], confirmFleetScan: boolean) {
   creating.value = true
   try {
     const payload: InspectionTaskCreatePayload = {
       ...form,
-      asset_ids: parsedAssetIds.length ? parsedAssetIds : undefined,
-      db_type_code: !parsedAssetIds.length && dbTypeFilter.value ? dbTypeFilter.value : undefined,
+      asset_ids: assetIds.length ? assetIds : undefined,
+      db_type_code: !assetIds.length && dbTypeFilter.value ? dbTypeFilter.value : undefined,
       confirm_fleet_scan: confirmFleetScan,
       item_codes: Array.from(new Set(form.item_codes)),
     }
@@ -251,7 +323,7 @@ async function doCreateTask(parsedAssetIds: number[], confirmFleetScan: boolean)
     createMessage.value = `任务已创建: ${result.task_code}（batch_run_id=${result.batch_run_id}）`
     form.task_name = ''
     form.item_codes = []
-    assetIdsInput.value = ''
+    selectedAssetIds.value = []
     dbTypeFilter.value = ''
     await loadTasks()
   } catch (error: any) {
@@ -263,9 +335,7 @@ async function doCreateTask(parsedAssetIds: number[], confirmFleetScan: boolean)
 
 async function confirmFleetScan() {
   fleetScanConfirmOpen.value = false
-  // re-parse at submit time so the latest input is honored
-  const parsed = parseAssetIds()
-  await doCreateTask(parsed.ids, true)
+  await doCreateTask(selectedAssetIds.value, true)
 }
 
 async function loadDbTypes() {
