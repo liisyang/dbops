@@ -270,6 +270,10 @@ class BatchCollectorService:
             "timeout_seconds": payload.timeout_seconds,
             "include_related_server": payload.include_related_server,
         }
+        # Phase 3.5: pass through user-selected inspection_item_codes so
+        # DB_READONLY_SQL_EXEC builder only dispatches the chosen subset.
+        if getattr(payload, "inspection_item_codes", None):
+            options["inspection_item_codes"] = list(payload.inspection_item_codes)
         all_items: list[dict[str, Any]] = []
         for check_code in payload.check_codes:
             built = CheckItemBuilderRegistry.build_items(
@@ -492,6 +496,11 @@ class BatchCollectorService:
 
         db.refresh(batch_run)
 
+        # Extract asset IDs from resolved assets so callers (e.g.
+        # InspectionService.launch_task) can create per-target snapshots
+        # without re-querying. assets are dicts with at least an "id" key.
+        resolved_asset_ids = [a["id"] for a in assets]
+
         return {
             "batch_run_id": int(batch_run.id),
             "batch_code": batch_run.batch_code,
@@ -501,6 +510,7 @@ class BatchCollectorService:
             "total_asset_count": batch_run.total_asset_count,
             "total_item_count": batch_run.total_item_count,
             "dispatch_count": batch_run.dispatch_count,
+            "asset_ids": resolved_asset_ids,
             "dispatches": dispatches,
         }
 
