@@ -48,3 +48,5 @@ Thumbs.db
 
 # A1 (PR review 2026-06-20): 仓库卫生
 backend/nohup.out
+frontend/nohup.out
+logs/
