@@ -101,8 +101,12 @@ class AiChatMessageListResponse(BaseModel):
 
 
 class AiChatSendResponse(BaseModel):
-    """发送消息响应（同时返回 user + assistant 两条消息）。"""
+    """发送消息响应（同时返回 user + assistant 两条消息）。
+
+    assistant_message 在极端情况下为 None（同一 client_request_id 命中历史 user message
+    但 assistant 消息未创建 — 例如事务 1 中途异常）。前端应判断后展示。
+    """
 
     user_message: AiChatMessageResponse
-    assistant_message: AiChatMessageResponse
+    assistant_message: Optional[AiChatMessageResponse] = None
     idempotent_replay: bool = Field(default=False, description="是否幂等命中（client_request_id 已存在）")

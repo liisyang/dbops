@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.api import logs, servers, account_ops, websocket, auth, collector, inspection, backup, ai
+from app.database import SessionLocal
 from app.services.dify_service import DifyService
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,25 @@ async def lifespan(app: FastAPI):
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("DifyService 初始化失败（将继续启动，但 AI 功能不可用）: %s", exc)
+
+    # AI Copilot（Phase 3.6 C3）— 启动时清理 chat pending 中 lease 已过期的消息（plan §7 P0-5）
+    # 用 asyncio.to_thread 避免阻塞事件循环；同样逻辑适用于 inspection_ai_analysis 和
+    # schema_snapshot（C22 / C9 各自实现独立清理入口）
+    if settings.AI_CHAT_ENABLED:
+        try:
+            from app.services.ai_chat_service import AiChatService
+
+            def _run_chat_cleanup() -> int:
+                cleanup_db = SessionLocal()
+                try:
+                    return AiChatService.cleanup_stale_pending(cleanup_db)
+                finally:
+                    cleanup_db.close()
+
+            cleaned = await asyncio.to_thread(_run_chat_cleanup)
+            logger.info("AI chat startup cleanup: marked %s stale pending messages", cleaned)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("AI chat startup cleanup failed (continuing): %s", exc)
 
     # 主机监控已禁用（7表设计不需要）
     # from app.services.host_monitor import set_db_session

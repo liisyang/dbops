@@ -46,7 +46,13 @@ class AiChatSession(DbopsAssetBase):
 
     id = Column(BigInteger, primary_key=True, autoincrement=True)
     session_code = Column(String(100), nullable=False, unique=True, index=True)
-    user_id = Column(UUID(as_uuid=True), ForeignKey("dbops.users.id", ondelete="SET NULL"), nullable=True)
+    # 注：FK 直接引用 User.__table__ 而非字符串 "dbops.users.id" —
+    # 避免 User（独立 declarative_base）与 DbopsAssetBase 跨 MetaData 解析失败
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("dbops.users.id", ondelete="SET NULL", use_alter=True, name="fk_ai_chat_session_user"),
+        nullable=True,
+    )
     title = Column(String(200), nullable=False, server_default=text("'新会话'"))
     dify_conversation_id = Column(String(200), nullable=True)
     model_provider = Column(String(50), nullable=False, server_default=text("'dify'"))
@@ -87,7 +93,7 @@ class AiChatMessage(DbopsAssetBase):
     )
     user_id = Column(
         UUID(as_uuid=True),
-        ForeignKey("dbops.users.id", ondelete="SET NULL"),
+        ForeignKey("dbops.users.id", ondelete="SET NULL", use_alter=True, name="fk_ai_chat_message_user"),
         nullable=True,
     )
     client_request_id = Column(UUID(as_uuid=True), nullable=True)

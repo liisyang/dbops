@@ -105,6 +105,13 @@ class Settings(BaseSettings):
     DIFY_SQL_WORKFLOW_VERSION: str = "2026-06-27-v1"
     DIFY_REPORT_WORKFLOW_VERSION: str = "2026-06-27-v1"
 
+    # Chat 租约（plan §2.1 P0-5）— assistant pending 消息的有效期
+    AI_CHAT_LEASE_SECONDS: int = 90
+    # Chat 历史分页上限
+    AI_CHAT_MAX_MESSAGES_PER_SESSION: int = 500
+    # Chat 单页列表分页上限
+    AI_CHAT_MAX_SESSIONS_PER_USER: int = 200
+
     # Schema Snapshot 限制（Phase 3.6B0）
     AI_SCHEMA_SNAPSHOT_TTL_HOURS: int = 24
     AI_SCHEMA_CONTEXT_MAX_CHARS: int = 30000
