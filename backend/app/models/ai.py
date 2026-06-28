@@ -3,8 +3,8 @@ AI Copilot Models（Phase 3.6）
 
 C2 范围：ai_chat_session + ai_chat_message
 C6 范围：ai_sql_schema_snapshot (Phase 3.6B0)
+C12 范围：ai_sql_audit (Phase 3.6B1 — SQL Preview/Execute 审计)
 后续 commit 追加：
-- C12: ai_sql_audit (Phase 3.6B1)
 - C22: inspection_ai_analysis (Phase 3.6C1)
 
 设计要点：
@@ -13,6 +13,8 @@ C6 范围：ai_sql_schema_snapshot (Phase 3.6B0)
 - TIMESTAMPTZ 字段使用 datetime.timezone.utc-aware 类型
 - C6 AiSchemaSnapshot 五态机：pending/running/success/failed/unavailable（应用层条件 UPDATE 控制，
   数据库层 CHECK 约束兜底；plan §2.2 P0-2 修正）
+- C12 AiSqlAudit 七态机：not_requested/pending/running/success/failed/timeout/cancelled
+  （plan §2.3 P0-6 修正 — 应用层条件 UPDATE 控制，DB 仅约束枚举值）
 """
 from __future__ import annotations
 
@@ -350,3 +352,252 @@ class AiSchemaSnapshot(DbopsAssetBase):
         if self.expires_at is not None and self.expires_at < datetime.now(timezone.utc):
             return False
         return True
+
+
+# =============================================================================
+# C12: AI SQL Audit（Phase 3.6B1）
+# =============================================================================
+class AiSqlAuditPreviewSafety:
+    """Preview 阶段 SQL 安全校验结果（plan §2.3 line 195）。
+
+    二态机：
+    - passed   — AST 校验通过，approved_sql 落库，可供后续 Execute 阶段使用
+    - rejected — AST 校验未通过（白名单不符 / 危险语句 / 解析失败等），
+                 approved_sql 不落库，preview_safety_reason 记录原因
+    """
+
+    PASSED = "passed"
+    REJECTED = "rejected"
+    ALL = (PASSED, REJECTED)
+
+
+class AiSqlAuditExecutionSafety:
+    """Execute 阶段再次校验 approved_sql_hash 一致性（plan §5 P0-4）。
+
+    NULL = 尚未进入 Execute 阶段（C12 Preview 不填充，留给 C17-C19）。
+    """
+
+    PASSED = "passed"
+    REJECTED = "rejected"
+    ALL = (PASSED, REJECTED)
+
+
+class AiSqlAuditExecutionStatus:
+    """Execute 状态机七态（plan §2.3 line 219-223 + §19 P0-6 修正）。
+
+    状态机：
+        not_requested → pending → running → success
+                                      ├→ failed
+                                      ├→ timeout
+                                      └→ cancelled
+
+    数据库 CHECK 仅约束枚举值；状态转换由应用层条件 UPDATE 控制
+    （UPDATE ... WHERE execution_status IN (...)）。
+    """
+
+    NOT_REQUESTED = "not_requested"
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    CANCELLED = "cancelled"
+    ALL = (NOT_REQUESTED, PENDING, RUNNING, SUCCESS, FAILED, TIMEOUT, CANCELLED)
+
+
+class AiSqlAudit(DbopsAssetBase):
+    """SQL Preview/Execute 审计（plan §2.3 line 192-197 + §5 P0-4）。
+
+    关键设计：
+    - 双轨 SQL：generated_sql（Dify 原始，审计追溯）vs approved_sql（AST 重写，权威）
+    - 双 SHA-256 hash：generated_sql_hash + approved_sql_hash；Execute 时再次校验
+      `SHA-256(rule_config.sql_text) == approved_sql_hash`
+    - Schema 强绑定：schema_snapshot_id + schema_policy_hash；Execute 时校验
+      snapshot.is_current + hash 一致，否则 409 要求重新 Preview
+    - 七态机 execution_status：状态转换由应用层条件 UPDATE 控制（C17-C19 实现）
+    """
+
+    __tablename__ = "ai_sql_audit"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+
+    # 关联（可空：直接调用 preview 时可不带 chat 上下文）
+    session_id = Column(
+        BigInteger,
+        ForeignKey("dbops.ai_chat_session.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    message_id = Column(
+        BigInteger,
+        ForeignKey("dbops.ai_chat_message.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    result_message_id = Column(
+        BigInteger,
+        ForeignKey("dbops.ai_chat_message.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    user_id = Column(
+        UUID(as_uuid=True),
+        ForeignKey("dbops.users.id", ondelete="SET NULL", use_alter=True, name="fk_ai_sql_audit_user_model"),
+        nullable=True,
+    )
+
+    # 目标实例（NOT NULL — 删除实例时级联清理 audit）
+    instance_id = Column(
+        BigInteger,
+        ForeignKey("dbops.db_instance.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    db_type_code = Column(String(50), nullable=False)
+
+    # 用户原始问题
+    user_question = Column(Text, nullable=False)
+
+    # Dify 生成（原始）— 审计追溯
+    generated_sql = Column(Text, nullable=True)
+    generated_sql_hash = Column(String(64), nullable=True)
+
+    # AST 重写后（权威）— Execute 时唯一使用
+    approved_sql = Column(Text, nullable=True)
+    approved_sql_hash = Column(String(64), nullable=True)
+
+    # Preview 安全状态（应用层写入，Dify 响应 + AST 校验后落库）
+    preview_safety_status = Column(
+        String(20), nullable=False, server_default=text("'rejected'")
+    )
+    preview_safety_reason = Column(Text, nullable=True)
+
+    # Execute 安全状态（NULL = 尚未 Execute；C17-C19 填充）
+    execution_safety_status = Column(String(20), nullable=True)
+    execution_safety_reason = Column(Text, nullable=True)
+
+    # 策略版本（与 schema_policy_hash 区分：safety_policy_version 是 SQL 安全规则版本）
+    safety_policy_version = Column(String(50), nullable=True)
+
+    # Schema 强绑定
+    schema_snapshot_id = Column(
+        BigInteger,
+        ForeignKey("dbops.ai_sql_schema_snapshot.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    schema_policy_hash = Column(String(64), nullable=True)
+
+    # Dify 调用追踪
+    dify_workflow_run_id = Column(String(100), nullable=True)
+    sql_workflow_version = Column(String(50), nullable=True)
+
+    # 时间戳
+    previewed_at = Column(DateTime(timezone=True), nullable=True)
+    executed_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    # 执行状态机
+    execution_status = Column(
+        String(20), nullable=False, server_default=text("'not_requested'")
+    )
+
+    # AWX Collector 关联
+    collector_run_id = Column(
+        BigInteger,
+        ForeignKey("dbops.collector_run.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    collector_run_item_id = Column(
+        BigInteger,
+        ForeignKey("dbops.collector_run_item.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # 执行结果统计
+    row_count = Column(Integer, nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+
+    # 错误信息
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # CHECK 约束（与 DDL 对齐）
+    __table_args__ = (
+        CheckConstraint(
+            "db_type_code IN ('POSTGRESQL', 'ORACLE', 'MSSQL', 'MYSQL')",
+            name="chk_ai_sql_audit_db_type",
+        ),
+        CheckConstraint(
+            "preview_safety_status IN ('passed', 'rejected')",
+            name="chk_ai_sql_audit_preview_safety",
+        ),
+        CheckConstraint(
+            "execution_safety_status IS NULL OR "
+            "execution_safety_status IN ('passed', 'rejected')",
+            name="chk_ai_sql_audit_execution_safety",
+        ),
+        CheckConstraint(
+            "execution_status IN ("
+            "'not_requested', 'pending', 'running', 'success', "
+            "'failed', 'timeout', 'cancelled')",
+            name="chk_ai_sql_audit_execution_status",
+        ),
+        CheckConstraint(
+            "(generated_sql_hash IS NULL OR length(generated_sql_hash) = 64) "
+            "AND (approved_sql_hash IS NULL OR length(approved_sql_hash) = 64) "
+            "AND (schema_policy_hash IS NULL OR length(schema_policy_hash) = 64)",
+            name="chk_ai_sql_audit_hash_len",
+        ),
+        CheckConstraint(
+            "(preview_safety_status = 'passed' "
+            "AND user_question IS NOT NULL "
+            "AND approved_sql IS NOT NULL "
+            "AND approved_sql_hash IS NOT NULL "
+            "AND previewed_at IS NOT NULL "
+            "AND schema_snapshot_id IS NOT NULL "
+            "AND schema_policy_hash IS NOT NULL "
+            "AND preview_safety_reason IS NULL) "
+            "OR "
+            "(preview_safety_status = 'rejected' "
+            "AND preview_safety_reason IS NOT NULL)",
+            name="chk_ai_sql_audit_payload",
+        ),
+        # 辅助索引（与 DDL 对齐）
+        Index(
+            "idx_ai_sql_audit_instance_created",
+            "instance_id",
+            "created_at",
+        ),
+        Index(
+            "idx_ai_sql_audit_user_created",
+            "user_id",
+            "created_at",
+            postgresql_where=text("user_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_ai_sql_audit_session_created",
+            "session_id",
+            "created_at",
+            postgresql_where=text("session_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_ai_sql_audit_execution_status",
+            "execution_status",
+            postgresql_where=text("execution_status IN ('pending', 'running')"),
+        ),
+        Index(
+            "idx_ai_sql_audit_collector_run",
+            "collector_run_id",
+            postgresql_where=text("collector_run_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_ai_sql_audit_schema_snapshot",
+            "schema_snapshot_id",
+            postgresql_where=text("schema_snapshot_id IS NOT NULL"),
+        ),
+        {"schema": "dbops"},
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AiSqlAudit id={self.id} instance_id={self.instance_id} "
+            f"db_type={self.db_type_code} preview={self.preview_safety_status} "
+            f"execution={self.execution_status}>"
+        )

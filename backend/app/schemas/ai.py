@@ -4,8 +4,8 @@ AI Copilot Pydantic Schemas（Phase 3.6）
 C2 范围：Chat 部分（ai_chat_session + ai_chat_message）
 C6 范围：SQL Schema Snapshot
 C10 范围：Schema Snapshot API（POST collect / GET status / GET history / GET context）
+C12 范围：SQL Preview（POST /ai/sql/preview + Audit 响应）
 后续 commit 追加：
-- C13: SQL Preview
 - C19: SQL Execute
 - C24-C25: Inspection AI Analysis
 """
@@ -216,3 +216,165 @@ class AiSchemaContextResponse(BaseModel):
     total_tables: Optional[int] = None
     total_columns: Optional[int] = None
     reason: Optional[str] = Field(default=None, description="available=false 时的原因码")
+
+
+# =============================================================================
+# C12: SQL Preview
+# =============================================================================
+class AiSqlPreviewRequest(BaseModel):
+    """POST /ai/sql/preview 请求（plan §5.2 + §5.3）。
+
+    关键字段：
+    - instance_id: 目标实例；后端派生 db_type_code，前端不直接传
+    - database_name: 可选；留空时 service fallback 到 '<default>'
+    - user_question: 用户原始问题，传给 Dify sql-generator workflow
+    - session_id / message_id: 可选；用于关联 ai_chat_session/message
+      （直接调用 /ai/sql/preview 时可不带，由 Chat 集成时填充）
+    - current_page: 白名单内的页面标识（ai_chat / instance_detail 等）
+    """
+
+    instance_id: int = Field(gt=0, description="目标 db_instance.id")
+    database_name: Optional[str] = Field(
+        default=None, max_length=200,
+        description="目标 database（留空时由 service 端 fallback 到 '<default>'）",
+    )
+    user_question: str = Field(
+        min_length=1, max_length=8000,
+        description="用户原始问题，传给 Dify sql-generator workflow",
+    )
+    session_id: Optional[int] = Field(default=None, gt=0)
+    message_id: Optional[int] = Field(default=None, gt=0)
+    current_page: Optional[str] = Field(
+        default="ai_chat", max_length=100,
+        description="当前页面（白名单）；非法值降级为 ai_chat",
+    )
+
+
+class AiSqlPreviewResponse(BaseModel):
+    """POST /ai/sql/preview 响应（plan §5.2 + §5.3 + §19 状态机）。
+
+    preview_safety_status='passed' 时：
+      - approved_sql + approved_sql_hash 必填（落 ai_sql_audit）
+      - schema_snapshot_id + schema_policy_hash 必填（强绑定 snapshot）
+      - audit_id 返回给前端供 Execute 阶段引用
+    preview_safety_status='rejected' 时：
+      - preview_safety_reason 必填（用户可见的错误描述）
+      - errors 列表（AST 校验原始 error）
+      - audit_id 仍可能返回（rejected 也落库用于审计）
+    """
+
+    # 核心结果
+    audit_id: int = Field(description="ai_sql_audit.id，供后续 Execute 引用")
+    preview_safety_status: Literal["passed", "rejected"]
+
+    # 双轨 SQL
+    generated_sql: Optional[str] = Field(
+        default=None, description="Dify 生成的 SQL（审计追溯）"
+    )
+    generated_sql_hash: Optional[str] = Field(
+        default=None, description="generated_sql 的 SHA-256"
+    )
+    approved_sql: Optional[str] = Field(
+        default=None, description="AST 重写后的 SQL（Execute 权威）"
+    )
+    approved_sql_hash: Optional[str] = Field(
+        default=None, description="approved_sql 的 SHA-256"
+    )
+
+    # 错误信息
+    preview_safety_reason: Optional[str] = Field(
+        default=None, description="rejected 时必填"
+    )
+    errors: list[str] = Field(
+        default_factory=list, description="AST 校验 error 列表"
+    )
+    warnings: list[str] = Field(
+        default_factory=list,
+        description="AST 校验 warning 列表（如敏感列命中，由 Executor 在 fetch 时 mask）",
+    )
+
+    # Schema 强绑定
+    schema_snapshot_id: Optional[int] = Field(
+        default=None,
+        description="preview 时绑定的 ai_sql_schema_snapshot.id（Execute 时校验 is_current）",
+    )
+    schema_policy_hash: Optional[str] = Field(
+        default=None,
+        description="preview 时绑定的策略 hash（Execute 时再次校验一致）",
+    )
+
+    # 元数据
+    db_type_code: str = Field(description="目标 db 类型（POSTGRESQL 等）")
+    sql_dialect: Optional[str] = Field(
+        default=None, description="sqlglot 方言名（postgres / tsql / oracle / mysql）"
+    )
+    sql_workflow_version: Optional[str] = Field(
+        default=None, description="DIFY_SQL_WORKFLOW_VERSION 配置值"
+    )
+    safety_policy_version: Optional[str] = Field(
+        default=None, description="SQL 安全规则版本（plan §5）"
+    )
+    dify_workflow_run_id: Optional[str] = Field(
+        default=None, description="Dify workflow_run_id（审计追溯）"
+    )
+
+    # 时间戳
+    previewed_at: Optional[datetime] = None
+
+
+class AiSqlAuditResponse(BaseModel):
+    """ai_sql_audit 单行响应（GET /ai/sql/audits/{id} 用 — C17+ 实现）。
+
+    当前 C12 不直接暴露 GET 端点；本 schema 供 service 层内部使用 + 后续
+    commit 复用。设计原则（避免 BE-bug1 复发）：
+    - 字段名 == JSON key，Pydantic from_attributes=True
+    - 不使用 Field alias
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    session_id: Optional[int] = None
+    message_id: Optional[int] = None
+    result_message_id: Optional[int] = None
+    user_id: Optional[UUID] = None
+
+    instance_id: int
+    db_type_code: str
+    user_question: str
+
+    generated_sql: Optional[str] = None
+    generated_sql_hash: Optional[str] = None
+    approved_sql: Optional[str] = None
+    approved_sql_hash: Optional[str] = None
+
+    preview_safety_status: Literal["passed", "rejected"]
+    preview_safety_reason: Optional[str] = None
+
+    execution_safety_status: Optional[Literal["passed", "rejected"]] = None
+    execution_safety_reason: Optional[str] = None
+
+    safety_policy_version: Optional[str] = None
+    schema_snapshot_id: Optional[int] = None
+    schema_policy_hash: Optional[str] = None
+
+    dify_workflow_run_id: Optional[str] = None
+    sql_workflow_version: Optional[str] = None
+
+    previewed_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
+
+    execution_status: Literal[
+        "not_requested", "pending", "running", "success",
+        "failed", "timeout", "cancelled"
+    ] = "not_requested"
+
+    collector_run_id: Optional[int] = None
+    collector_run_item_id: Optional[int] = None
+
+    row_count: Optional[int] = None
+    duration_ms: Optional[int] = None
+    error_message: Optional[str] = None
+
+    created_at: datetime

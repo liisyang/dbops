@@ -4,8 +4,8 @@ AI Copilot API（Phase 3.6）
 C1 范围：GET /api/v1/ai/capabilities
 C3 范围追加：Chat CRUD/Send/History（4 端点）
 C10 范围追加：Schema Snapshot collect/status/history/context（4 端点）
+C12 范围追加：SQL Preview（POST /ai/sql/preview）
 后续 commit 追加：
-- C13: SQL Preview
 - C19: SQL Execute/Executions
 - C24-C25: Inspection AI Analysis
 """
@@ -33,6 +33,9 @@ from app.schemas.ai import (
     AiSchemaSnapshotCollectResponse,
     AiSchemaSnapshotListResponse,
     AiSchemaSnapshotResponse,
+    AiSqlAuditResponse,
+    AiSqlPreviewRequest,
+    AiSqlPreviewResponse,
 )
 from app.services.ai.ai_schema_context_service import AiSchemaContextService
 from app.services.ai.ai_schema_snapshot_service import (
@@ -41,6 +44,14 @@ from app.services.ai.ai_schema_snapshot_service import (
     FeatureDisabledError,
     InstanceNotFoundError,
     UnsupportedDbTypeError,
+)
+from app.services.ai.ai_sql_preview_service import (
+    AiSqlPreviewService,
+    DifyTimeoutError_,
+    DifyUnavailableError,
+    DifyWorkflowFailedError_,
+    SnapshotUnavailableError,
+    UnsupportedDbTypeError as SqlUnsupportedDbTypeError,
 )
 from app.services.ai_chat_service import (
     AiChatService,
@@ -351,3 +362,100 @@ def get_schema_context(
         database_name=database_name,
     )
     return AiSchemaContextResponse(**result)
+
+
+# -----------------------------------------------------------------------------
+# C12: SQL Preview
+# -----------------------------------------------------------------------------
+@router.post(
+    "/sql/preview",
+    response_model=AiSqlPreviewResponse,
+)
+def preview_sql(
+    payload: AiSqlPreviewRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSqlPreviewResponse:
+    """SQL Preview（plan §5.2 + §5.3 + §6.5）。
+
+    流程：
+      1. 校验 instance + db_type capability
+      2. 取 is_current snapshot 的 schema_policy
+      3. 调 Dify sql-generator workflow → generated_sql
+      4. 调 SqlSafetyService.validate_with_ast（sqlglot） → approved_sql
+      5. 落 ai_sql_audit（passed / rejected 都落库）
+
+    preview_safety_status='passed' 时返回 approved_sql + approved_sql_hash
+    + schema_snapshot_id + schema_policy_hash — Execute 阶段（C17-C19）会
+    校验这些字段一致。审计行 ``audit_id`` 在 passed/rejected 都返回，用于
+    后续 Execute 引用。
+
+    错误码（plan §11）：
+    - 404 — instance 不存在
+    - 409 — Schema snapshot 不可用（pending/running/failed/expired/no_snapshot）
+    - 422 — db_type 不在 capabilities 支持范围
+    - 502 — Dify 不可用 / 网络错误 / Workflow 失败
+    - 503 — AI_SQL_PREVIEW_ENABLED=false
+    - 504 — Dify 调用超时
+
+    注意：本端点是**有状态**的，每次调用都落 audit 行；前端需自行去重（UI 防抖）。
+    """
+    try:
+        result = AiSqlPreviewService.preview(
+            db,
+            instance_id=payload.instance_id,
+            database_name=payload.database_name,
+            user_question=payload.user_question,
+            session_id=payload.session_id,
+            message_id=payload.message_id,
+            current_page=payload.current_page,
+            requested_by=current_user,
+        )
+    except InstanceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except FeatureDisabledError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except SqlUnsupportedDbTypeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except SnapshotUnavailableError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "snapshot_unavailable",
+                "reason": exc.reason,
+                "message": str(exc),
+            },
+        )
+    except DifyTimeoutError_ as exc:
+        raise HTTPException(status_code=504, detail=f"Dify timeout: {exc}")
+    except (DifyUnavailableError, DifyWorkflowFailedError_) as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    except DifyError as exc:
+        logger.warning("Dify SQL preview failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Dify error: {exc}")
+
+    audit = result.audit
+    # errors 是 list — Pydantic 直接接受
+    errors_list = getattr(audit, "_preview_errors", []) or []
+    warnings_list: list[str] = []
+    # warnings 已序列化到 preview_safety_reason（不重复返回）
+
+    return AiSqlPreviewResponse(
+        audit_id=int(audit.id),
+        preview_safety_status=audit.preview_safety_status,
+        generated_sql=audit.generated_sql,
+        generated_sql_hash=audit.generated_sql_hash,
+        approved_sql=audit.approved_sql,
+        approved_sql_hash=audit.approved_sql_hash,
+        preview_safety_reason=audit.preview_safety_reason,
+        errors=list(errors_list),
+        warnings=list(warnings_list),
+        schema_snapshot_id=audit.schema_snapshot_id,
+        schema_policy_hash=audit.schema_policy_hash,
+        db_type_code=audit.db_type_code,
+        sql_dialect=AiSchemaContextService._dialect_for(audit.db_type_code),
+        sql_workflow_version=audit.sql_workflow_version,
+        safety_policy_version=audit.safety_policy_version,
+        dify_workflow_run_id=audit.dify_workflow_run_id,
+        previewed_at=audit.previewed_at,
+    )
