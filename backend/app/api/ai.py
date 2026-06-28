@@ -3,8 +3,8 @@ AI Copilot API（Phase 3.6）
 
 C1 范围：GET /api/v1/ai/capabilities
 C3 范围追加：Chat CRUD/Send/History（4 端点）
+C10 范围追加：Schema Snapshot collect/status/history/context（4 端点）
 后续 commit 追加：
-- C10: Schema Snapshot collect/status
 - C13: SQL Preview
 - C19: SQL Execute/Executions
 - C24-C25: Inspection AI Analysis
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -28,6 +28,19 @@ from app.schemas.ai import (
     AiChatSessionListResponse,
     AiChatSessionResponse,
     AiChatSendResponse,
+    AiSchemaContextResponse,
+    AiSchemaSnapshotCollectRequest,
+    AiSchemaSnapshotCollectResponse,
+    AiSchemaSnapshotListResponse,
+    AiSchemaSnapshotResponse,
+)
+from app.services.ai.ai_schema_context_service import AiSchemaContextService
+from app.services.ai.ai_schema_snapshot_service import (
+    AiSchemaSnapshotService,
+    AwxLaunchError,
+    FeatureDisabledError,
+    InstanceNotFoundError,
+    UnsupportedDbTypeError,
 )
 from app.services.ai_chat_service import (
     AiChatService,
@@ -218,3 +231,123 @@ def list_chat_messages(
         items=[AiChatMessageResponse.model_validate(o) for o in items],
         total=total,
     )
+
+
+# -----------------------------------------------------------------------------
+# C10: Schema Snapshot — Collect / Status / History / Context
+# -----------------------------------------------------------------------------
+@router.post(
+    "/sql/schema-snapshots/{instance_id}/collect",
+    response_model=AiSchemaSnapshotCollectResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def trigger_schema_snapshot_collection(
+    instance_id: int,
+    payload: AiSchemaSnapshotCollectRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSchemaSnapshotCollectResponse:
+    """触发 instance 的 schema metadata 采集（plan §4.1）。
+
+    返回 202 Accepted + CollectorRun 元数据。Callback 通过
+    ``business_domain='ai_schema'`` 路由到 ``AiSchemaSnapshotCallbackService``
+    落库；前端拿到 collector_run_id 后通过 GET status 轮询。
+
+    错误码（plan §11）：
+    - 404 — instance 不存在
+    - 422 — db_type 不在 capabilities 支持范围
+    - 502 — AWX launch 失败
+    - 503 — AI_SQL_PREVIEW_ENABLED=false
+    """
+    try:
+        result = AiSchemaSnapshotService.trigger_collection(
+            db,
+            instance_id=instance_id,
+            database_name=payload.database_name,
+            requested_by=current_user.username,
+            request_base_url=str(request.base_url),
+        )
+    except InstanceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except FeatureDisabledError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except UnsupportedDbTypeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except AwxLaunchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return AiSchemaSnapshotCollectResponse(**result)
+
+
+@router.get(
+    "/sql/schema-snapshots/{instance_id}",
+    response_model=AiSchemaSnapshotListResponse,
+)
+def get_schema_snapshot_status(
+    instance_id: int,
+    database_name: str | None = Query(default=None, max_length=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSchemaSnapshotListResponse:
+    """返回该 instance 最新 snapshot（is_current 优先，否则最新任意状态）。
+
+    返回 items 长度为 0 或 1：0 表示从未采集；1 表示有 snapshot（含
+    pending/running/failed），前端根据 ``status`` 字段渲染不同 UI。
+    """
+    snapshot = AiSchemaSnapshotService.get_latest_any_status(
+        db,
+        instance_id=instance_id,
+        database_name=database_name,
+    )
+    items = [AiSchemaSnapshotResponse.model_validate(snapshot)] if snapshot is not None else []
+    return AiSchemaSnapshotListResponse(items=items, total=len(items))
+
+
+@router.get(
+    "/sql/schema-snapshots/{instance_id}/history",
+    response_model=AiSchemaSnapshotListResponse,
+)
+def list_schema_snapshot_history(
+    instance_id: int,
+    database_name: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSchemaSnapshotListResponse:
+    """返回历史 snapshot 列表（created_at DESC）。
+
+    包含 pending/running/failed/success；前端按需过滤。
+    """
+    items, total = AiSchemaSnapshotService.list_history(
+        db,
+        instance_id=instance_id,
+        database_name=database_name,
+        limit=limit,
+    )
+    return AiSchemaSnapshotListResponse(
+        items=[AiSchemaSnapshotResponse.model_validate(o) for o in items],
+        total=total,
+    )
+
+
+@router.get(
+    "/sql/schema-snapshots/{instance_id}/context",
+    response_model=AiSchemaContextResponse,
+)
+def get_schema_context(
+    instance_id: int,
+    database_name: str | None = Query(default=None, max_length=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSchemaContextResponse:
+    """实时构建 Dify 用的 schema_context + schema_policy_hash (plan §4.6)。
+
+    available=false 时仅 ``reason`` + ``instance_id`` + ``db_type_code`` 有意义。
+    """
+    result = AiSchemaContextService.build_schema_context(
+        db,
+        instance_id=instance_id,
+        database_name=database_name,
+    )
+    return AiSchemaContextResponse(**result)

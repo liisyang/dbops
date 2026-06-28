@@ -56,6 +56,31 @@ async def lifespan(app: FastAPI):
         except Exception as exc:  # noqa: BLE001
             logger.warning("AI chat startup cleanup failed (continuing): %s", exc)
 
+    # Phase 3.6 C10: schema snapshot running timeout cleanup (plan §18 C32)
+    # 在 SQL Preview 开关开启时才有意义；即使功能关闭也不影响其它流程。
+    if settings.AI_SQL_PREVIEW_ENABLED:
+        try:
+            from app.services.ai.ai_schema_snapshot_service import (
+                AiSchemaSnapshotService,
+            )
+
+            def _run_snapshot_cleanup() -> int:
+                cleanup_db = SessionLocal()
+                try:
+                    return AiSchemaSnapshotService.cleanup_running_timeouts(cleanup_db)
+                finally:
+                    cleanup_db.close()
+
+            cleaned = await asyncio.to_thread(_run_snapshot_cleanup)
+            logger.info(
+                "AI schema snapshot startup cleanup: marked %s running snapshots failed (timeout)",
+                cleaned,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "AI schema snapshot startup cleanup failed (continuing): %s", exc
+            )
+
     # 主机监控已禁用（7表设计不需要）
     # from app.services.host_monitor import set_db_session
     # set_db_session(SessionLocal)

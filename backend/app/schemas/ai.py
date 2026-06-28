@@ -3,6 +3,7 @@ AI Copilot Pydantic Schemas（Phase 3.6）
 
 C2 范围：Chat 部分（ai_chat_session + ai_chat_message）
 C6 范围：SQL Schema Snapshot
+C10 范围：Schema Snapshot API（POST collect / GET status / GET history / GET context）
 后续 commit 追加：
 - C13: SQL Preview
 - C19: SQL Execute
@@ -149,3 +150,69 @@ class AiSchemaSnapshotResponse(BaseModel):
     error_message: Optional[str] = None
     collected_at: Optional[datetime] = None
     created_at: datetime
+
+
+# =============================================================================
+# C10: Schema Snapshot API
+# =============================================================================
+class AiSchemaSnapshotCollectRequest(BaseModel):
+    """POST collect 请求。
+
+    首版（plan §4.8 P1）只支持 PostgreSQL；前端无需传入 db_type_code，由后端
+    根据 instance_id 派生。当前只允许指定数据库名（database_name），留空时
+    fallback 到 '<default>'。
+    """
+
+    database_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="目标 database（留空时由 service 端 fallback 到 '<default>'）",
+    )
+
+
+class AiSchemaSnapshotCollectResponse(BaseModel):
+    """POST collect 响应（plan §4.1）。
+
+    返回 202 语义：collector_run 已创建，AWX 调度完成后通过 callback 落库。
+    """
+
+    detail: str
+    collector_run_id: int
+    run_id: str
+    awx_job_id: Optional[int] = None
+    awx_job_url: Optional[str] = None
+    status: str
+    item_count: int
+
+
+class AiSchemaSnapshotListResponse(BaseModel):
+    """GET status / GET history 列表响应。"""
+
+    items: list[AiSchemaSnapshotResponse]
+    total: int
+
+
+class AiSchemaContextResponse(BaseModel):
+    """GET context 响应（plan §4.6 build_schema_context）。
+
+    available=false 时仅 ``reason`` + ``instance_id`` + ``db_type_code`` 有意义，
+    其余字段为 None。前端据此展示「采集未完成 / 已过期 / 不支持」三种提示。
+    """
+
+    available: bool
+    instance_id: int
+    db_type_code: Optional[str] = None
+    sql_dialect: Optional[str] = None
+    schema_context: Optional[str] = None
+    allowed_schemas: Optional[list[str]] = None
+    allowed_tables: Optional[list[str]] = None
+    allowed_columns: Optional[dict[str, list[str]]] = None
+    denied_columns: Optional[list[str]] = None
+    schema_snapshot_id: Optional[int] = None
+    schema_policy_hash: Optional[str] = None
+    snapshot_hash: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    total_tables: Optional[int] = None
+    total_columns: Optional[int] = None
+    reason: Optional[str] = Field(default=None, description="available=false 时的原因码")
