@@ -1370,6 +1370,31 @@ class CollectorService:
                     "backup snapshot save failed: run_id=%s err=%s", run.run_id, _exc
                 )
 
+        # Phase 3.6B0 C9: ai_schema callback dispatch. Independent of
+        # inspection/backup — schema-snapshot runs only write
+        # ``ai_sql_schema_snapshot`` rows. Routing is driven by the
+        # ``business_domain`` field carried on each callback item (set by
+        # the ``db_schema_metadata_collect`` Role in ansible-playbooks).
+        # Mirrors the backup_status pattern above: try/except so a
+        # snapshot save failure cannot break the surrounding transaction.
+        if run_type == "ai_schema" or any(
+            (getattr(cb, "business_domain", None) or "") == "ai_schema"
+            for cb in callback_items
+        ):
+            try:
+                from app.services.ai.ai_schema_snapshot_callback_service import (
+                    save_snapshots,
+                )
+
+                save_snapshots(db, run=run, callback_items=callback_items)
+            except Exception as _exc:
+                # Defensive — log via the standard channel and continue.
+                import logging as _logging
+
+                _logging.getLogger(__name__).exception(
+                    "ai_schema snapshot save failed: run_id=%s err=%s", run.run_id, _exc
+                )
+
         run.status = CollectorService._summarize_run_status(
             db.query(CollectorRunItem).filter(CollectorRunItem.run_id == run.run_id).all()
         )
