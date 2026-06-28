@@ -1,7 +1,7 @@
 # 模块图
 
 > 文档状态：已校准
-> 最近校准：2026-06-13
+> 最近校准：2026-06-28
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -40,6 +40,10 @@
 | 审计与安全 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/audit/*.vue` |
 | 知识库 | 规划中 | 核心资产管理收尾后排期 | `frontend/src/views/knowledge/Index.vue` |
 | WebSocket | 已实现 | 任务实时输出推送 | `backend/app/api/websocket.py` |
+| AI Copilot - Chat | 已实现（Phase 3.6 C1-C5 + BE-bug1 修复） | Dify chat-message app；user 维度会话/消息 CRUD + 发送（幂等 client_request_id）+ 消息历史；启动 stale cleanup；前端 Chat.vue 完整 UI（会话侧栏 + 消息流 + 输入框 + 错误兜底 409/502/503/504） | `backend/app/services/ai_chat_service.py` + `backend/app/api/ai.py:118-244` + `frontend/src/views/ai/Chat.vue` |
+| AI Copilot - Schema Snapshot | 已实现（Phase 3.6B0 C6-C10） | PostgreSQL 元数据采集（AWX 触发）+ callback 落库 + 5 态机（pending/running/success/failed/unavailable）；两阶段发布 is_current；TTL；SHA-256 snapshot_hash；4 API 端点（trigger/status/history/context）；context 含 schema_policy_hash 供 SQL Preview 强绑定 | `backend/app/services/ai/ai_schema_metadata_builder.py` + `backend/app/services/ai/ai_schema_snapshot_service.py` + `backend/app/services/ai/ai_schema_context_service.py` + `backend/app/services/ai/ai_schema_snapshot_callback_service.py` + `backend/app/api/ai.py:250-364` |
+| AI Copilot - SQL Preview | 已实现（Phase 3.6B1 C11-C12） | sqlglot AST 权威层 + Dify sql-generator workflow 调用；6 层 SQL 安全防御（Layer 3 AST 落地）；双轨 SQL（generated_sql 审计追溯 vs approved_sql 权威）+ 双 SHA-256 + schema_policy_hash 强绑定；7 类异常 → HTTP 404/409/422/502/503/504；ai_sql_audit 表 24 字段/8 FK/6 CHECK/6 索引；Execute 阶段（C17-C19）待实现 | `backend/app/services/ai/ai_sql_preview_service.py` + `backend/app/services/sql_safety_service.py` + `backend/app/api/ai.py:370-461` |
+| AI Copilot - SQL Execute | 规划中（Phase 3.6B1 C17-C19） | 审计 SQL 通过后真正下发到目标 DB；audit_id 引用 + business_context 注入 + AWX collector_run 调度；callback 回写 row_count/duration_ms/executed_at | 规划中（尚未编码） |
 
 ## 3. page / api / service / model / table 对应关系
 
