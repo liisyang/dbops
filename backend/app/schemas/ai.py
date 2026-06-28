@@ -79,7 +79,9 @@ class AiChatMessageResponse(BaseModel):
     status: Literal["pending", "completed", "failed", "stale"]
     content: Optional[str] = None
     parent_message_id: Optional[int] = None
-    metadata_json: dict[str, Any] = Field(default_factory=dict, alias="metadata")
+    # 字段名 metadata_json 而非 metadata：避免与 SQLAlchemy Base.metadata 保留属性冲突
+    # （ORM 中 Python 属性 metadata_json 映射到 DB 列 metadata — 见 app/models/ai.py:111）
+    metadata_json: dict[str, Any] = Field(default_factory=dict)
     dify_task_id: Optional[str] = None
     workflow_run_id: Optional[str] = None
     elapsed_ms: Optional[int] = None
