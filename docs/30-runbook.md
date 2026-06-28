@@ -1,7 +1,7 @@
 # 排障手册
 
 > 文档状态：已校准
-> 最近校准：2026-06-16
+> 最近校准：2026-06-28
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -63,6 +63,7 @@
 | cancel_batch_run 后 batch.status 被 callback 覆盖为 success | 检查 cancel 请求的时间线 vs callback 时间线 | per-row commit 释放初始 FOR UPDATE 锁后，callback 可抢先 finalize batch → cancel 最终无条件写 "cancelled" 覆盖 "success" | v2 在最终 batch re-acquire 后检查 `BATCH_TERMINAL_STATUSES`，若已终态则返回 `detail=already_terminal` 保留原状态 | `backend/app/services/batch_collector_service.py:cancel_batch_run` (C2, 批 4) |
 | timeout_recovery 覆盖 callback 已终态的 run | 检查 run.status 是否在 timeout 后又被改回 "timeout" | 旧代码在一次 SELECT FOR UPDATE 中拿候选行后不再重读 status，callback 在 AWX HTTP 调用期间抢先终态 | v2 改 per-row re-select + `RUN_TERMINAL_STATUSES`（canceled 双 L）守卫，AWX error 时 `db.rollback()` 释放锁 | `backend/app/tasks/collector_tasks.py:timeout_recovery_task` (I3+I4, 批 4) |
 | asset_fact_snapshot 双写 TOCTOU | 查询是否有同 `(source_run_id, source_item_key)` 的重复行 | PG 默认 NULLS DISTINCT → UNIQUE 约束不覆盖 NULL 列，两条 NULL 行可同时通过 pre-check → double INSERT | v2 合并迁移：DROP full UNIQUE → CREATE PARTIAL UNIQUE INDEX (`WHERE source_run_id IS NOT NULL AND source_item_key IS NOT NULL`) | `backend/db/dbops_phase3_4_batch_verify_p0_4_5_6_v2_partial_unique.sql` (C3+I5, 批 4) |
+| AI Copilot Chat "按发送按钮无反应 + Network 无 POST" | 1) 看 Console 是否有 `Vue warn: Unhandled error during execution of component event handler` + `TypeError: crypto.randomUUID is not a function`；2) 看访问 URL 是否 HTTP + IP（非 localhost） | Chrome 在 **非 secure context**（HTTP + IP 非 localhost）下 `crypto.randomUUID` 直接抛 TypeError，Vue warn 不在 UI → 用户感觉"无反应 + 无报错" | 新建 `frontend/src/utils/uuid.ts` 提供 `safeUuid()`（主路径 `crypto.randomUUID` + Math.random RFC4122 v4 fallback），`Chat.vue:367` 改用 `safeUuid()`；未来 C11 SQL Preview 复用 | `frontend/src/utils/uuid.ts` (NEW) + `frontend/src/views/ai/Chat.vue:156,367` + `frontend/src/types/ai.ts:66` |
 
 ## 3. 标准排查命令
 
@@ -211,6 +212,7 @@ curl -s http://127.0.0.1:60801/openapi.json \
 | `cancel_batch_run` 把整批 dispatch 一次性 `with_for_update().all()` 锁住，AWX HTTP I/O 全部在长事务里 | callback writer / 其他 worker 在 1000 实例 batch cancel 期间被锁阻塞 | 改为枚举候选 ID（无锁）+ per-row `with_for_update(skip_locked=True).first()` + per-row `db.commit()` 立刻释放 | ✅ 已修复 | `backend/app/services/batch_collector_service.py:1215-1285` |
 | `handle_callback` 双 callback TOCTOU 重复插入 `asset_fact_snapshot` | callback 高并发场景下 `existing_snapshot` 预检与 INSERT 之间存在竞态 | 加 DB 级别 `UNIQUE(source_run_id, source_item_key)` 约束 + ORM `UniqueConstraint` 镜像 | ✅ 已修复 | `backend/app/models/dbops_assets.py:1171-1174` + DB 约束 `uq_asset_fact_snapshot_source` |
 | db_fact_collect role 每个 item 重复 copy collector_client + 6 段 debug，导致 6 items Job 浪费 72% wall time | 主 playbook `include_role` loop N 次 → role 内 `Copy collector_client from project files` 执行 N 次（11-14s/次），加 6 段 debug 也按 N 倍放大 | 主 playbook 抽 `db_fact_check_codes` + `has_db_fact_items`，预拷贝一次（`/tmp/collector_client`）并 `Verify import`；role 删除 Copy + 6 段 Debug 共 7 task | ✅ 已修复 | `ansible-playbooks/playbooks/dbops_collector_generic.yml`（pre-copy block）+ `playbooks/roles/db_fact_collect/tasks/main.yml`（精简 148→102 行）；BATCH-20260616115042-871686 (id 136) 3 items SQL Server batch_total 40s（AWX Job 32s + 启动 8s），较 batch 91 baseline 63s 提速 36%；AWX Job 333 stdout 确认 `Pre-copy collector_client` 出现 1 次、`Route db_fact_collect items` 仍执行 3 次（DB_BASIC 14 facts + DB_VERSION 8 facts + DB_ROLE 4 facts）、callback status=200 attempts=1、3 fact_snapshot + 26 fact_value 写入 |
+| AI Copilot Chat "按发送无反应 + 无明显 UI 报错" | Console 抓 `Vue warn: Unhandled error` + `crypto.randomUUID is not a function`；curl `/api/v1/ai/capabilities` 看 `chat_enabled`；curl 模拟 sendMessage（admin token）确认后端 + Dify 链路 | `crypto.randomUUID` 是 Web Crypto API，Chrome 在非 secure context（HTTP + IP 非 localhost）下直接抛 TypeError，Vue warn 不弹 toast | 已加 `frontend/src/utils/uuid.ts` safeUuid()（crypto.randomUUID 主路径 + Math.random RFC4122 v4 fallback），`Chat.vue:367` 改用；vue-tsc 0 错；curl 实测 sendMessage 真实返回 Dify 助手消息 | ✅ 已修复 | `frontend/src/utils/uuid.ts` (NEW) + `frontend/src/views/ai/Chat.vue:156,367` + `frontend/src/types/ai.ts:66`；C5 commit `3af1b15` 后 hotfix |
 
 ## 6. 需现场确认
 
@@ -252,4 +254,40 @@ curl -s http://127.0.0.1:60801/openapi.json \
 |---|---|---|---|---|
 | v5.1 重建后历史 inspection 数据丢失 | 备份是否完整；migration 顺序 | v5.1 脚本内含 DROP TABLE（无 CASCADE） | 回滚路径：恢复备份后回退到 3.4 schema；prod 应用前需 DBA 现场评估 | `backend/db/dbops_inspection_v5_1.sql:25-32` |
 | v5.2 `inspection_type` 索引失败 | `inspection_item` 表是否已建 | v5.1 未先跑 / v5.2 在 v5.1 之前应用 | 先跑 v5.1 → 再跑 v5.2 | `backend/db/dbops_inspection_v5_2_inspection_type.sql` |
+
+## 8. Phase 3.6 AI Copilot 排障入口
+
+> 本节为 Phase 3.6（AI Copilot）上线后排障入口；按子阶段（A / B0 / B / C）分组。
+> 当前已完成子阶段：3.6A Chat（C1–C5 + BE-bug1 + crypto.randomUUID hotfix）+ 3.6B0 Schema Snapshot（C6–C10）。
+> 计划中：3.6B SQL Audit（C11 sqlglot + SqlSafetyService 起手）+ 3.6C Inspection AI Analysis。
+
+### 8.1 Chat（Dify #1 `dbops-general-chat`）
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| 按发送按钮无反应 + Network 无 POST + Console 有 `Vue warn: Unhandled error during execution of component event handler` | 抓完整 console（warn/info 也要），看 `TypeError: crypto.randomUUID is not a function at onSend` | Chrome 在非 secure context（HTTP + IP 非 localhost）下 `crypto.randomUUID` 不可用抛 TypeError，Vue warn 不在 UI → 用户感觉"无反应 + 无报错" | 1) 立即强刷 `Ctrl+Shift+R`；2) 若仍报错，确认 `frontend/src/utils/uuid.ts` 已存在且 `Chat.vue:367` 调 `safeUuid()`；3) 长期方案：把前端部署到 HTTPS 或 `localhost` | `frontend/src/utils/uuid.ts` (NEW) + `frontend/src/views/ai/Chat.vue:156,367` |
+| Chat 发送 401 | `localStorage.token` 是否存在；后端 `SECRET_KEY` 是否变化 | token 过期（默认 480min）/ 被清空 / 后端重启后密钥变更 | 重新登录 admin/admin；检查 `backend/app/api/deps.py:55-56` SECRET_KEY 来源 | `frontend/src/api/request.js:114-126` + `backend/app/api/deps.py:55-56` |
+| Chat 发送 409 | 同会话是否已有 assistant pending 在有效期内 | 前端连发两次 / 上一次请求 Dify 未响应 | 等 30s pending 过期后重发；前端用 `crypto.randomUUID` 保证幂等（同 id 重发命中） | `backend/app/api/ai.py:182-184` + `frontend/src/api/ai.ts:48-62` |
+| Chat 发送 502 | `DIFY_BASE_URL` / `DIFY_API_KEY` 配置；Dify 服务可达性 | Dify 不可用 / API key 失效 / network 不通 | `curl $DIFY_BASE_URL/v1/chat-messages` 验证；检查 `.env` 中 `DIFY_API_KEY` 对应 `dbops-general-chat` (app-KMBEDixFmpgaBKSa6VUobw5O) | `backend/app/api/ai.py:187-194` + `backend/app/services/ai/dify_service.py` + `backend/.env` |
+| Chat 发送 503 | `AI_CHAT_ENABLED` 环境变量 | 配置开关关闭 | `.env` 设 `AI_CHAT_ENABLED=true` 后重启后端 | `backend/app/api/ai.py:185-186` + `backend/app/config.py` |
+| Chat 发送 504 | Dify 调用超时 | Dify 服务慢 / network 抖动 / 问题过长触发 Dify 工作流超时 | 换短问题重试；调 `AI_CHAT_TIMEOUT_SEC`（如 60 → 90） | `backend/app/api/ai.py:189-190` |
+| Chat 菜单入口不显示（侧栏） | 浏览器 DevTools 看 `/api/v1/ai/capabilities` 响应 | `chat_enabled=false` / capabilities 失败被吞走全 false fallback | 检查 `backend/.env` 的 `AI_CHAT_ENABLED=true`；前端 `loadAiCapabilities` 失败兜底逻辑（`src/api/ai.ts:107-118`） | `frontend/src/api/ai.ts:82-126` + `frontend/src/components/Layout.vue` |
+| Chat sendMessage 500 | 后端日志 `metadata` 字段冲突 / Pydantic validation error | ORM 与 Pydantic schema 字段命名冲突（历史上 C5 上线后 BE-bug1：`metadata_json` vs `metadata` alias） | 检查 `backend/app/schemas/ai.py` 是否移除 `metadata` alias；后端 stdout 找具体 `pydantic` 报错 | `backend/app/schemas/ai.py` (AiChatMessageResponse) + 后端日志 |
+
+### 8.2 Schema Snapshot（Dify 不直接对接；AWX 异步采集）
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| `POST /api/v1/ai/schema/instances/{id}/collect` 返回 503 | `AI_SQL_PREVIEW_ENABLED` 配置 | 配置开关关闭 | `.env` 设 `AI_SQL_PREVIEW_ENABLED=true` 后重启 | `backend/app/services/ai/ai_schema_snapshot_service.py` (FeatureDisabledError) |
+| snapshot 一直 `pending` 不变 | AWX Job 是否真正启动；callback 是否到达后端 | AWX launch 失败 / 网络断 / Project 路由未注册 | 1) `curl $AWX_URL/api/v2/job_templates/10/launch/` 用 admin token 试 launch；2) 看 ansible-playbooks 端 `db_schema_metadata_collect` role 是否已 push；3) 看后端 callback 路由 `/api/v1/ai/callback/...` 日志 | `ansible-playbooks/playbooks/roles/db_schema_metadata_collect/` + `backend/app/services/ai/ai_schema_callback_service.py` |
+| snapshot status 显示 `failed` | callback 携带的 `check_code` | `UNSUPPORTED_DB_TYPE` / `CREDENTIAL_MISSING` / `COLLECTION_TIMEOUT` | 看 `snapshot.error_code` 字段；`_AiSchemaMetadataBuilder` 已知不支持 DB 类型（如 MySQL/SQL Server）的跳过逻辑 | `backend/app/services/ai/ai_schema_metadata_builder.py` |
+| `get_schema_context` 返回 `unavailable` | snapshot 是否 `is_current=true` | snapshot 已 `expired` / DB 已迁移过 schema → 旧 snapshot policy hash 不再适用 | 重新 `trigger_collection`；等 snapshot `is_current=true` 后再调用 | `backend/app/services/ai/ai_schema_context_service.py` |
+
+### 8.3 SQL Audit（Dify #2 `dbops-sql-generator`，计划中 C11 起手）
+
+> 本节为占位；C11（sqlglot + SqlSafetyService）起手后追加具体排障条目。
+
+### 8.4 Inspection AI Analysis（Dify #3 `dbops-report-analyzer`，计划中 3.6C）
+
+> 本节为占位；3.6C 起手后追加具体排障条目。
 | v5.2 回滚 | `idx_inspection_item_inspection_type` 索引是否存在 | IF EXISTS 防护 | 直接执行 `backend/db/rollback_inspection_v5_2_inspection_type.sql` | `backend/db/rollback_inspection_v5_2_inspection_type.sql` |

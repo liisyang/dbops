@@ -63,7 +63,7 @@ export interface AiChatSessionListResponse {
  * 发送消息请求（前端调用核心）。
  *
  * 关键字段：
- * - client_request_id: 前端生成的 UUID（crypto.randomUUID），用于幂等
+ * - client_request_id: 前端生成的 UUID（utils/uuid.safeUuid），用于幂等
  * - current_page: 白名单页面标识（ai_chat / inspection_report / …）
  */
 export interface AiChatMessageSendRequest {

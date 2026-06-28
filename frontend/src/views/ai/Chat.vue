@@ -138,7 +138,7 @@
 /**
  * AI Copilot — 主入口（Phase 3.6 C5-P4）
  *
- * P4 进度：接 sendMessage + crypto.randomUUID + 错误码 409/502/503/504/null 兜底。
+ * P4 进度：接 sendMessage + safeUuid（兼容非 secure context）+ 错误码 409/502/503/504/null 兜底。
  * - 乐观更新：先 append 本地 user 消息（status=pending），响应回来再替换
  * - 错误状态码特定文案（plan §11）：
  *     409 ChatConcurrentPendingError — 已有 pending 消息
@@ -153,6 +153,7 @@
 import { ref, computed, onMounted } from 'vue'
 import { aiApi } from '@/api/ai'
 import type { AiChatMessage, AiChatSession } from '@/types/ai'
+import { safeUuid } from '@/utils/uuid'
 import {
   ChatMessageBubble,
   ChatInputBox,
@@ -363,7 +364,7 @@ async function onSend(value: string) {
   const sessionId = activeSessionId.value
   if (sessionId == null || sending.value) return
 
-  const clientRequestId = crypto.randomUUID()
+  const clientRequestId = safeUuid()
   const optimistic = buildOptimisticUser(value, clientRequestId)
   appendToSession(sessionId, optimistic)
   sendError.value = null
