@@ -2,8 +2,9 @@
 AI Copilot Pydantic Schemas（Phase 3.6）
 
 C2 范围：Chat 部分（ai_chat_session + ai_chat_message）
+C6 范围：SQL Schema Snapshot
 后续 commit 追加：
-- C6/C13: SQL Schema Snapshot + Preview
+- C13: SQL Preview
 - C19: SQL Execute
 - C24-C25: Inspection AI Analysis
 """
@@ -112,3 +113,39 @@ class AiChatSendResponse(BaseModel):
     user_message: AiChatMessageResponse
     assistant_message: Optional[AiChatMessageResponse] = None
     idempotent_replay: bool = Field(default=False, description="是否幂等命中（client_request_id 已存在）")
+
+
+# =============================================================================
+# C6: SQL Schema Snapshot
+# =============================================================================
+class AiSchemaSnapshotResponse(BaseModel):
+    """数据库结构快照响应（C10 端点会复用此 schema）。
+
+    关键设计（避免 BE-bug1 复发）：
+    - 不使用 Field alias：Python 属性名 == JSON key，Pydantic from_attributes=True
+      默认按字段名取 ORM 属性，不触发 Base.metadata 保留属性冲突
+    - 状态字段用 Literal 限定为五态机
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    instance_id: int
+    db_type_code: str
+    database_name: str
+    schema_name: Optional[str] = None
+    status: Literal["pending", "running", "success", "failed", "unavailable"]
+    allowed_schemas: list[str] = Field(default_factory=list)
+    allowed_tables: list[str] = Field(default_factory=list)
+    allowed_columns: dict[str, list[str]] = Field(default_factory=dict)
+    denied_columns: list[str] = Field(default_factory=list)
+    is_current: bool
+    collector_run_id: Optional[int] = None
+    snapshot_hash: Optional[str] = None
+    total_tables: Optional[int] = None
+    total_columns: Optional[int] = None
+    expires_at: Optional[datetime] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    created_at: datetime
