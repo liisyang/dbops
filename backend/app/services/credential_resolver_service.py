@@ -358,6 +358,7 @@ class CredentialResolverService:
             "DB_BASIC_FACT_COLLECTION",
             "DB_VERSION_FACT_COLLECTION",
             "DB_ROLE_FACT_COLLECTION",
+            "DB_SCHEMA_METADATA_COLLECTION",
         }
         if check_code in fact_check_codes:
             return ["db_readonly", "db_monitor"]

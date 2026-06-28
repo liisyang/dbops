@@ -959,3 +959,158 @@ CheckItemBuilderRegistry.register("DB_BASIC_FACT_COLLECTION", _DbBasicFactCollec
 CheckItemBuilderRegistry.register("DB_VERSION_FACT_COLLECTION", _DbVersionFactCollectionBuilder())
 CheckItemBuilderRegistry.register("DB_ROLE_FACT_COLLECTION", _DbRoleFactCollectionBuilder())
 CheckItemBuilderRegistry.register("DB_READONLY_SQL_EXEC", _DbReadonlySqlExecBuilder())
+
+
+class _AiSchemaMetadataBuilder(BaseCheckItemBuilder):
+    """Generate dispatch items for ``DB_SCHEMA_METADATA_COLLECTION``.
+
+    Phase 3.6B0 (plan §4.4): 首版只支持 PostgreSQL. 非 postgresql 实例
+    生成 skipped item (reason=UNSUPPORTED_DB_TYPE). 模板 SQL 文本 inline
+    进 ``rule_config.sql_text`` — 与 ``DB_READONLY_SQL_EXEC`` 一致,
+    不依赖 collector_client 文件系统访问, EE 端零补丁.
+
+    AI Schema 采集完成后, callback 通过 ``business_domain='ai_schema'``
+    路由到 ``AiSchemaSnapshotCallbackService`` (Phase 3.6 C9),
+    不进入 ``fact_snapshot`` / ``inspection_result``.
+    """
+
+    _check_code = "DB_SCHEMA_METADATA_COLLECTION"
+
+    # Phase 3.6B0 §4.8 P1 统一: 首版只支持 PostgreSQL
+    _SUPPORTED_DB_TYPES = frozenset({"postgresql", "postgres"})
+
+    # Phase 3.6B0 §4.4 P1 完整性保证: Schema 采集独立限制
+    _MAX_ROWS = 20000
+    _MAX_BYTES = 10485760  # 10MB
+
+    @classmethod
+    def _load_sql_template(cls) -> str:
+        """Load PostgreSQL schema metadata SQL template from disk.
+
+        Template is the single source of truth (Phase 3.6 C7). Inline into
+        ``rule_config.sql_text`` so the EE collector_client executes the
+        exact bytes the backend validated.
+        """
+        from pathlib import Path
+
+        template_path = (
+            Path(__file__).parent
+            / "ai"
+            / "sql_templates"
+            / "postgresql"
+            / "pg_schema_columns.sql"
+        )
+        return template_path.read_text(encoding="utf-8").strip()
+
+    @staticmethod
+    def _default_database(db_type_code: str, service_name: str = "") -> str:
+        defaults = {
+            "mssql": "master",
+            "sqlserver": "master",
+            "postgresql": "postgres",
+            "postgres": "postgres",
+            "mysql": "mysql",
+            "oracle": service_name or "",
+        }
+        return defaults.get((db_type_code or "").lower(), "master")
+
+    def build(self, db, *, assets, options):
+        from app.models.dbops_assets import DbInstance, DbType, Server
+        from app.services.credential_resolver_service import CredentialResolverService
+
+        timeout_seconds = int(options.get("timeout_seconds") or 30)
+        items: list[dict[str, Any]] = []
+
+        for asset in assets:
+            target_scope = asset.get("target_scope", "db_instance")
+            if target_scope != "db_instance":
+                continue
+
+            instance_id = int(asset["id"])
+            instance = db.query(DbInstance).filter(DbInstance.id == instance_id).first()
+            if not instance:
+                continue
+
+            server = db.query(Server).filter(Server.id == instance.server_id).first()
+            if not server:
+                continue
+
+            db_type = db.query(DbType).filter(DbType.id == instance.db_type_id).first()
+            db_type_code = (db_type.type_code or "").lower() if db_type else ""
+
+            target_host = str(server.ip_address)
+            target_port = int(instance.port or 0)
+            if target_port < 1 or target_port > 65535:
+                continue
+
+            database_name = self._default_database(
+                db_type_code, str(instance.service_name or "")
+            )
+
+            base_item = {
+                "item_key": (
+                    f"db_instance:{instance_id}:{self._check_code}:"
+                    f"{target_host}:{target_port}"
+                ),
+                "check_code": self._check_code,
+                "executor_type": "db_sql_readonly",
+                "business_domain": "ai_schema",
+                "target_scope": "db_instance",
+                "db_instance_id": instance_id,
+                "server_id": int(server.id),
+                "asset_id": instance_id,
+                "target_host": target_host,
+                "target_port": target_port,
+                "protocol": "tcp",
+                "endpoint_type": "DB_SERVICE_PORT",
+                "port_source": "db_instance_port",
+                "is_required": True,
+                "timeout_seconds": timeout_seconds,
+                "asset_name": instance.instance_name or str(instance_id),
+                "db_type_code": db_type_code,
+                "database_name": database_name,
+                "service_name": str(instance.service_name or ""),
+            }
+
+            # Phase 3.6B0 §4.8 P1: 首版只支持 postgresql
+            if db_type_code not in self._SUPPORTED_DB_TYPES:
+                items.append(
+                    self._build_skipped_item(item=dict(base_item), reason="UNSUPPORTED_DB_TYPE")
+                )
+                continue
+
+            # Resolve credential
+            credential = CredentialResolverService.resolve_for_item(
+                db,
+                target_scope="db_instance",
+                asset=asset,
+                check_code=self._check_code,
+            )
+            if not credential:
+                items.append(
+                    self._build_skipped_item(item=dict(base_item), reason="CREDENTIAL_MISSING")
+                )
+                continue
+
+            sql_text = self._load_sql_template()
+
+            item = dict(base_item)
+            item["rule_config"] = {
+                "sql_text": sql_text,
+                "timeout_seconds": timeout_seconds,
+                "max_rows": self._MAX_ROWS,
+                "max_bytes": self._MAX_BYTES,
+                "source": "dbops.ai.sql_templates.postgresql.pg_schema_columns",
+                "phase": "3.6B0",
+            }
+            item["credential_profile_id"] = credential["credential_profile_id"]
+            item["credential_code"] = credential["profile_code"]
+            item["awx_credential_id"] = credential["awx_credential_id"]
+            item["credential_role"] = credential["binding_role"]
+            item["credential_type"] = credential["credential_type"]
+            items.append(item)
+
+        return items
+
+
+CheckItemBuilderRegistry.register("DB_SCHEMA_METADATA_COLLECTION", _AiSchemaMetadataBuilder())

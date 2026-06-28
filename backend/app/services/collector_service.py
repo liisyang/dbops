@@ -185,6 +185,12 @@ class CollectorService:
                 "task_type": "DB_SQL_COLLECT",
                 "default_timeout_seconds": 60,
             },
+            "DB_SCHEMA_METADATA_COLLECTION": {
+                "check_name": "DB Schema Metadata Collection",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 60,
+            },
         }
         return defaults.get(
             check_code,
@@ -1575,6 +1581,7 @@ class CollectorService:
             "DB_BASIC_FACT_COLLECTION",
             "DB_ROLE_FACT_COLLECTION",
             "DB_VERSION_FACT_COLLECTION",
+            "DB_SCHEMA_METADATA_COLLECTION",
         }:
             if len(reachable) > 1:
                 return SKIP_REASON_PORT_CANDIDATE_CONFLICT
