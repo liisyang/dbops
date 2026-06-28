@@ -20,5 +20,8 @@ httpx>=0.27.0,<0.29.0  # Dify AI 客户端（同步连接池，与 SQLAlchemy �
 # SQLAlchemy (PostgreSQL)
 sqlalchemy==2.0.25
 
+# SQL 安全 AST 校验（Phase 3.6 SqlSafetyService.validate_with_ast 权威层）
+sqlglot>=25.0.0,<26.0.0
+
 # 测试
 pytest==7.4.0
