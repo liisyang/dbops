@@ -225,11 +225,27 @@ const baseMenuItems: MenuItem[] = [
   { key: 'knowledge', icon: 'menu_book', label: '知识库', path: '/knowledge' },
 ]
 
-// AI Copilot 菜单项（chat_enabled=true 时追加到基础菜单尾部）
-const aiMenuItem: MenuItem = { key: 'ai', icon: 'auto_awesome', label: 'AI Copilot', path: '/ai/chat' }
+// AI Copilot 菜单项（C13：父菜单带子项，按 capabilities 灰度）
+// - chat_enabled=true → 显示「AI 对话」子菜单
+// - sql_preview_enabled=true → 显示「SQL 生成器」子菜单（C13 NEW）
+// (chatEnabled ref 已在 line 133 声明)
+const sqlPreviewEnabled = ref(false)
+
+const aiMenuItem = computed<MenuItem>(() => {
+  const children: MenuChild[] = []
+  if (chatEnabled.value) {
+    children.push({ icon: 'forum', label: 'AI 对话', path: '/ai/chat' })
+  }
+  if (sqlPreviewEnabled.value) {
+    children.push({ icon: 'auto_awesome', label: 'SQL 生成器', path: '/ai/sql/preview' })
+  }
+  return { key: 'ai', icon: 'auto_awesome', label: 'AI Copilot', children }
+})
 
 const menuItems = computed<MenuItem[]>(() =>
-  chatEnabled.value ? [...baseMenuItems, aiMenuItem] : baseMenuItems,
+  aiMenuItem.value.children && aiMenuItem.value.children.length > 0
+    ? [...baseMenuItems, aiMenuItem.value]
+    : baseMenuItems,
 )
 
 const openSubmenus = ref<Record<string, boolean>>({})
@@ -280,9 +296,12 @@ onMounted(async () => {
   try {
     const caps = await loadAiCapabilities()
     chatEnabled.value = caps.chat_enabled
+    // C13: SQL Preview 子菜单灰度
+    sqlPreviewEnabled.value = caps.sql_preview_enabled
   } catch {
     // 兜底：保留 false（不显示 AI 入口）
     chatEnabled.value = false
+    sqlPreviewEnabled.value = false
   }
 })
 

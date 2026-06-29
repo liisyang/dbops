@@ -461,3 +461,140 @@ def test_resolve_dialect_helper_public():
     assert SqlSafetyService.resolve_dialect("mysql") == "mysql"
     assert SqlSafetyService.resolve_dialect("") is None
     assert SqlSafetyService.resolve_dialect("bigquery") is None
+
+
+# =============================================================================
+# Phase 3.6 C13 — Layer 1 正则预检（plan §5 Layer 1）
+# =============================================================================
+
+
+class TestLayer1PrecheckQuestion:
+    """Layer 1 用户问题正则预检（plan §5 6-layer SQL safety model）。"""
+
+    # ---------- happy path ----------
+
+    def test_empty_question_allowed(self):
+        r = SqlSafetyService.layer1_precheck_question("")
+        assert r["allowed"] is True
+        assert r["matched_keyword"] is None
+
+    def test_whitespace_only_question_allowed(self):
+        r = SqlSafetyService.layer1_precheck_question("   \t\n  ")
+        assert r["allowed"] is True
+
+    def test_safe_select_question_allowed(self):
+        r = SqlSafetyService.layer1_precheck_question(
+            "查询最近一周下单的用户名和邮箱"
+        )
+        assert r["allowed"] is True
+        assert r["matched_keyword"] is None
+        assert r["matched_pattern"] is None
+
+    def test_safe_count_question_allowed(self):
+        r = SqlSafetyService.layer1_precheck_question(
+            "统计今天每个分类的订单数量"
+        )
+        assert r["allowed"] is True
+
+    def test_safe_join_question_allowed(self):
+        r = SqlSafetyService.layer1_precheck_question(
+            "Join users and orders, list id and name"
+        )
+        assert r["allowed"] is True
+
+    # ---------- English dangerous keywords ----------
+
+    def test_drop_keyword_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("DROP TABLE users")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "DROP"
+        assert r["matched_pattern"] == "en"
+        assert r["error_code"] == "LAYER1_DANGEROUS_KEYWORD"
+        assert "DROP" in r["reason"]
+
+    def test_delete_keyword_case_insensitive(self):
+        r = SqlSafetyService.layer1_precheck_question("please Delete from users")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "DELETE"
+
+    def test_update_keyword_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("update users set status=1")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "UPDATE"
+
+    def test_insert_keyword_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("Insert a new user")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "INSERT"
+
+    def test_truncate_keyword_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("Truncate the log table")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "TRUNCATE"
+
+    def test_alter_keyword_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("alter table add column")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "ALTER"
+
+    def test_create_keyword_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("CREATE index on users")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "CREATE"
+
+    def test_grant_revoke_rejected(self):
+        assert SqlSafetyService.layer1_precheck_question("GRANT select to user")["matched_keyword"] == "GRANT"
+        assert SqlSafetyService.layer1_precheck_question("REVOKE all from user")["matched_keyword"] == "REVOKE"
+
+    # ---------- Chinese dangerous keywords ----------
+
+    def test_chinese_delete_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("把过期数据删除")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "删除"
+        assert r["matched_pattern"] == "cn"
+
+    def test_chinese_insert_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("批量插入新用户")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "插入"
+
+    def test_chinese_create_table_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("帮我建表 users")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "建表"
+
+    def test_chinese_grant_rejected(self):
+        r = SqlSafetyService.layer1_precheck_question("给用户授权读权限")
+        assert r["allowed"] is False
+        assert r["matched_keyword"] == "授权"
+
+    # ---------- word boundary: identifier with dangerous keyword NOT matched ----------
+
+    def test_update_in_identifier_not_matched(self):
+        """'update_time' 是普通字段名 — 不应被 UPDATE 词边界匹配。"""
+        r = SqlSafetyService.layer1_precheck_question("按 update_time 排序的用户列表")
+        assert r["allowed"] is True
+
+    def test_drop_in_identifier_not_matched(self):
+        """'dropbox' 这种标识符不应被 DROP 词边界匹配。"""
+        r = SqlSafetyService.layer1_precheck_question("查询 dropbox 用户的文件")
+        assert r["allowed"] is True
+
+    # ---------- 返回结构完整性 ----------
+
+    def test_rejected_returns_complete_dict(self):
+        r = SqlSafetyService.layer1_precheck_question("DROP TABLE x")
+        assert set(r.keys()) == {
+            "allowed", "reason", "matched_keyword", "matched_pattern", "error_code"
+        }
+        assert isinstance(r["reason"], str)
+        assert r["reason"] != ""
+
+    def test_allowed_returns_complete_dict(self):
+        r = SqlSafetyService.layer1_precheck_question("查询活跃用户")
+        assert set(r.keys()) == {
+            "allowed", "reason", "matched_keyword", "matched_pattern", "error_code"
+        }
+        assert r["reason"] is None
+        assert r["matched_keyword"] is None

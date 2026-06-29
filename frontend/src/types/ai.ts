@@ -114,3 +114,68 @@ export interface AiChatSendResponse {
   assistant_message: AiChatMessage | null
   idempotent_replay: boolean
 }
+
+// =============================================================================
+// SQL Preview（C13）
+// =============================================================================
+
+/**
+ * POST /api/v1/ai/sql/preview 请求（plan §5.2 + §5.3）。
+ *
+ * 关键字段：
+ * - instance_id: 目标实例；后端派生 db_type_code，前端不直接传
+ * - database_name: 可选；留空时 service fallback 到 '<default>'
+ * - user_question: 用户原始问题，传给 Dify sql-generator workflow
+ * - session_id / message_id: 可选；用于关联 ai_chat_session/message
+ * - current_page: 白名单页面标识（ai_chat / instance_detail 等）
+ */
+export interface AiSqlPreviewRequest {
+  instance_id: number
+  database_name?: string | null
+  user_question: string
+  session_id?: number | null
+  message_id?: number | null
+  current_page?: string | null
+}
+
+/**
+ * POST /api/v1/ai/sql/preview 响应（plan §5.2 + §5.3 + §19 状态机）。
+ *
+ * preview_safety_status='passed' 时：
+ *   - approved_sql + approved_sql_hash 必填（落 ai_sql_audit）
+ *   - schema_snapshot_id + schema_policy_hash 必填（Execute 校验）
+ *   - audit_id 返回供 Execute 阶段引用
+ * preview_safety_status='rejected' 时：
+ *   - preview_safety_reason 必填
+ *   - errors 列表（Layer 1 / AST 校验错误）
+ *   - audit_id 仍可能返回（rejected 也落库用于审计）
+ */
+export interface AiSqlPreviewResponse {
+  audit_id: number
+  preview_safety_status: 'passed' | 'rejected'
+
+  // 双轨 SQL
+  generated_sql?: string | null
+  generated_sql_hash?: string | null
+  approved_sql?: string | null
+  approved_sql_hash?: string | null
+
+  // 错误信息
+  preview_safety_reason?: string | null
+  errors: string[]
+  warnings: string[]
+
+  // Schema 强绑定
+  schema_snapshot_id?: number | null
+  schema_policy_hash?: string | null
+
+  // 元数据
+  db_type_code: string
+  sql_dialect?: string | null
+  sql_workflow_version?: string | null
+  safety_policy_version?: string | null
+  dify_workflow_run_id?: string | null
+
+  // 时间戳
+  previewed_at?: string | null
+}

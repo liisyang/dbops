@@ -447,6 +447,111 @@ class SqlSafetyService:
     # Defense-in-depth pattern of sensitive column names (plan §5 P1 layer 2).
     SENSITIVE_COLUMN_PATTERN = _SENSITIVE_COLUMN_PATTERN
 
+    # ------------------------------------------------------------------
+    # Phase 3.6 C13 — Layer 1: Dify Code 节点 JSON 解析 + 正则预检
+    # ------------------------------------------------------------------
+    #
+    # Layer 1 由两部分组成：
+    #   (a) 正则预检（本方法 layer1_precheck_question）：在调 Dify 之前用
+    #       正则快速拦截用户问题中明显的非只读关键词（中英文：删除/
+    #       DROP/DELETE/...）。命中 → 直接构造 rejected audit，**不再调
+    #       Dify**，节省 token + 延迟 + Dify 配额。
+    #   (b) Dify Code 节点 JSON 解析（在 AiSqlPreviewService 内实现）：
+    #       解析结构化 JSON 输出 {generated_sql, warnings, table_refs,
+    #       confidence, explanation}，稳健处理字段缺失。
+    #
+    # 本方法只实现 (a)。SQL 关键字（SQL 文本层）的拦截由 Layer 2
+    # (validate_sql_readonly) + Layer 3 (validate_with_ast) 负责。
+
+    # Layer 1 中英文关键词（中英文都覆盖；中文用子串匹配）
+    _LAYER1_DANGEROUS_KEYWORDS_EN = [
+        "DROP", "DELETE", "UPDATE", "INSERT", "TRUNCATE", "ALTER",
+        "CREATE", "GRANT", "REVOKE", "MERGE",
+        "EXEC", "EXECUTE", "CALL",
+    ]
+    _LAYER1_DANGEROUS_KEYWORDS_CN = [
+        # 严格动词 + 强烈意图；放前面
+        "删除", "删掉", "写入", "插入", "截断",
+        "建表", "建库", "建索引", "建视图",
+        "授权", "撤销", "改结构", "改字段",
+    ]
+
+    @classmethod
+    def layer1_precheck_question(cls, user_question: str) -> dict[str, Any]:
+        """Layer 1 正则预检（plan §5 Layer 1）。
+
+        检查 ``user_question`` 中是否含有明显的非只读意图（中英文关键词）。
+        命中 → 建议上层 service 直接构造 rejected audit 返回，不再调 Dify。
+
+        Args:
+            user_question: 用户原始问题（来自 Chat 或独立 SQL Preview 页）
+
+        Returns:
+            dict:
+              - allowed (bool)         — True 表示未命中，可继续调 Dify
+              - reason (str|None)      — 人类可读的拒绝原因（命中时填）
+              - matched_keyword (str|None) — 命中的关键词
+              - matched_pattern (str|None) — "cn" | "en" | None
+              - error_code (str|None)  — 机器可读错误码（命中时 = "LAYER1_DANGEROUS_KEYWORD"）
+
+        关键设计：
+        - 简单正则匹配，**不**做语义分析；Layer 3 AST 是兜底
+        - 中英文分别用不同策略：英文用 ``\\b`` 词边界，中文用子串匹配
+        - 不区分大小写（英文）
+        - 空 / 纯标点问题允许通过（不会凭空拦截）
+        """
+        if not user_question or not user_question.strip():
+            return {
+                "allowed": True,
+                "reason": None,
+                "matched_keyword": None,
+                "matched_pattern": None,
+                "error_code": None,
+            }
+
+        text = user_question.strip()
+
+        # 英文：\b 词边界
+        en_pattern = re.compile(
+            r"\b(" + "|".join(cls._LAYER1_DANGEROUS_KEYWORDS_EN) + r")\b",
+            re.IGNORECASE,
+        )
+        en_match = en_pattern.search(text)
+        if en_match:
+            kw = en_match.group(0).upper()
+            return {
+                "allowed": False,
+                "reason": (
+                    f"问题包含非只读关键词 '{kw}'；"
+                    "AI Copilot SQL Preview 仅支持只读（SELECT）查询"
+                ),
+                "matched_keyword": kw,
+                "matched_pattern": "en",
+                "error_code": "LAYER1_DANGEROUS_KEYWORD",
+            }
+
+        # 中文：子串匹配
+        for kw in cls._LAYER1_DANGEROUS_KEYWORDS_CN:
+            if kw in text:
+                return {
+                    "allowed": False,
+                    "reason": (
+                        f"问题包含非只读关键词 '{kw}'；"
+                        "AI Copilot SQL Preview 仅支持只读（SELECT）查询"
+                    ),
+                    "matched_keyword": kw,
+                    "matched_pattern": "cn",
+                    "error_code": "LAYER1_DANGEROUS_KEYWORD",
+                }
+
+        return {
+            "allowed": True,
+            "reason": None,
+            "matched_keyword": None,
+            "matched_pattern": None,
+            "error_code": None,
+        }
+
     @staticmethod
     def compute_sql_hash(sql_text: str) -> str:
         return hashlib.sha256(sql_text.encode("utf-8")).hexdigest()

@@ -7,6 +7,7 @@
  * - GET  /v1/ai/chat/sessions — 当前用户的会话列表
  * - POST /v1/ai/chat/sessions/{session_id}/messages — 发送消息（核心）
  * - GET  /v1/ai/chat/sessions/{session_id}/messages — 历史
+ * - POST /v1/ai/sql/preview — SQL Preview（C13 NEW）
  *
  * C4 范围仅 Chat；后续 commit 追加 SQL Preview / Execute / Inspection AI 等。
  */
@@ -19,6 +20,8 @@ import type {
   AiChatSession,
   AiChatSessionCreateRequest,
   AiChatSessionListResponse,
+  AiSqlPreviewRequest,
+  AiSqlPreviewResponse,
 } from '@/types/ai'
 
 export const aiApi = {
@@ -74,6 +77,27 @@ export const aiApi = {
       params,
       suppressErrorToast: options?.suppressErrorToast,
     }),
+
+  /**
+   * SQL Preview（C13 NEW — plan §5.2 + §5.3 + §20）。
+   *
+   * 流程：用户填 instance + 问题 → 后端调 Dify sql-generator workflow
+   *       → AST 校验 → 落 ai_sql_audit → 返回 approved_sql（passed）
+   *       或 preview_safety_reason（rejected）。
+   *
+   * 错误码（plan §11）：
+   *   404 InstanceNotFoundError — instance 不存在
+   *   409 SnapshotUnavailableError — schema snapshot 未就绪/不可用
+   *   422 UnsupportedDbTypeError — db_type 不在 capabilities 支持范围
+   *   502 DifyUnavailableError / DifyWorkflowFailedError
+   *   503 FeatureDisabledError — AI_SQL_PREVIEW_ENABLED=false
+   *   504 DifyTimeoutError
+   *
+   * 注：preview_safety_status='rejected' **不是** HTTP 错误 — 200 响应里
+   * status 字段就是 'rejected'。前端根据该字段展示红条警告。
+   */
+  sqlPreview: (data: AiSqlPreviewRequest): Promise<AiSqlPreviewResponse> =>
+    request.post('/v1/ai/sql/preview', data),
 }
 
 // =============================================================================

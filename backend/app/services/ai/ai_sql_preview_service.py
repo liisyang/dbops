@@ -141,6 +141,12 @@ class AiSqlPreviewService:
     # SQL Preview 时 max_rows 默认值（plan §5 + §10 — Executor 仍由 Collector EE 强制）
     DEFAULT_MAX_ROWS = 200
 
+    # Layer 1 正则预检开关（plan §5 Layer 1）
+    # - True：调 Dify 之前先用 SqlSafetyService.layer1_precheck_question 拦截
+    #         命中 → 构造 rejected audit 返回（节省 Dify token + 配额）
+    # - False：跳过预检，直接调 Dify（保留给将来 A/B test 或 escape hatch）
+    LAYER1_PRECHECK_ENABLED = True
+
     # ------------------------------------------------------------------
     # preview — 核心端点
     # ------------------------------------------------------------------
@@ -159,12 +165,14 @@ class AiSqlPreviewService:
     ) -> PreviewResult:
         """触发 SQL Preview，生成 approved_sql 并落 ai_sql_audit。
 
-        流程（plan §5.2 + §5.3）：
+        流程（plan §5.2 + §5.3 + C13 Layer 1）：
           1. 功能开关（503 FeatureDisabledError）
           2. instance 存在性 + db_type capability（404 / 422）
           3. Schema snapshot 可用性（409 SnapshotUnavailableError）
+          3.5. Layer 1 正则预检 user_question（C13 NEW；命中 → rejected audit）
           4. 调 Dify sql-generator workflow 取 generated_sql
-             - 失败 / 解析失败 → 构造 rejected audit 落库，返回 PreviewResult
+             - 解析 Code 节点结构化 JSON（C13 NEW）
+             - 失败 / 解析失败 → 构造 rejected audit 落库
           5. 调 SqlSafetyService.validate_with_ast 取 approved_sql
              - rejected → 构造 rejected audit 落库
           6. 落 ai_sql_audit（passed / rejected 都落库）
@@ -215,6 +223,47 @@ class AiSqlPreviewService:
         schema_context_text = ctx.get("schema_context") or ""
         sql_dialect = ctx.get("sql_dialect")
 
+        # 3.5. Layer 1 正则预检（C13 NEW — plan §5 Layer 1）
+        # 在调 Dify 之前用 SqlSafetyService.layer1_precheck_question 快速拦截
+        # 明显的非只读问题（中英文 DROP/DELETE/删除/插入 等）。命中 →
+        # 构造 rejected audit 落库（**不**调 Dify），节省 token + 配额。
+        if cls.LAYER1_PRECHECK_ENABLED:
+            precheck = SqlSafetyService.layer1_precheck_question(user_question)
+            if not precheck.get("allowed"):
+                logger.info(
+                    "ai_sql preview Layer 1 precheck rejected instance_id=%s "
+                    "matched=%s pattern=%s reason=%s",
+                    instance_id,
+                    precheck.get("matched_keyword"),
+                    precheck.get("matched_pattern"),
+                    precheck.get("reason"),
+                )
+                now_l1 = cls._utcnow()
+                audit = cls._build_rejected_audit(
+                    instance_id=instance_id,
+                    db_type_code=db_type_code,
+                    user_question=user_question,
+                    session_id=session_id,
+                    message_id=message_id,
+                    user_id=getattr(requested_by, "id", None),
+                    schema_snapshot_id=schema_snapshot_id,
+                    schema_policy_hash=schema_policy_hash,
+                    dify_workflow_run_id=None,
+                    reason=str(precheck.get("reason") or "Layer 1 precheck rejected"),
+                    errors=[str(precheck.get("error_code") or "LAYER1_DANGEROUS_KEYWORD")],
+                    warnings=[],
+                    sql_workflow_version=settings.DIFY_SQL_WORKFLOW_VERSION,
+                    safety_policy_version=cls.SAFETY_POLICY_VERSION,
+                    previewed_at=now_l1,
+                )
+                # 标记 layer1 命中（前端可据此显示"非只读查询"提示而非 AST 错误）
+                audit._preview_layer1_blocked = True  # type: ignore[attr-defined]
+                audit._preview_layer1_keyword = precheck.get("matched_keyword")  # type: ignore[attr-defined]
+                db.add(audit)
+                db.commit()
+                db.refresh(audit)
+                return PreviewResult(audit=audit)
+
         # 4. 调 Dify sql-generator workflow
         dify_run_id: Optional[str] = None
         generated_sql: Optional[str] = None
@@ -253,11 +302,25 @@ class AiSqlPreviewService:
                 user=dify_user,
             )
             dify_run_id = dify_response.get("workflow_run_id")
-            generated_sql = cls._extract_generated_sql(dify_response)
+
+            # C13: 解析 Code 节点结构化 JSON（C12 仅 plain text 提取）
+            code_payload = cls._parse_code_node_payload(dify_response)
+            generated_sql = code_payload.get("generated_sql")
+            code_node_warnings = list(code_payload.get("warnings") or [])
+            code_node_parse_mode = code_payload.get("parse_mode")
+
+            logger.info(
+                "ai_sql preview Dify response parsed instance_id=%s run_id=%s "
+                "parse_mode=%s warnings=%d table_refs=%d",
+                instance_id, dify_run_id, code_node_parse_mode,
+                len(code_node_warnings),
+                len(code_payload.get("table_refs") or []),
+            )
 
             if not generated_sql:
                 dify_workflow_failed_reason = (
                     "Dify workflow returned no generated_sql in response; "
+                    f"parse_mode={code_node_parse_mode} "
                     f"keys={list(dify_response.keys())[:5]}"
                 )
                 logger.warning(
@@ -283,6 +346,8 @@ class AiSqlPreviewService:
 
         if not generated_sql:
             # Dify 没有有效 SQL → 构造 rejected audit 落库
+            # C13: 把 Dify Code 节点的 warnings 也合并到 audit warnings 中
+            merged_warnings = list(code_node_warnings or [])
             audit = cls._build_rejected_audit(
                 instance_id=instance_id,
                 db_type_code=db_type_code,
@@ -296,7 +361,7 @@ class AiSqlPreviewService:
                 reason=dify_workflow_failed_reason
                 or "Dify did not produce a generated_sql",
                 errors=[dify_workflow_failed_reason or "missing generated_sql"],
-                warnings=[],
+                warnings=merged_warnings,
                 sql_workflow_version=settings.DIFY_SQL_WORKFLOW_VERSION,
                 safety_policy_version=cls.SAFETY_POLICY_VERSION,
                 previewed_at=now,
@@ -324,6 +389,11 @@ class AiSqlPreviewService:
             # AST 拒绝 → rejected audit 落库
             errors_list = list(ast_result.get("errors") or [])
             warnings_list = list(ast_result.get("warnings") or [])
+            # C13: 合并 Dify Code 节点 warnings + AST warnings（去重保序）
+            merged_warnings = list(code_node_warnings or [])
+            for w in warnings_list:
+                if w not in merged_warnings:
+                    merged_warnings.append(w)
             reason = (
                 f"AST validation rejected: {'; '.join(errors_list[:3])}"
                 if errors_list
@@ -345,7 +415,7 @@ class AiSqlPreviewService:
                 approved_sql_hash=str(ast_result.get("approved_sql_hash") or ""),
                 reason=reason,
                 errors=errors_list,
-                warnings=warnings_list,
+                warnings=merged_warnings,
                 sql_workflow_version=settings.DIFY_SQL_WORKFLOW_VERSION,
                 safety_policy_version=cls.SAFETY_POLICY_VERSION,
                 previewed_at=now,
@@ -356,6 +426,13 @@ class AiSqlPreviewService:
             return PreviewResult(audit=audit)
 
         # 6c. AST 通过 → passed audit 落库
+        # C13: passed 也合并 code_node_warnings + AST warnings 到 _preview_warnings
+        # （preview_safety_reason 保持 NULL — passed 不污染 reason）
+        merged_passed_warnings = list(code_node_warnings or [])
+        for w in (ast_result.get("warnings") or []):
+            if w not in merged_passed_warnings:
+                merged_passed_warnings.append(w)
+
         audit = AiSqlAudit(
             session_id=session_id,
             message_id=message_id,
@@ -377,6 +454,7 @@ class AiSqlPreviewService:
             previewed_at=now,
             execution_status=AiSqlAuditExecutionStatus.NOT_REQUESTED,
         )
+        audit._preview_warnings = merged_passed_warnings  # type: ignore[attr-defined]
         db.add(audit)
         db.commit()
         db.refresh(audit)
@@ -407,13 +485,16 @@ class AiSqlPreviewService:
 
     @staticmethod
     def _extract_generated_sql(dify_response: dict[str, Any]) -> Optional[str]:
-        """从 Dify Workflow 响应中提取 SQL 字符串。
+        """从 Dify Workflow 响应中提取 SQL 字符串（C12 旧接口，保留兼容）。
 
         Dify Workflow 输出格式约定（plan §5.3 + Dify 端 schema）：
           outputs.generated_sql = "<SQL text>"
         或
           outputs.sql = "<SQL text>"
         或（chat 风格）answer 字段含 ```sql ... ``` 块。
+
+        C13 起推荐使用 :meth:`_parse_code_node_payload`，可同时拿 SQL +
+        warnings + table_refs + confidence + explanation。
         """
         if not isinstance(dify_response, dict):
             return None
@@ -440,6 +521,131 @@ class AiSqlPreviewService:
                 return stripped
 
         return None
+
+    # ------------------------------------------------------------------
+    # C13 — Dify Code 节点结构化 JSON 解析
+    # ------------------------------------------------------------------
+    #
+    # Dify Workflow 的 Code 节点可以输出结构化 JSON，包含：
+    #   {
+    #     "generated_sql": "<SQL>",
+    #     "warnings":     ["敏感字段命中: email", ...],
+    #     "confidence":   0.85,
+    #     "table_refs":   ["public.users", ...],
+    #     "explanation":  "查询用户ID和邮箱"
+    #   }
+    # outputs 字段也可能是字符串化的 JSON（取决于 Dify Code 节点配置）。
+    #
+    # 本方法稳健地解析上述结构，字段缺失时降级：
+    #   - 缺 warnings → []
+    #   - 缺 confidence → None
+    #   - 缺 table_refs → []
+    #   - 缺 explanation → None
+    # 并在所有结构化字段都不可用时降级到 _extract_generated_sql（plain text）。
+
+    @staticmethod
+    def _parse_code_node_payload(
+        dify_response: dict[str, Any],
+    ) -> dict[str, Any]:
+        """解析 Dify Code 节点输出的结构化 JSON（C13 — plan §5 Layer 1 (b)）。
+
+        Returns:
+            dict:
+              - generated_sql (str|None) — 提取出的 SQL；无则 None
+              - warnings (list[str])     — Dify Code 节点提示的软警告
+              - confidence (float|None)  — 0.0~1.0；Dify 未返回则 None
+              - table_refs (list[str])   — SQL 引用的物理表列表（best-effort）
+              - explanation (str|None)   — 人类可读解释；供前端展示
+              - parse_mode (str)         — "structured" | "fallback_plain_text" |
+                                            "missing"
+              - raw_outputs (Any)        — 原始 outputs（debug 用；不写库）
+
+        设计：
+        - ``outputs`` 是 dict → 直接取字段
+        - ``outputs`` 是 str → 尝试 json.loads
+        - ``outputs.generated_sql`` 是 str → 用之
+        - ``outputs.generated_sql`` 是 dict → 递归解析（防御性，正常不应出现）
+        - 全部结构化字段缺失 → 退回 _extract_generated_sql（plain text）
+        """
+        result: dict[str, Any] = {
+            "generated_sql": None,
+            "warnings": [],
+            "confidence": None,
+            "table_refs": [],
+            "explanation": None,
+            "parse_mode": "missing",
+            "raw_outputs": None,
+        }
+
+        if not isinstance(dify_response, dict):
+            return result
+
+        outputs_raw = dify_response.get("outputs")
+        result["raw_outputs"] = outputs_raw
+
+        # 1. outputs 是 str → 尝试 json.loads（仅当形如 JSON 对象）
+        if isinstance(outputs_raw, str):
+            stripped = outputs_raw.strip()
+            if stripped.startswith("{") and stripped.endswith("}"):
+                try:
+                    outputs_raw = json.loads(stripped)
+                except (json.JSONDecodeError, ValueError):
+                    outputs_raw = None
+            elif "```sql" in stripped or "```SQL" in stripped:
+                # Code 节点把 SQL 直接放在 markdown 块里 — 提取 SQL
+                sql_block = AiSqlPreviewService._extract_sql_block(stripped)
+                if sql_block:
+                    result["generated_sql"] = sql_block
+                    result["parse_mode"] = "fallback_plain_text"
+                    return result
+                outputs_raw = None
+
+        # 2. outputs 是 dict → 取结构化字段
+        if isinstance(outputs_raw, dict):
+            # generated_sql
+            sql_val = outputs_raw.get("generated_sql")
+            if isinstance(sql_val, str) and sql_val.strip():
+                result["generated_sql"] = sql_val.strip()
+            elif isinstance(sql_val, dict):
+                # 防御：极少数 Code 节点嵌套输出
+                nested = sql_val.get("sql") or sql_val.get("text")
+                if isinstance(nested, str) and nested.strip():
+                    result["generated_sql"] = nested.strip()
+
+            # warnings
+            warnings_val = outputs_raw.get("warnings")
+            if isinstance(warnings_val, list):
+                result["warnings"] = [str(w) for w in warnings_val if w is not None]
+            elif isinstance(warnings_val, str) and warnings_val.strip():
+                result["warnings"] = [warnings_val.strip()]
+
+            # confidence
+            conf_val = outputs_raw.get("confidence")
+            if isinstance(conf_val, (int, float)):
+                result["confidence"] = float(conf_val)
+
+            # table_refs
+            refs_val = outputs_raw.get("table_refs")
+            if isinstance(refs_val, list):
+                result["table_refs"] = [str(t) for t in refs_val if t is not None]
+
+            # explanation
+            expl_val = outputs_raw.get("explanation")
+            if isinstance(expl_val, str) and expl_val.strip():
+                result["explanation"] = expl_val.strip()
+
+            if result["generated_sql"]:
+                result["parse_mode"] = "structured"
+                return result
+
+        # 3. 降级到旧 plain text 提取
+        fallback_sql = AiSqlPreviewService._extract_generated_sql(dify_response)
+        if fallback_sql:
+            result["generated_sql"] = fallback_sql
+            result["parse_mode"] = "fallback_plain_text"
+            return result
+
+        return result
 
     @staticmethod
     def _extract_sql_block(text: str) -> Optional[str]:
@@ -537,8 +743,10 @@ class AiSqlPreviewService:
             previewed_at=previewed_at,
             execution_status=AiSqlAuditExecutionStatus.NOT_REQUESTED,
         )
-        # errors 暂存到 audit 的临时属性（不入库；用完即丢）
+        # errors / warnings 暂存到 audit 的临时属性（不入库；用完即丢）
+        # API 层读取后回填到 AiSqlPreviewResponse
         audit._preview_errors = errors  # type: ignore[attr-defined]
+        audit._preview_warnings = list(warnings or [])  # type: ignore[attr-defined]
         return audit
 
 

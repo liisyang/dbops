@@ -264,6 +264,13 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/views/ai/Chat.vue'),
         meta: { title: 'AI Copilot', parent: 'AI 助手' }
       },
+      // AI Copilot SQL Preview（Phase 3.6 C13）：按 capabilities.sql_preview_enabled 灰度
+      {
+        path: 'ai/sql/preview',
+        name: 'AiSqlPreview',
+        component: () => import('@/views/ai/SqlPreview.vue'),
+        meta: { title: 'SQL 生成器', parent: 'AI 助手' }
+      },
       {
         path: 'ui-preview/assets',
         name: 'UiPreviewAssets',

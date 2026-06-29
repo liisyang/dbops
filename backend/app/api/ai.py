@@ -435,10 +435,10 @@ def preview_sql(
         raise HTTPException(status_code=502, detail=f"Dify error: {exc}")
 
     audit = result.audit
-    # errors 是 list — Pydantic 直接接受
+    # errors / warnings 是临时属性（不入库；preview 流程结束时设置）
+    # C13 起：warnings 也单独返回前端（之前序列化在 preview_safety_reason）
     errors_list = getattr(audit, "_preview_errors", []) or []
-    warnings_list: list[str] = []
-    # warnings 已序列化到 preview_safety_reason（不重复返回）
+    warnings_list = getattr(audit, "_preview_warnings", []) or []
 
     return AiSqlPreviewResponse(
         audit_id=int(audit.id),

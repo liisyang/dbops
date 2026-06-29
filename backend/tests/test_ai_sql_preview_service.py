@@ -617,3 +617,309 @@ class TestCanonicalJsonHash:
         h1 = canonical_json_hash({"a": 1})
         h2 = canonical_json_hash({"a": 2})
         assert h1 != h2
+
+
+# =============================================================================
+# Phase 3.6 C13 — Layer 1 集成 + Dify Code 节点 JSON 解析（plan §5 Layer 1）
+# =============================================================================
+
+
+class TestLayer1Integration:
+    """Layer 1 正则预检在 AiSqlPreviewService.preview() 流程中的集成测试。
+
+    验证：
+    - 命中 → 构造 rejected audit 落库 + Dify **不**被调
+    - 未命中 → 正常进 Dify
+    - 关闭开关（LAYER1_PRECHECK_ENABLED=False） → 跳过预检
+    """
+
+    def test_layer1_hit_en_rejected_audit_no_dify_call(self, monkeypatch):
+        """英文 DROP 命中 → rejected audit + Dify 不被调。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="DROP TABLE app.users",
+            )
+            # Dify 未被调
+            mock_dify.assert_not_called()
+            # rejected audit 落库
+            assert result.audit.preview_safety_status == "rejected"
+            assert result.audit.generated_sql is None
+            assert result.audit.preview_safety_reason is not None
+            assert "DROP" in result.audit.preview_safety_reason
+            # layer1 标记
+            assert getattr(result.audit, "_preview_layer1_blocked", False) is True
+            assert getattr(result.audit, "_preview_layer1_keyword", None) == "DROP"
+
+    def test_layer1_hit_cn_rejected_audit(self, monkeypatch):
+        """中文「删除」命中 → rejected audit。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="把过期数据删除",
+            )
+            mock_dify.assert_not_called()
+            assert result.audit.preview_safety_status == "rejected"
+            assert "删除" in result.audit.preview_safety_reason
+
+    def test_layer1_miss_calls_dify(self, monkeypatch):
+        """未命中 → 正常进 Dify。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            mock_dify.return_value = {
+                "workflow_run_id": "wf-1",
+                "outputs": {"generated_sql": "SELECT id FROM app.users"},
+            }
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="查询活跃用户ID",
+            )
+            mock_dify.assert_called_once()
+            assert result.audit.preview_safety_status == "passed"
+
+    def test_layer1_disabled_calls_dify_even_on_hit(self, monkeypatch):
+        """LAYER1_PRECHECK_ENABLED=False 时即使命中也调 Dify。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        # 关闭 layer1
+        monkeypatch.setattr(AiSqlPreviewService, "LAYER1_PRECHECK_ENABLED", False)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            mock_dify.return_value = {
+                "workflow_run_id": "wf-2",
+                "outputs": {"generated_sql": "SELECT 1 FROM app.users"},
+            }
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="DROP TABLE x",  # 即使命中也调 Dify
+            )
+            mock_dify.assert_called_once()
+            # passed audit（Dify 返回了合法 SQL）
+            assert result.audit.preview_safety_status == "passed"
+
+
+class TestCodeNodePayload:
+    """C13 — Dify Code 节点结构化 JSON 解析测试。"""
+
+    def test_structured_outputs_dict(self):
+        """outputs 是 dict + generated_sql 字段 → structured 模式。"""
+        resp = {
+            "workflow_run_id": "wf-1",
+            "outputs": {
+                "generated_sql": "SELECT id FROM app.users",
+                "warnings": ["敏感字段命中: email"],
+                "confidence": 0.85,
+                "table_refs": ["public.users"],
+                "explanation": "查询用户ID",
+            },
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "structured"
+        assert result["generated_sql"] == "SELECT id FROM app.users"
+        assert result["warnings"] == ["敏感字段命中: email"]
+        assert result["confidence"] == 0.85
+        assert result["table_refs"] == ["public.users"]
+        assert result["explanation"] == "查询用户ID"
+
+    def test_structured_outputs_string_json(self):
+        """outputs 是字符串化的 JSON → 解析后 structured 模式。"""
+        resp = {
+            "workflow_run_id": "wf-2",
+            "outputs": '{"generated_sql": "SELECT id FROM app.users", "warnings": []}',
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "structured"
+        assert result["generated_sql"] == "SELECT id FROM app.users"
+
+    def test_outputs_string_non_json_fallback(self):
+        """outputs 是非 JSON 字符串 → fallback 到 plain text 提取。"""
+        resp = {
+            "workflow_run_id": "wf-3",
+            "outputs": "```sql\nSELECT id FROM app.users\n```",
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "fallback_plain_text"
+        assert "SELECT" in result["generated_sql"]
+
+    def test_outputs_empty_fallback_to_answer(self):
+        """outputs 为空 dict → fallback 到 answer 字段的 ```sql``` 块。"""
+        resp = {
+            "workflow_run_id": "wf-4",
+            "outputs": {},
+            "answer": "Here's the SQL:\n```sql\nSELECT id FROM app.users\n```",
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "fallback_plain_text"
+        assert "SELECT" in result["generated_sql"]
+
+    def test_outputs_missing_fallback_to_sql_key(self):
+        """outputs 缺 + 顶层有 sql 字段 → fallback。"""
+        resp = {
+            "workflow_run_id": "wf-5",
+            "outputs": {"foo": "bar"},  # 无 generated_sql
+            "sql": "SELECT 1 FROM app.users",
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "fallback_plain_text"
+        assert result["generated_sql"] == "SELECT 1 FROM app.users"
+
+    def test_outputs_dict_missing_optional_fields(self):
+        """structured 模式 + 缺 warnings / confidence / table_refs → 默认值。"""
+        resp = {
+            "workflow_run_id": "wf-6",
+            "outputs": {"generated_sql": "SELECT id FROM app.users"},
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "structured"
+        assert result["generated_sql"] == "SELECT id FROM app.users"
+        assert result["warnings"] == []
+        assert result["confidence"] is None
+        assert result["table_refs"] == []
+        assert result["explanation"] is None
+
+    def test_empty_response_returns_missing(self):
+        """空 dict → missing 模式。"""
+        result = AiSqlPreviewService._parse_code_node_payload({})
+        assert result["parse_mode"] == "missing"
+        assert result["generated_sql"] is None
+
+    def test_non_dict_response_returns_missing(self):
+        """非 dict → missing 模式。"""
+        result = AiSqlPreviewService._parse_code_node_payload(None)  # type: ignore[arg-type]
+        assert result["parse_mode"] == "missing"
+        result = AiSqlPreviewService._parse_code_node_payload("string")  # type: ignore[arg-type]
+        assert result["parse_mode"] == "missing"
+
+    def test_warnings_string_to_list(self):
+        """warnings 是单字符串 → 列表化。"""
+        resp = {
+            "workflow_run_id": "wf-7",
+            "outputs": {
+                "generated_sql": "SELECT 1",
+                "warnings": "敏感字段命中: password",
+            },
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["warnings"] == ["敏感字段命中: password"]
+
+    def test_nested_generated_sql_dict(self):
+        """防御：generated_sql 是 dict（不正常但要 robust）。"""
+        resp = {
+            "workflow_run_id": "wf-8",
+            "outputs": {
+                "generated_sql": {"sql": "SELECT 1 FROM app.users", "extra": "ignored"},
+            },
+        }
+        result = AiSqlPreviewService._parse_code_node_payload(resp)
+        assert result["parse_mode"] == "structured"
+        assert result["generated_sql"] == "SELECT 1 FROM app.users"
+
+
+class TestCodeNodePayloadIntegration:
+    """C13 — Code 节点 payload 解析与 audit 集成的端到端测试。"""
+
+    def test_structured_warnings_merged_into_audit(self, monkeypatch):
+        """Dify Code 节点返回 warnings → 合并到 audit._preview_warnings。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            mock_dify.return_value = {
+                "workflow_run_id": "wf-int-1",
+                "outputs": {
+                    "generated_sql": "SELECT id FROM app.users",
+                    "warnings": ["敏感字段命中: email"],  # Dify 提示
+                    "table_refs": ["public.users"],
+                },
+            }
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="查询用户列表",
+            )
+            # passed audit + warnings 合并（仅来自 Dify Code 节点）
+            assert result.audit.preview_safety_status == "passed"
+            warnings = getattr(result.audit, "_preview_warnings", [])
+            assert "敏感字段命中: email" in warnings
+
+    def test_no_warnings_returns_empty_list(self, monkeypatch):
+        """Dify 不返回 warnings + AST 不命中 sensitive → 空 warnings 列表。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            mock_dify.return_value = {
+                "workflow_run_id": "wf-int-2",
+                "outputs": {"generated_sql": "SELECT id FROM app.users"},
+            }
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="查询用户ID",
+            )
+            assert result.audit.preview_safety_status == "passed"
+            assert getattr(result.audit, "_preview_warnings", []) == []
+
+    def test_dify_returns_no_sql_rejected_with_code_warnings(self, monkeypatch):
+        """Dify 没生成 SQL 但带 warnings → rejected audit + warnings 保留。"""
+        _patch_settings(monkeypatch)
+        _patch_schema_context(monkeypatch, available=True)
+        _patch_dify_configured(monkeypatch)
+
+        with patch.object(DifyService, "run_sql_workflow") as mock_dify:
+            mock_dify.return_value = {
+                "workflow_run_id": "wf-int-3",
+                "outputs": {
+                    # 没 generated_sql 字段
+                    "warnings": ["Dify 内部警告: 模型不确定"],
+                },
+            }
+            db = _FakeSession()
+            _patch_instance(db, 1)
+            result = AiSqlPreviewService.preview(
+                db,
+                instance_id=1,
+                database_name=None,
+                user_question="查询用户列表",
+            )
+            assert result.audit.preview_safety_status == "rejected"
+            assert result.audit.generated_sql is None
+            warnings = getattr(result.audit, "_preview_warnings", [])
+            assert "Dify 内部警告: 模型不确定" in warnings
