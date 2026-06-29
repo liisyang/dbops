@@ -116,6 +116,52 @@
         >
           {{ sqlResultPayload.error_message }}
         </p>
+
+        <!-- C15 NEW — 操作按钮区：「重新执行」/「查看详情」/「已完成」徽章 -->
+        <div
+          v-if="resultAuditId != null"
+          data-testid="sql-result-actions"
+          class="mt-3 flex flex-wrap items-center gap-2 border-t border-surface-variant/30 pt-2 text-[11px]"
+        >
+          <!-- 「重新执行」：仅 failed/timeout/cancelled 时可点击（plan §4 risk #1） -->
+          <button
+            v-if="resultCanReExecute"
+            type="button"
+            class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+            :disabled="pendingAuditIdSet.has(resultAuditId)"
+            @click="$emit('re-execute', resultAuditId)"
+          >
+            <span class="material-symbols-outlined text-[12px]">refresh</span>
+            重新执行
+          </button>
+          <!-- 「执行中…」徽章：pending/running 时占位 -->
+          <span
+            v-else-if="resultIsNonTerminal && pendingAuditIdSet.has(resultAuditId)"
+            class="inline-flex items-center gap-1 rounded bg-sky-500/15 px-2 py-0.5 text-[11px] text-sky-300"
+          >
+            <span class="material-symbols-outlined animate-spin text-[12px]">sync</span>
+            执行中…
+          </span>
+          <!-- 「已完成」徽章：success 终态，禁用重新执行（避免重复触发；plan §4 risk #1） -->
+          <span
+            v-else-if="resultIsTerminalSuccess"
+            class="inline-flex items-center gap-1 rounded bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300"
+            title="该 SQL 已成功执行完成（再次执行可能产生不同结果）"
+          >
+            <span class="material-symbols-outlined text-[12px]">check_circle</span>
+            已完成
+          </span>
+
+          <!-- 「查看详情」：始终可点，路由到 /ai/sql/preview?audit_id= -->
+          <button
+            type="button"
+            class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+            @click="$emit('view-detail', resultAuditId)"
+          >
+            <span class="material-symbols-outlined text-[12px]">open_in_new</span>
+            查看详情
+          </button>
+        </div>
       </div>
 
       <!-- 错误信息（仅 failed） -->
@@ -150,6 +196,12 @@
  * C14 NEW — sql_preview_link / sql_result 两种 message_type 分支：
  *  - sql_preview_link：渲染 approved_sql 卡片 + 执行按钮（emit 'execute'）
  *  - sql_result：渲染 columns/rows 表格 + row_count + duration_ms
+ *
+ * C15 NEW — sql_result 卡片底部加操作按钮区：
+ *  - 「重新执行」仅 failed/timeout/cancelled 时显示，调 emit('re-execute', auditId)
+ *  - 「查看详情」始终显示，emit('view-detail', auditId)，路由到 /ai/sql/preview?audit_id=
+ *  - 「已完成」徽章：success 终态时占位（避免重复触发，plan §4 risk #1）
+ *  - 「执行中…」徽章：pending/running 且在 Chat.vue pendingAuditIds 集合内时占位
  */
 import { computed } from 'vue'
 import ChatStatusBadge from './ChatStatusBadge.vue'
@@ -172,13 +224,23 @@ const props = defineProps<{
   metadataJson?: Record<string, unknown> | null
   /** C14 NEW — sql_preview_link 卡片正在触发 execute 时禁用按钮。 */
   executing?: boolean
+  /** C15 NEW — 当前在轮询的 audit_id 集合（用于 sql_result 卡片按钮 disable + 「执行中…」徽章）。 */
+  pendingAuditIds?: Set<number>
 }>()
 
 defineEmits<{
   (e: 'execute', meta: AiSqlPreviewLinkMetadata): void
+  // C15 NEW — sql_result 卡片「重新执行」（force=true 走 executeSql）
+  (e: 're-execute', auditId: number): void
+  // C15 NEW — sql_result 卡片「查看详情」（路由到 /ai/sql/preview?audit_id=）
+  (e: 'view-detail', auditId: number): void
 }>()
 
 const isUser = computed(() => props.role === 'user')
+
+// C15 NEW — 空 Set fallback，避免 vue-tsc 在 props.pendingAuditIds?.has() 时
+// 持续报 TS18048（template 里 .has() 仍需非 undefined 接收方）。
+const EMPTY_SET: ReadonlySet<number> = new Set<number>()
 const roleLabel = computed(() => {
   if (props.role === 'user') return '你'
   if (props.role === 'assistant') return 'AI 助手'
@@ -225,6 +287,37 @@ const sqlResultPayload = computed<AiSqlResultPayload | null>(() => {
   }
   return null
 })
+
+// C15 NEW — 从 metadata_json 提 audit_id（sql_result 卡片操作按钮依赖）
+const resultAuditId = computed<number | null>(() => {
+  if (props.messageType !== 'sql_result') return null
+  const md = props.metadataJson as { audit_id?: number } | null | undefined
+  const id = md?.audit_id
+  return typeof id === 'number' && id > 0 ? id : null
+})
+
+// C15 NEW — 重新执行按钮可见性：仅 failed/timeout/cancelled 终态可重跑（plan §4 risk #1）
+const resultCanReExecute = computed<boolean>(() => {
+  const s = sqlResultPayload.value?.status
+  return s === 'failed' || s === 'timeout' || s === 'cancelled'
+})
+
+// C15 NEW — pending/running 非终态（用于「执行中…」徽章占位）
+const resultIsNonTerminal = computed<boolean>(() => {
+  const s = sqlResultPayload.value?.status
+  return s === 'pending' || s === 'running'
+})
+
+// C15 NEW — success 终态：禁用重新执行（避免重复触发）
+const resultIsTerminalSuccess = computed<boolean>(() => {
+  const s = sqlResultPayload.value?.status
+  return s === 'success'
+})
+
+// C15 NEW — 给模板一个非 undefined 的 Set 视图（避免 TS18048 + 简化模板）
+const pendingAuditIdSet = computed<Set<number>>(
+  () => props.pendingAuditIds ?? (EMPTY_SET as Set<number>),
+)
 
 const resultStatusClass = computed(() => {
   const status = sqlResultPayload.value?.status

@@ -40,13 +40,45 @@
 <template>
   <OpsPage>
     <OpsPageHeader
-      title="SQL 生成器"
-      subtitle="基于 Dify sql-generator 的自然语言 → 只读 SQL（plan §5.2 + §5.3）"
+      :title="auditDetailMode ? `Audit #${auditDetailId} 详情` : 'SQL 生成器'"
+      :subtitle="auditDetailMode ? '从 Chat 流 sql_result 卡片跳入的只读视图（C15）' : '基于 Dify sql-generator 的自然语言 → 只读 SQL（plan §5.2 + §5.3）'"
     />
 
+    <!-- C15 NEW — audit 详情模式顶部条 + 返回按钮 -->
+    <div
+      v-if="auditDetailMode"
+      class="mb-4 flex flex-wrap items-center justify-between gap-2 rounded border border-sky-500/30 bg-sky-500/5 px-4 py-2 text-xs text-sky-200"
+    >
+      <div class="flex items-center gap-2">
+        <span class="material-symbols-outlined text-[14px]">info</span>
+        <span>
+          当前为 audit
+          <code class="mx-1 rounded bg-sky-500/15 px-1 py-0.5 font-mono text-[11px]">
+            #{{ auditDetailId }}
+          </code>
+          的只读视图（执行结果 / 状态 / 错误）
+        </span>
+      </div>
+      <button
+        type="button"
+        class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+        @click="exitAuditDetailMode"
+      >
+        <span class="material-symbols-outlined text-[12px]">arrow_back</span>
+        返回生成模式
+      </button>
+    </div>
+
+    <div
+      v-if="auditDetailMode && auditDetailError"
+      class="mb-4 rounded border border-red-500/30 bg-red-500/10 px-4 py-2 text-xs text-red-200"
+    >
+      加载 audit 详情失败：{{ auditDetailError }}
+    </div>
+
     <div class="grid gap-4 lg:grid-cols-1">
-      <!-- 顶部：输入区 -->
-      <OpsSectionCard>
+      <!-- 顶部：输入区（详情模式下隐藏 — 避免误操作重新生成） -->
+      <OpsSectionCard v-if="!auditDetailMode">
         <template #header>
           <h2 class="text-base font-semibold text-on-surface">生成 SQL</h2>
         </template>
@@ -171,7 +203,7 @@
         </div>
       </OpsSectionCard>
 
-      <!-- 底部：结果区 -->
+      <!-- 底部：结果区（生成结果时；audit 详情模式走单独 card 下面） -->
       <OpsSectionCard v-if="result">
         <template #header>
           <div class="flex items-center justify-between gap-3">
@@ -423,12 +455,93 @@
           </div>
         </div>
       </OpsSectionCard>
+
+      <!-- C15 NEW — audit 详情模式专用卡（Chat 流 sql_result 卡片「查看详情」跳入） -->
+      <OpsSectionCard v-if="auditDetailMode">
+        <template #header>
+          <div class="flex items-center justify-between gap-3">
+            <h2 class="text-base font-semibold text-on-surface">
+              执行结果
+              <span class="ml-2 text-xs text-on-surface-variant">audit #{{ auditDetailId }}</span>
+            </h2>
+            <!-- 状态徽章（沿用 executionBadgeClass / executionBadgeIcon 计算属性） -->
+            <span v-if="execution" :class="executionBadgeClass">
+              <span class="material-symbols-outlined text-[14px]">{{ executionBadgeIcon }}</span>
+              {{ execution.execution_status.toUpperCase() }}
+            </span>
+          </div>
+        </template>
+
+        <!-- 元信息网格 -->
+        <div v-if="execution" class="grid gap-2 text-xs text-on-surface-variant md:grid-cols-2 lg:grid-cols-3">
+          <div v-if="execution.row_count != null">
+            <span class="text-on-surface-variant/70">rows:</span>
+            <code class="ml-1 text-on-surface">{{ execution.row_count }}</code>
+          </div>
+          <div v-if="execution.duration_ms != null">
+            <span class="text-on-surface-variant/70">duration:</span>
+            <code class="ml-1 text-on-surface">{{ execution.duration_ms }} ms</code>
+          </div>
+          <div v-if="execution.completed_at">
+            <span class="text-on-surface-variant/70">completed_at:</span>
+            <code class="ml-1 text-on-surface">{{ execution.completed_at }}</code>
+          </div>
+          <div v-if="execution.collector_run_id">
+            <span class="text-on-surface-variant/70">collector_run_id:</span>
+            <code class="ml-1 text-on-surface">#{{ execution.collector_run_id }}</code>
+          </div>
+          <div v-if="execution.executed_at">
+            <span class="text-on-surface-variant/70">executed_at:</span>
+            <code class="ml-1 text-on-surface">{{ execution.executed_at }}</code>
+          </div>
+          <div v-if="execution.awx_job_id">
+            <span class="text-on-surface-variant/70">awx_job_id:</span>
+            <code class="ml-1 text-on-surface">#{{ execution.awx_job_id }}</code>
+          </div>
+          <div v-if="execution.result_message_id">
+            <span class="text-on-surface-variant/70">chat_msg:</span>
+            <code class="ml-1 text-on-surface">#{{ execution.result_message_id }}</code>
+          </div>
+          <div v-if="execution.message_type">
+            <span class="text-on-surface-variant/70">message_type:</span>
+            <code class="ml-1 text-on-surface">{{ execution.message_type }}</code>
+          </div>
+        </div>
+
+        <!-- 错误信息 -->
+        <p
+          v-if="execution?.error_message"
+          class="mt-2 text-xs text-red-300/90"
+        >
+          {{ execution.error_message }}
+        </p>
+
+        <!-- 加载错误 -->
+        <div
+          v-if="auditDetailError"
+          class="mt-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200"
+        >
+          <div class="flex items-center gap-1.5">
+            <span class="material-symbols-outlined text-[14px]">error</span>
+            <span>{{ auditDetailError }}</span>
+          </div>
+        </div>
+
+        <!-- 加载占位 -->
+        <p
+          v-else-if="!execution"
+          class="mt-2 text-xs text-on-surface-variant"
+        >
+          加载中…
+        </p>
+      </OpsSectionCard>
     </div>
   </OpsPage>
 </template>
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { assetsApi } from '@/api/assets'
 import { aiApi, loadAiCapabilities } from '@/api/ai'
 import type { InstanceRow } from '@/types/api'
@@ -454,6 +567,56 @@ const form = reactive<{
   databaseName: '',
   userQuestion: '',
 })
+
+// =============================================================================
+// C15 NEW — audit 详情模式（plan §4 risk #2）
+// =============================================================================
+// 当 Chat 流 sql_result 卡片点击「查看详情」时，跳到 /ai/sql/preview?audit_id=N。
+// 进入页面时若 query.audit_id 存在，则进入「按 audit 加载」模式：
+//   - 不显示输入区（按问题生成不再可见）
+//   - 自动调 aiApi.getExecutionStatus 填充 execution 面板
+//   - 显示「audit #N · 状态」头部 + 「返回生成模式」链接
+const route = useRoute()
+const router = useRouter()
+const auditDetailMode = ref(false)
+const auditDetailId = ref<number | null>(null)
+const auditDetailError = ref<string | null>(null)
+
+function parseAuditIdFromQuery(): number | null {
+  const raw = route.query.audit_id
+  if (raw == null) return null
+  const s = Array.isArray(raw) ? String(raw[0] ?? '') : String(raw)
+  const n = Number(s)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+async function loadAuditDetail(auditId: number) {
+  auditDetailId.value = auditId
+  auditDetailMode.value = true
+  auditDetailError.value = null
+  executionError.value = ''
+  execution.value = null
+  try {
+    const r = await aiApi.getExecutionStatus(auditId)
+    execution.value = r
+  } catch (err: any) {
+    auditDetailError.value =
+      err?.response?.data?.detail || err?.message || '加载 audit 详情失败'
+  }
+}
+
+/** C15 NEW — 退出 audit 详情模式：清状态 + URL query，回到按问题生成。 */
+function exitAuditDetailMode() {
+  auditDetailMode.value = false
+  auditDetailId.value = null
+  auditDetailError.value = null
+  execution.value = null
+  executionError.value = ''
+  // URL 也清掉 query.audit_id，避免刷新页面再次回到详情模式
+  if (route.query.audit_id != null) {
+    router.replace({ path: '/ai/sql/preview', query: {} })
+  }
+}
 
 const generating = ref(false)
 const accepting = ref(false)
@@ -527,6 +690,11 @@ const canAccept = computed(
 onMounted(async () => {
   await loadCapabilities()
   await loadInstances()
+  // C15 NEW — 接 query.audit_id（Chat 流 sql_result 卡片跳转详情）
+  const aid = parseAuditIdFromQuery()
+  if (aid != null) {
+    await loadAuditDetail(aid)
+  }
 })
 
 async function loadCapabilities() {

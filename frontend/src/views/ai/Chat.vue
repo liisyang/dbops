@@ -171,6 +171,7 @@
  * 未做（Phase 3.6B）：FAB 浮窗 + 抽屉（用户已确认双入口策略）
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { useRouter } from 'vue-router'
 import { aiApi } from '@/api/ai'
 import type {
   AiChatMessage,
@@ -210,6 +211,9 @@ const executeError = ref<string | null>(null)
 const pendingAuditIds = ref<Set<number>>(new Set())
 const pendingPollingEnabled = ref(false)
 let pendingPollTimer: ReturnType<typeof setInterval> | null = null
+
+// C15 NEW — 路由（C15-B 「查看详情」跳转 /ai/sql/preview?audit_id= 用）
+const router = useRouter()
 
 function getAuditId(msg: AiChatMessage): number {
   const md = msg.metadata_json as { audit_id?: number } | null | undefined
@@ -477,18 +481,50 @@ async function onExecuteFromBubble(meta: AiSqlPreviewLinkMetadata) {
     executeError.value = '卡片 metadata 缺失 audit_id'
     return
   }
-  if (pendingAuditIds.value.has(meta.audit_id)) return
-  pendingAuditIds.value.add(meta.audit_id)
+  await triggerExecute(meta.audit_id, /* force */ false)
+}
+
+/**
+ * 触发 SQL 执行：async 包装 executeSql + pendingAuditIds 集合 + 错误兜底。
+ * 复用给 sql_preview_link 卡片（force=false）和 sql_result 卡片重新执行（force=true）。
+ */
+async function triggerExecute(auditId: number, force: boolean) {
+  if (!Number.isFinite(auditId) || auditId <= 0) {
+    executeError.value = 'audit_id 无效'
+    return
+  }
+  if (pendingAuditIds.value.has(auditId)) return
+  pendingAuditIds.value.add(auditId)
   executeError.value = null
   try {
-    await aiApi.executeSql({ audit_id: meta.audit_id, force: false })
+    await aiApi.executeSql({ audit_id: auditId, force })
     startPendingPolling()
   } catch (err) {
-    pendingAuditIds.value.delete(meta.audit_id)
+    pendingAuditIds.value.delete(auditId)
     executeError.value = describeExecuteError(err)
     // eslint-disable-next-line no-console
     console.error('[Chat] executeSql failed:', err)
   }
+}
+
+/**
+ * C15 NEW — sql_result 卡片点击「重新执行」：走 executeSql force=true（终态覆盖）。
+ * 失败/超时/取消三种终态下可点击；success 终态在气泡里禁用按钮。
+ */
+async function onReExecuteFromResult(auditId: number) {
+  await triggerExecute(auditId, /* force */ true)
+}
+
+/**
+ * C15 NEW — sql_result 卡片点击「查看详情」：路由到 SqlPreview.vue 接
+ * ?audit_id= query（SqlPreview.onMounted 检测并自动加载 execution status）。
+ */
+function onViewDetailFromResult(auditId: number) {
+  if (!Number.isFinite(auditId) || auditId <= 0) {
+    executeError.value = 'audit_id 无效，无法跳转详情'
+    return
+  }
+  router.push({ path: '/ai/sql/preview', query: { audit_id: String(auditId) } })
 }
 
 /**
