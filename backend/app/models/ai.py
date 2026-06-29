@@ -145,7 +145,9 @@ class AiChatMessage(DbopsAssetBase):
             name="chk_ai_chat_message_role",
         ),
         CheckConstraint(
-            "message_type IN ('chat', 'sql_preview', 'sql_result', 'error')",
+            # C14: 新增 'sql_preview_link'（Chat 流内 SQL Preview 卡片）；
+            # 与 db/dbops_phase3_6b1_ai_sql_execute.sql 保持一致
+            "message_type IN ('chat', 'sql_preview', 'sql_preview_link', 'sql_result', 'error')",
             name="chk_ai_chat_message_type",
         ),
         CheckConstraint(

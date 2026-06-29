@@ -912,3 +912,70 @@ ORDER BY event_object_table, trigger_name;
   - 第 1 批 9 字段在仓库 `.sql` 文件和 git 全历史中均无 ALTER 痕迹（疑似手工 ALTER 引入），与 phase3_4 新设计字段语义重叠
   - 第 2 批 2 字段（result_value / extra_attrs）+ 第 3 批 2 字段（category / remark）是 phase1 原生字段、ORM 漏声明，验证全表 NULL/默认空对象后一并 DROP
   - 治理执行 SQL 与决策路径详见 [`ddl-history.md §5`](./ddl-history.md#5-phase13-漏记字段治理-已选-a-路径)
+- 2026-06-29 已执行 Phase 3.6B1 C14 DDL（`backend/db/dbops_phase3_6b1_ai_sql_execute.sql`）到开发库 10.134.185.85:5432/dbops；DDL 跑 2 次幂等，5 场景 CHECK 全过：
+  - `ai_chat_message.message_type` CHECK 扩展：枚举从 `('chat','sql_preview','sql_result','error')` → `('chat','sql_preview','sql_preview_link','sql_result','error')`（C14 提前为 C15 Chat 集成预留）
+  - 新增部分唯一索引 `uq_ai_chat_message_sql_result_audit`：`(metadata->>'audit_id')` WHERE `message_type='sql_result' AND metadata ? 'audit_id'`（callback 重发去重；详见 [`ddl-history.md §7`](./ddl-history.md#7-phase-36b1-ddlai-copilot-sql-execute--c14)）
+
+## 17. Phase 3.6 AI Copilot 表（C1-C14 增量）
+
+> **范围说明**：Phase 3.6 引入 4 张 AI 表（C2 ai_chat_session / C2 ai_chat_message / C6 ai_schema_snapshot / C12 ai_sql_audit），本节只记录 **C14 关键变更**（message_type enum 扩展 + 部分唯一索引）以及与 SQL Execute 直接相关的字段含义。完整字段清单见 ORM 模型 `backend/app/models/ai.py`。
+
+### 17.1 ai_chat_message（C14 message_type 扩展 + 新增部分唯一索引）
+
+| 列 | 类型 | 约束 / 默认 | 含义 |
+|---|---|---|---|
+| `id` | bigint | PK, sequence | 自增主键 |
+| `session_id` | bigint | FK → `ai_chat_session.id` | 所属会话 |
+| `user_id` | bigint? | FK → `users.id` | 发送方（assistant 消息为 None 或 audit 关联 user） |
+| `client_request_id` | varchar(64)? | nullable, 幂等键 | 前端幂等去重 |
+| `role` | varchar(16) | - | `user` / `assistant` / `system` |
+| `message_type` | varchar(32) | CHECK (`chk_ai_chat_message_type`) | **C14 扩展**：`('chat', 'sql_preview', 'sql_preview_link', 'sql_result', 'error')` |
+| `status` | varchar(16) | - | `pending` / `streaming` / `completed` / `failed` |
+| `content` | text | - | 文本内容 / `sql_result` 时为 JSON 字符串（columns/rows/status/row_count/duration_ms/error_message/executed_at） |
+| `parent_message_id` | bigint? | FK → `ai_chat_message.id` | 父消息（`sql_result` 卡片对应 `sql_preview_link` / `sql_preview` 父） |
+| `metadata_json` | jsonb? | - | `sql_result` 时含 `{audit_id, execution_status, row_count, duration_ms}`；`sql_preview_link` 时含 `{audit_id, instance_id, schema_policy_hash}` |
+| `attempt_count` | int | default 0 | 重试次数 |
+| `created_at` | timestamptz | - | - |
+| `updated_at` | timestamptz | - | - |
+
+**C14 新增索引**：
+
+| 索引名 | 类型 | 列 / 表达式 | 谓词 | 用途 |
+|---|---|---|---|---|
+| `uq_ai_chat_message_sql_result_audit` | UNIQUE PARTIAL | `(metadata_json->>'audit_id')` | `message_type='sql_result' AND metadata_json ? 'audit_id'` | 同一 audit 至多落一条 `sql_result` 消息（callback 重发去重） |
+
+**CHECK 约束（`chk_ai_chat_message_type`）**：
+
+```sql
+CHECK (message_type IN ('chat', 'sql_preview', 'sql_preview_link', 'sql_result', 'error'))
+```
+
+### 17.2 ai_sql_audit（C14 执行字段完整化）
+
+> C12 已建 24 字段/8 FK/6 CHECK/6 索引，C14 不再动表结构。下列字段为 SQL Execute 链路直接读写：
+
+| 列 | 类型 | 含义（C14 视角） |
+|---|---|---|
+| `id` | bigint | PK；preview → execute → callback 全程引用 |
+| `session_id` | bigint? | 关联 ai_chat_session（C14 ExecuteService 写）：callback 写 sql_result chat_message 时反查 |
+| `message_id` | bigint? | 关联父 chat_message（preview 阶段的 user 提问）：callback 时 parent_message_id |
+| `result_message_id` | bigint? | callback 写 sql_result chat_message 后回填；前端 GET execution 通过此判断卡片存在 |
+| `execution_status` | varchar(32) | `not_requested` / `pending` / `running` / `success` / `failed` / `timeout` / `cancelled`（AiSqlAuditExecutionStatus enum） |
+| `execution_safety_status` | varchar(32) | `pending` / `passed` / `rejected`（Execute 时 AST 二次校验结果） |
+| `execution_safety_reason` | text? | AST 二次校验失败原因（4000 字符截断） |
+| `row_count` | int? | callback 写入：sql 实际返回行数 |
+| `duration_ms` | int? | callback 写入：执行耗时 |
+| `error_message` | text? | AWX launch 失败 / callback 失败的错误详情 |
+| `collector_run_id` | int? | FK → `collector_run.id`：execute 时内联构造 |
+| `collector_run_item_id` | int? | FK → `collector_run_item.id`：同上 |
+| `awx_job_id` | int? | callback 时回填 AWX 作业号（目前由 collector_run 持有，audit 行暂未冗余） |
+| `executed_at` | timestamptz? | Execute 阶段 `running` 时记录 |
+| `completed_at` | timestamptz? | callback 写入 |
+
+### 17.3 ai_schema_snapshot（C10 已建，C14 不变）
+
+C14 ExecuteService 复用 `ai_schema_snapshot.is_usable()` + `snapshot_hash` 校验。表结构在 ddl-history 中已记录，本快照不重复展开。
+
+### 17.4 ai_chat_session（C2 已建，C14 不变）
+
+`session_id` 外键来源；C14 不写 session，仅 ExecuteService + CallbackService 读 audit.session_id 关联。本快照不重复展开。

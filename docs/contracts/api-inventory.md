@@ -215,6 +215,55 @@
 | ResultEvidencePanel | 嵌入 ReportDetail / InstanceReport | 已实现（Phase 3.5） | `frontend/src/views/inspection/ResultEvidencePanel.vue` |
 | OpsInstancePicker | 通用实例选择器组件 | 已实现（Phase 3.5） | `frontend/src/components/ops/OpsInstancePicker.vue` + `frontend/src/components/ops/index.ts` |
 
+### 2.16 AI Copilot（Phase 3.6, prefix: `/api/v1/ai`）
+
+| 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
+|---|---|---|---|---|---|---|
+| GET | `/api/v1/ai/capabilities` | `api/ai.py` | - | 匿名 | 已实现（Phase 3.6 C1） | `backend/app/api/ai.py:108` |
+| POST | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:132` |
+| GET | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:157` |
+| POST | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:177` |
+| GET | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:230` |
+| POST | `/api/v1/ai/sql/schema-snapshots/{instance_id}/collect` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:264` |
+| GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:308` |
+| GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}/history` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:332` |
+| GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}/context` | `api/ai.py` | AiSchemaContextService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:359` |
+| POST | `/api/v1/ai/sql/preview` | `api/ai.py` | AiSqlPreviewService | JWT | 已实现（Phase 3.6 C12-C13） | `backend/app/api/ai.py:384` |
+| POST | `/api/v1/ai/sql/execute` | `api/ai.py` | AiSqlExecuteService | JWT | 已实现（Phase 3.6 C14） | `backend/app/api/ai.py:481` |
+| GET | `/api/v1/ai/sql/audit/{audit_id}/execution` | `api/ai.py` | AiSqlExecuteService | JWT | 已实现（Phase 3.6 C14） | `backend/app/api/ai.py:552` |
+
+#### 2.16.A Phase 3.6 C14 SQL Execute 端点（C14 新增）
+
+| 方法 | 路径 | 请求体 / 参数 | 响应 | 错误码 |
+|---|---|---|---|---|
+| POST | `/api/v1/ai/sql/execute` | `{audit_id: int, force?: bool}` | `AiSqlExecuteResponse`（audit_id, execution_status, collector_run_id, collector_run_item_id, executed_at, error_message） | 401 / 404 / 409×3 / 422 / 502 / 503 |
+| GET | `/api/v1/ai/sql/audit/{audit_id}/execution` | path: `audit_id` | `AiSqlExecutionStatusResponse`（audit_id, execution_status, row_count, duration_ms, completed_at, error_message, collector_run_id, executed_at, result_message_id, message_type, created_at） | 401 / 404 |
+
+#### 2.16.B SQL Execute 错误码（plan §11）
+
+| HTTP | code | 触发条件 | Service 异常 | 端点 |
+|---|---|---|---|---|
+| 401 | - | 未登录 | `get_current_user` raise 401 | execute / status |
+| 404 | - | audit_id 不存在 | `AuditNotFoundError` | execute / status |
+| 409 | - | audit.preview_safety_status != 'passed' | `AuditNotPassedError` | execute |
+| 409 | `snapshot_policy_mismatch` | schema snapshot is_current 失效 / policy_hash 不一致 / audit 缺 schema binding | `SnapshotPolicyMismatchError`（reason ∈ {`audit_missing_schema_binding`, `snapshot_not_found`, `snapshot_not_usable`, `policy_hash_mismatch`}） | execute |
+| 409 | - | execution_status IN ('pending','running') 且未 force | `AuditAlreadyRunningError` | execute |
+| 422 | `audit_unsafe_on_execute` | Execute 时 AST 二次校验失败 / approved_sql_hash 不一致 | `AuditUnsafeOnExecuteError`（errors[]） | execute |
+| 502 | - | AWX launch 失败 | `AwxLaunchError` | execute |
+| 503 | - | AI_SQL_EXECUTION_ENABLED=false | `FeatureDisabledError` | execute |
+| 200 | - | happy path | - | execute / status |
+
+#### 2.16.C 关键字段
+
+| 接口 | 字段 | 类型 | 含义 | 代码依据 |
+|---|---|---|---|---|
+| `POST /ai/sql/execute` | `audit_id` | int | 引用 preview passed 的 ai_sql_audit 行 | `backend/app/schemas/ai.py:AiSqlExecuteRequest` |
+| `POST /ai/sql/execute` | `force` | bool (default false) | execution_status pending/running 时强制重跑（plan §19 P0-6） | 同上 |
+| `POST /ai/sql/execute` | detail.code | enum | 409 snapshot_policy_mismatch / 422 audit_unsafe_on_execute 时结构化 detail | `backend/app/api/ai.py:514-533` |
+| `GET /ai/sql/audit/{id}/execution` | `result_message_id` | int? | callback 写入的 chat_message id（sql_result 卡片） | `backend/app/api/ai.py:581` |
+| `GET /ai/sql/audit/{id}/execution` | `message_type` | enum? | `sql_result` 表示有 chat_message 卡片渲染 | `backend/app/api/ai.py:582` |
+
+
 ## 3. 前端 API 封装清单
 
 ### 3.1 assets.ts（baseURL: `/api`，封装 `/v1/servers/*`）

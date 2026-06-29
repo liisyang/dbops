@@ -5,9 +5,10 @@ C1 范围：GET /api/v1/ai/capabilities
 C3 范围追加：Chat CRUD/Send/History（4 端点）
 C10 范围追加：Schema Snapshot collect/status/history/context（4 端点）
 C12 范围追加：SQL Preview（POST /ai/sql/preview）
+C14 范围追加：SQL Execute（POST /ai/sql/execute + GET /ai/sql/audit/{id}/execution）
 后续 commit 追加：
-- C19: SQL Execute/Executions
-- C24-C25: Inspection AI Analysis
+- C16: Inspection AI Analysis
+- C17: Report AI Export
 """
 from __future__ import annotations
 
@@ -34,6 +35,9 @@ from app.schemas.ai import (
     AiSchemaSnapshotListResponse,
     AiSchemaSnapshotResponse,
     AiSqlAuditResponse,
+    AiSqlExecuteRequest,
+    AiSqlExecuteResponse,
+    AiSqlExecutionStatusResponse,
     AiSqlPreviewRequest,
     AiSqlPreviewResponse,
 )
@@ -44,6 +48,16 @@ from app.services.ai.ai_schema_snapshot_service import (
     FeatureDisabledError,
     InstanceNotFoundError,
     UnsupportedDbTypeError,
+)
+from app.services.ai.ai_sql_execute_service import (
+    AiSqlExecuteService,
+    AuditAlreadyRunningError,
+    AuditNotFoundError,
+    AuditNotPassedError,
+    AuditUnsafeOnExecuteError,
+    AwxLaunchError as AiSqlAwxLaunchError,
+    FeatureDisabledError as AiSqlFeatureDisabledError,
+    SnapshotPolicyMismatchError,
 )
 from app.services.ai.ai_sql_preview_service import (
     AiSqlPreviewService,
@@ -458,4 +472,113 @@ def preview_sql(
         safety_policy_version=audit.safety_policy_version,
         dify_workflow_run_id=audit.dify_workflow_run_id,
         previewed_at=audit.previewed_at,
+    )
+
+
+# -----------------------------------------------------------------------------
+# C14: SQL Execute（plan §6.1）
+# -----------------------------------------------------------------------------
+@router.post(
+    "/sql/execute",
+    response_model=AiSqlExecuteResponse,
+)
+def execute_sql(
+    payload: AiSqlExecuteRequest,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSqlExecuteResponse:
+    """SQL Execute（plan §6.1）。
+
+    引用 Preview 阶段已 passed 的 audit 行；通过 AWX collector 异步执行
+    approved_sql。Callback 通过 ``business_domain='ai_sql'`` 路由到
+    ``AiSqlCallbackService`` 落 ai_sql_audit + 写 ai_chat_message(sql_result)。
+
+    错误码（plan §11）：
+    - 404 — audit_id 不存在
+    - 409 — audit.preview_safety_status != 'passed' / snapshot 不一致 /
+      execution_status IN ('pending','running') 且未 force
+    - 422 — approved_sql 在 Execute 时 AST 二次校验失败
+    - 502 — AWX launch 失败
+    - 503 — AI_SQL_EXECUTION_ENABLED=false
+    """
+    try:
+        result = AiSqlExecuteService.execute(
+            db,
+            audit_id=payload.audit_id,
+            force=payload.force,
+            requested_by=current_user,
+        )
+    except AuditNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except SnapshotPolicyMismatchError as exc:
+        # 409 + 结构化 code/reason（前端可分支渲染）
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "snapshot_policy_mismatch",
+                "reason": exc.reason,
+                "message": str(exc),
+            },
+        )
+    except (AuditNotPassedError, AuditAlreadyRunningError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    except AuditUnsafeOnExecuteError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "audit_unsafe_on_execute",
+                "errors": exc.errors,
+                "message": str(exc),
+            },
+        )
+    except AiSqlFeatureDisabledError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except AiSqlAwxLaunchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    audit = result.audit
+    return AiSqlExecuteResponse(
+        audit_id=int(audit.id),
+        execution_status=audit.execution_status,
+        awx_job_id=None,            # run.awx_job_id 在不同 session；execute_service 已 commit
+        awx_job_url=None,
+        collector_run_id=audit.collector_run_id,
+        collector_run_item_id=audit.collector_run_item_id,
+        executed_at=audit.executed_at,
+        error_message=audit.error_message,
+    )
+
+
+@router.get(
+    "/sql/audit/{audit_id}/execution",
+    response_model=AiSqlExecutionStatusResponse,
+)
+def get_execution_status(
+    audit_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSqlExecutionStatusResponse:
+    """查询 audit 执行状态（plan §6.1 — 前端轮询用）。
+
+    错误码：
+    - 404 — audit_id 不存在
+    """
+    try:
+        audit = AiSqlExecuteService.get_execution_status(db, audit_id=audit_id)
+    except AuditNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return AiSqlExecutionStatusResponse(
+        audit_id=int(audit.id),
+        execution_status=audit.execution_status,
+        row_count=audit.row_count,
+        duration_ms=audit.duration_ms,
+        completed_at=audit.completed_at,
+        error_message=audit.error_message,
+        collector_run_id=audit.collector_run_id,
+        awx_job_id=None,            # TODO: 关联 run.awx_job_id（需 join 查询）
+        executed_at=audit.executed_at,
+        result_message_id=audit.result_message_id,
+        message_type="sql_result" if audit.result_message_id else None,
+        created_at=audit.created_at,
     )

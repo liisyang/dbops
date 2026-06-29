@@ -1282,3 +1282,73 @@ COMMIT;
 | 2026-06-26 | v5.2 inspection_type 业务标签 | **B 路径：新增可空列 + 业务回填** | 业务分组需求（Oracle 基础 / SQL Server 基础）；不破坏已有数据；回填脚本可后续追加 |
 
 - **状态**：✅ v5.1 + v5.2 已在 test 库（10.134.185.85:5432/dbops）应用并验证；v5.1 已在 SQL Server id=964 跑通 live 链路；prod 应用待 DBA 现场评估。
+
+## 7. Phase 3.6B1 DDL（AI Copilot SQL Execute — C14）
+
+### 7.1 治理背景
+
+Phase 3.6B1 C14 落地 SQL Execute（`POST /api/v1/ai/sql/execute` + callback 链路），需要在已有 `ai_chat_message` 表上做 2 处结构变更：
+
+1. **message_type CHECK 扩展** — 新增 `'sql_preview_link'`（Chat 流内「SQL Preview 卡片」占位；当前 C14 已落库但实际渲染由 C15 接入 Chat；C14 阶段主要是为未来 sql_preview_link 卡片在元数据中可被识别）。
+2. **部分唯一索引** — 同一 audit 至多落一条 `sql_result` 消息（callback 重发去重；`metadata_json` 已用 JSONB，索引用表达式）。
+
+`ai_sql_audit` 表本身在 C12 已建（含 `execution_status` / `result_message_id` / `session_id` / `message_id` 等执行字段），C14 不再动表结构。
+
+### 7.2 C14 DDL 变更
+
+**来源**：`backend/db/dbops_phase3_6b1_ai_sql_execute.sql`（63 行）
+**回滚**：`backend/db/rollback_phase3_6b1_ai_sql_execute.sql`（同目录，配套）
+**幂等性**：✅ 2 次连跑无副作用（CHECK 用 `pg_constraint` + `pg_get_constraintdef` 检测 + 重建；UNIQUE INDEX 用 `IF NOT EXISTS`）。
+
+**变更范围**：
+
+| # | 表 | 动作 | 关键变更 |
+|---|---|---|---|
+| 1 | `ai_chat_message` | DROP CONSTRAINT `chk_ai_chat_message_type` + ADD CONSTRAINT（含 `sql_preview_link`） | CHECK 枚举扩展：`('chat', 'sql_preview', 'sql_preview_link', 'sql_result', 'error')` |
+| 2 | `ai_chat_message` | CREATE UNIQUE INDEX `uq_ai_chat_message_sql_result_audit` | 部分唯一索引：`(metadata->>'audit_id')` WHERE `message_type='sql_result' AND metadata ? 'audit_id'` |
+
+**典型 SQL**（DDL 节选）：
+
+```sql
+-- 1. CHECK 扩展（幂等）
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'chk_ai_chat_message_type'
+          AND conrelid = 'dbops.ai_chat_message'::regclass
+    ) THEN
+        IF NOT EXISTS (
+            SELECT 1 FROM pg_constraint c
+            WHERE conname = 'chk_ai_chat_message_type'
+              AND conrelid = 'dbops.ai_chat_message'::regclass
+              AND pg_get_constraintdef(c.oid) LIKE '%sql_preview_link%'
+        ) THEN
+            ALTER TABLE dbops.ai_chat_message
+                DROP CONSTRAINT chk_ai_chat_message_type;
+            ALTER TABLE dbops.ai_chat_message
+                ADD CONSTRAINT chk_ai_chat_message_type
+                CHECK (message_type IN ('chat', 'sql_preview', 'sql_preview_link', 'sql_result', 'error'));
+        END IF;
+    ELSE
+        ALTER TABLE dbops.ai_chat_message
+            ADD CONSTRAINT chk_ai_chat_message_type
+            CHECK (message_type IN ('chat', 'sql_preview', 'sql_preview_link', 'sql_result', 'error'));
+    END IF;
+END $$;
+
+-- 2. 部分唯一索引（幂等）
+CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_chat_message_sql_result_audit
+    ON dbops.ai_chat_message ((metadata->>'audit_id'))
+    WHERE message_type = 'sql_result' AND metadata ? 'audit_id';
+```
+
+### 7.3 治理决策记录
+
+| 时间 | 决策点 | 选择 | 理由 |
+|---|---|---|---|
+| 2026-06-29 | 部分唯一索引 vs 业务层去重 | **DB 层部分唯一索引** | AWX 可能重发 callback；DB 层强制比业务层可靠；ORM IntegrityError 已容错（`save_execution_results` 走 `try/except IntegrityError` + rollback） |
+| 2026-06-29 | `sql_preview_link` 提前加入 CHECK | **B 路径：CHECK 一次性扩展** | 避免 C15 Chat 集成时再改 CHECK 一次（DDL 变更尽量少）；C14 已落库，校验已通过 |
+| 2026-06-29 | 索引表达式 vs metadata_json 触发器 | **表达式索引** | PostgreSQL 原生支持 `((metadata->>'audit_id'))` 表达式索引；触发器方案更重且与现有 ORM 写入路径不兼容 |
+
+- **状态**：✅ C14 DDL 已在 dev 库（10.134.185.85:5432/dbops）跑 2 次幂等验证，5 场景 CHECK 全过；prod 应用待 DBA 现场评估。

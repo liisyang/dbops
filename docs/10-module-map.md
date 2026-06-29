@@ -1,7 +1,7 @@
 # 模块图
 
 > 文档状态：已校准
-> 最近校准：2026-06-28
+> 最近校准：2026-06-29
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -43,7 +43,7 @@
 | AI Copilot - Chat | 已实现（Phase 3.6 C1-C5 + BE-bug1 修复） | Dify chat-message app；user 维度会话/消息 CRUD + 发送（幂等 client_request_id）+ 消息历史；启动 stale cleanup；前端 Chat.vue 完整 UI（会话侧栏 + 消息流 + 输入框 + 错误兜底 409/502/503/504） | `backend/app/services/ai_chat_service.py` + `backend/app/api/ai.py:118-244` + `frontend/src/views/ai/Chat.vue` |
 | AI Copilot - Schema Snapshot | 已实现（Phase 3.6B0 C6-C10） | PostgreSQL 元数据采集（AWX 触发）+ callback 落库 + 5 态机（pending/running/success/failed/unavailable）；两阶段发布 is_current；TTL；SHA-256 snapshot_hash；4 API 端点（trigger/status/history/context）；context 含 schema_policy_hash 供 SQL Preview 强绑定 | `backend/app/services/ai/ai_schema_metadata_builder.py` + `backend/app/services/ai/ai_schema_snapshot_service.py` + `backend/app/services/ai/ai_schema_context_service.py` + `backend/app/services/ai/ai_schema_snapshot_callback_service.py` + `backend/app/api/ai.py:250-364` |
 | AI Copilot - SQL Preview | 已实现（Phase 3.6B1 C11-C12） | sqlglot AST 权威层 + Dify sql-generator workflow 调用；6 层 SQL 安全防御（Layer 3 AST 落地）；双轨 SQL（generated_sql 审计追溯 vs approved_sql 权威）+ 双 SHA-256 + schema_policy_hash 强绑定；7 类异常 → HTTP 404/409/422/502/503/504；ai_sql_audit 表 24 字段/8 FK/6 CHECK/6 索引；Execute 阶段（C17-C19）待实现 | `backend/app/services/ai/ai_sql_preview_service.py` + `backend/app/services/sql_safety_service.py` + `backend/app/api/ai.py:370-461` |
-| AI Copilot - SQL Execute | 规划中（Phase 3.6B1 C17-C19） | 审计 SQL 通过后真正下发到目标 DB；audit_id 引用 + business_context 注入 + AWX collector_run 调度；callback 回写 row_count/duration_ms/executed_at | 规划中（尚未编码） |
+| AI Copilot - SQL Execute | 已实现（Phase 3.6B1 C14） | 引用 preview passed 的 audit_id 真正下发到目标 DB；Execute 时 AST 二次校验（防御 preview 后 audit 改写）+ approved_sql_hash 校验 + schema_policy_hash 一致性校验；内联构造 CollectorRun(business_domain='ai_sql', job_type='SQL_VERIFY', check_code='DB_READONLY_SQL_EXEC') + CollectorRunItem(executor_type='db_sql_readonly') + business_context 标准化 JSON；AWX launch 失败时 audit → failed + error_message 落库；Callback 走 collector_service 路由到 AiSqlCallbackService.save_execution_results（条件 UPDATE 终态 + 写 ai_chat_message sql_result，幂等键 `uq_ai_chat_message_sql_result_audit` 部分唯一索引）；6 类异常 → HTTP 404/409（3 子码：audit_not_passed / snapshot_policy_mismatch 结构化 detail / audit_already_running）/422（audit_unsafe_on_execute 结构化 detail）/502/503；前端 SqlPreview.vue 执行按钮 + 5 色状态徽章 + 3s 轮询 + Chat.vue 流式拉取 sql_result | `backend/app/services/ai/ai_sql_execute_service.py` + `backend/app/services/ai/ai_sql_callback_service.py` + `backend/app/api/ai.py:481-584` + `frontend/src/views/ai/SqlPreview.vue` + `frontend/src/components/ai/ChatMessageBubble.vue` |
 
 ## 3. page / api / service / model / table 对应关系
 

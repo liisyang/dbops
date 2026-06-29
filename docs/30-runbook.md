@@ -283,9 +283,28 @@ curl -s http://127.0.0.1:60801/openapi.json \
 | snapshot status 显示 `failed` | callback 携带的 `check_code` | `UNSUPPORTED_DB_TYPE` / `CREDENTIAL_MISSING` / `COLLECTION_TIMEOUT` | 看 `snapshot.error_code` 字段；`_AiSchemaMetadataBuilder` 已知不支持 DB 类型（如 MySQL/SQL Server）的跳过逻辑 | `backend/app/services/ai/ai_schema_metadata_builder.py` |
 | `get_schema_context` 返回 `unavailable` | snapshot 是否 `is_current=true` | snapshot 已 `expired` / DB 已迁移过 schema → 旧 snapshot policy hash 不再适用 | 重新 `trigger_collection`；等 snapshot `is_current=true` 后再调用 | `backend/app/services/ai/ai_schema_context_service.py` |
 
-### 8.3 SQL Audit（Dify #2 `dbops-sql-generator`，计划中 C11 起手）
+### 8.3 SQL Audit & Execute（Dify #2 `dbops-sql-generator`，C11-C14）
 
-> 本节为占位；C11（sqlglot + SqlSafetyService）起手后追加具体排障条目。
+| 现象 | 检查入口 | 根因 | 处置 | 代码依据 |
+|---|---|---|---|---|
+| `POST /api/v1/ai/sql/preview` 返回 404 | instance_id 是否存在；前端 `instance_id` 来源 | `InstanceNotFoundError`：db_instance 表无此 id | 重新加载实例列表核对；确认目标 instance 未被删除 | `backend/app/api/ai.py:418-429` + `backend/app/services/ai/ai_sql_preview_service.py` |
+| `POST /api/v1/ai/sql/preview` 返回 409 + `snapshot_unavailable` | snapshot 状态；`is_current` 标记 | `SnapshotUnavailableError`（reason ∈ {`no_snapshot`, `pending`, `running`, `failed`, `expired`}） | 重新 `POST /ai/sql/schema-snapshots/{instance_id}/collect` 等待 `success` + `is_current=true` | `backend/app/api/ai.py:434-442` + `backend/app/services/ai/ai_schema_snapshot_service.py:is_usable` |
+| `POST /api/v1/ai/sql/preview` 返回 422 | db_type 是否在 `capabilities.sql_supported_db_types` | 计划未启用 / DB 类型不支持 | `.env` 加目标 db_type 或前端 capabilities check | `backend/app/api/ai.py:432-433` |
+| `POST /api/v1/ai/sql/preview` 返回 502 | Dify `dbops-sql-generator` 可达性 | Dify 不可用 / API key 失效 / Workflow 失败 | `curl $DIFY_BASE_URL/v1/workflows/run` 验证；核对 `.env` 的 `DIFY_API_KEY`（app-veffBzDsQVqHpYbDgvZOr1a2） | `backend/app/api/ai.py:443-449` + `backend/app/services/ai/dify_service.py` |
+| `POST /api/v1/ai/sql/preview` 返回 503 | `AI_SQL_PREVIEW_ENABLED` 配置 | 配置开关关闭 | `.env` 设 `AI_SQL_PREVIEW_ENABLED=true` 后重启 | `backend/app/api/ai.py:430-431` |
+| `POST /api/v1/ai/sql/preview` 返回 504 | Dify sql-generator 工作流超时 | Dify 工作流跑超时 | 调 `AI_SQL_PREVIEW_TIMEOUT_SEC`；换短问题重试 | `backend/app/api/ai.py:443-444` |
+| preview `errors` 非空 | 返回的 `errors` 列表 | Layer 1 预检（EN `\b` + CN substring 13 词）或 AST 拒绝（写操作/超 max_rows） | 调整 user_question；前端 SqlPreview.vue 红色 badge 展示 | `backend/app/services/sql_safety_service.py:validate_with_ast` + `backend/app/services/ai/ai_sql_preview_service.py:layer1_precheck_question` |
+| `POST /api/v1/ai/sql/execute` 返回 404 | `audit_id` 是否存在 | `AuditNotFoundError`：ai_sql_audit 表无此 id | 重新走 preview 流程；确认 audit 落库 | `backend/app/api/ai.py:511-512` + `backend/app/services/ai/ai_sql_execute_service.py:execute` |
+| `POST /api/v1/ai/sql/execute` 返回 409（无 code） | preview_safety_status | `AuditNotPassedError`：preview 未 passed | 重新 preview 拿到 passed audit 后再 execute | `backend/app/api/ai.py:523-524` |
+| `POST /api/v1/ai/sql/execute` 返回 409 + `snapshot_policy_mismatch` | snapshot 状态 | schema snapshot is_current 失效 / policy_hash 不一致 | 重新 trigger snapshot collection → 等 success → 重新 preview → execute | `backend/app/api/ai.py:513-522` |
+| `POST /api/v1/ai/sql/execute` 返回 409（"use force=true"） | execution_status 状态机 | audit 已有 pending/running | 等 callback 完成（pending/running → 终态）；或重传 `force=true` 覆盖 | `backend/app/api/ai.py:523-524` + `backend/app/services/ai/ai_sql_execute_service.py:AuditAlreadyRunningError` |
+| `POST /api/v1/ai/sql/execute` 返回 422 + `audit_unsafe_on_execute` | `errors[]` 内容 | Execute 时 AST 二次校验失败 / approved_sql_hash 不一致 | audit 行被人工改写过；重新走 preview | `backend/app/api/ai.py:525-533` |
+| `POST /api/v1/ai/sql/execute` 返回 502 | AWX 任务模板 10 是否可达 | AWX launch 失败（凭证 / 网络 / Project 8 未同步） | 1) `curl $AWX_URL/api/v2/job_templates/10/launch/` 试 launch；2) 检查 ansible-playbooks 端 `db_sql_readonly_collect` role + `ai_sql` 允许列表已 push；3) 看 `.env` `COLLECTOR_CALLBACK_URL` | `backend/app/api/ai.py:536-537` + `backend/app/services/ai/ai_sql_execute_service.py:AwxLaunchError` |
+| `POST /api/v1/ai/sql/execute` 返回 503 | `AI_SQL_EXECUTION_ENABLED` 配置 | 配置开关关闭 | `.env` 设 `AI_SQL_EXECUTION_ENABLED=true` 后重启 | `backend/app/api/ai.py:534-535` |
+| execute 一直 `running` 不变 | collector callback 是否到达 | AWX 任务跑飞 / callback 网络断 | 1) 看后端 callback 路由 `/api/v1/collector/callback` 日志（`ai_sql execution save`）；2) 看 `ai_sql_audit.execution_status` 状态机；3) 等 `cleanup_running_timeouts` 兜底（C10 Schema snapshot 同模式） | `backend/app/services/collector_service.py:1404-1420` + `backend/app/services/ai/ai_sql_callback_service.py:save_execution_results` |
+| `GET /api/v1/ai/sql/audit/{id}/execution` 显示 `failed` | `error_message` 内容 | 目标 DB 权限不足 / SQL 语法错 / 凭证失效 | 看 `error_code` 前缀（`PG_DENIED` / `EXECUTION_FAILED` / `EXECUTION_TIMEOUT` / `NO_RESULT`）；修正后 `force=true` 重 execute | `backend/app/services/ai/ai_sql_callback_service.py:_save_one` |
+| chat 不显示 `sql_result` 卡片 | message_type enum | 前端 Chat.vue 3s 轮询未拉到 / 已有 `result_message_id` 但 `message_type` 缺失 | 1) 看 `audit.result_message_id` 是否非空；2) 前端 `loadPendingExecutions` 触发 reload messages；3) 看 console 是否 pendingAuditIds 漏登记 | `frontend/src/views/ai/Chat.vue:loadPendingExecutions` + `backend/app/services/ai/ai_sql_callback_service.py:_write_sql_result_chat_message` |
+| chat_message 重复（>1 个 sql_result 卡片） | DDL 索引 `uq_ai_chat_message_sql_result_audit` 是否存在 | DDL 没落库 → 幂等键失效 | 跑 `backend/db/dbops_phase3_6b1_ai_sql_execute.sql`（幂等） | `backend/db/dbops_phase3_6b1_ai_sql_execute.sql` + `backend/app/services/ai/ai_sql_callback_service.py:IntegrityError` |
 
 ### 8.4 Inspection AI Analysis（Dify #3 `dbops-report-analyzer`，计划中 3.6C）
 

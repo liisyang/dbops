@@ -1395,6 +1395,30 @@ class CollectorService:
                     "ai_schema snapshot save failed: run_id=%s err=%s", run.run_id, _exc
                 )
 
+        # Phase 3.6B1 C14: ai_sql callback dispatch. Mirrors ai_schema
+        # pattern above — independent of inspection/backup. Only
+        # ``business_domain == "ai_sql"`` items are persisted to
+        # ``ai_sql_audit`` (and ``ai_chat_message`` sql_result). Wrapped
+        # in try/except so an ai_sql save failure cannot break the
+        # surrounding callback transaction.
+        if run_type == "ai_sql" or any(
+            (getattr(cb, "business_domain", None) or "") == "ai_sql"
+            for cb in callback_items
+        ):
+            try:
+                from app.services.ai.ai_sql_callback_service import (
+                    save_execution_results,
+                )
+
+                save_execution_results(db, run=run, callback_items=callback_items)
+            except Exception as _exc:
+                # Defensive — log via the standard channel and continue.
+                import logging as _logging
+
+                _logging.getLogger(__name__).exception(
+                    "ai_sql execution save failed: run_id=%s err=%s", run.run_id, _exc
+                )
+
         run.status = CollectorService._summarize_run_status(
             db.query(CollectorRunItem).filter(CollectorRunItem.run_id == run.run_id).all()
         )

@@ -377,4 +377,69 @@ class AiSqlAuditResponse(BaseModel):
     duration_ms: Optional[int] = None
     error_message: Optional[str] = None
 
+
+# =============================================================================
+# C14: SQL Execute（plan §6 + §10）
+# =============================================================================
+class AiSqlExecuteRequest(BaseModel):
+    """POST /v1/ai/sql/execute 请求（plan §6.1）。
+
+    关键字段：
+    - audit_id: 已 passed 状态的 audit 行 id（来自 Preview 阶段）
+    - force: 强制重跑（pending/running 状态允许覆盖）。当前 C14 不区分角色，
+      所有登录用户均可 force；后续 C15+ 可收紧到 admin only。
+    """
+
+    audit_id: int = Field(gt=0, description="已 passed 状态的 ai_sql_audit.id")
+    force: bool = Field(
+        default=False,
+        description="强制重跑；仅当 audit.execution_status IN ('pending','running') 时生效",
+    )
+
+
+class AiSqlExecuteResponse(BaseModel):
+    """POST /v1/ai/sql/execute 响应（plan §6.1）。
+
+    返回 execution_status='running' 表示 AWX 已接单；'failed' 表示 launch
+    失败（error_message 含 AWX 错误详情）。
+    """
+
+    audit_id: int
+    execution_status: Literal[
+        "not_requested", "pending", "running", "success",
+        "failed", "timeout", "cancelled"
+    ]
+    awx_job_id: Optional[int] = Field(default=None, description="AWX job id（launch 成功才有）")
+    awx_job_url: Optional[str] = Field(default=None, description="AWX 控制台链接")
+    collector_run_id: Optional[int] = Field(default=None)
+    collector_run_item_id: Optional[int] = Field(default=None)
+    executed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+
+
+class AiSqlExecutionStatusResponse(BaseModel):
+    """GET /v1/ai/sql/audit/{audit_id}/execution 响应（plan §6.1 — 前端轮询）。
+
+    字段来自 ai_sql_audit（来自 ORM，Pydantic from_attributes=True）+ chat
+    message_type='sql_result' 是否已落库。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    audit_id: int
+    execution_status: Literal[
+        "not_requested", "pending", "running", "success",
+        "failed", "timeout", "cancelled"
+    ] = "not_requested"
+    row_count: Optional[int] = None
+    duration_ms: Optional[int] = None
+    completed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    collector_run_id: Optional[int] = None
+    awx_job_id: Optional[int] = None
+    executed_at: Optional[datetime] = None
+    # chat message 关联（callback 写库后才有）
+    result_message_id: Optional[int] = None
+    message_type: Optional[Literal["sql_result"]] = None
+
     created_at: datetime
