@@ -1,7 +1,7 @@
 # 项目简报
 
 > 文档状态：已校准
-> 最近校准：2026-06-11
+> 最近校准：2026-06-29
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -27,6 +27,7 @@
 - **自动化运维**：主机清单管理、通过 SSH/Ansible 远程执行账号操作（新增用户、改密、用户检查）
 - **资产统计**：按 DB 类型、厂区、国家、部署类型等维度统计
 - **自动化采集**：AWX 批量校验、分发调度、DB/OS facts 采集、凭证中心（Profiles/Bindings）与快照漂移检测已交付（Phase 3.3A）
+- **AI Copilot（Phase 3.6 B0/B1）**：基于 Dify 的 Chat 会话 + Schema Snapshot 自动采集 + 只读 SQL Preview（AST 校验）+ SQL Execute（AWX 异步）+ sql_result 卡片流式回写 Chat。Phase 3.6 进展：详见 `docs/10-module-map.md`（AI 助手三子模块） + `docs/contracts/api-inventory.md` §2.16（12 个 AI 端点 + 错误码）+ `docs/30-runbook.md` §8.3（SQL Audit & Execute 排障）+ `docs/db/ddl-history.md` §7（C14 DDL）+ `docs/db/schema-snapshot.md` §17（AI Copilot 表）
 - **备份与恢复、SQL 分析、巡检与健康、审计与安全**：前端路由已注册，后端功能待完善
 
 代码依据：

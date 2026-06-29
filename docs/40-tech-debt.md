@@ -1,8 +1,8 @@
 # 技术债 Backlog
 
 > 文档状态：已校准
-> 最近校准：2026-06-16
-> 依据来源：真实代码 + PR 评审批 0/1/2/3/4
+> 最近校准：2026-06-29
+> 依据来源：真实代码 + PR 评审批 0/1/2/3/4 + Phase 3.6 C1-C15 真实实施反馈
 
 ## 1. 维护定位
 
@@ -167,3 +167,39 @@
 | C6 修复 | 直接查 `collector_dispatch_run`（id 138/139/140） | `finished_at=NULL, cancelled_at=SET`（cancel 不覆盖）✅ |
 | C1 修复 | celery beat 日志 `dispatch_scheduler_tick` | `{'considered': 2, 'launched': 2, 'skipped_cap': 0, 'skipped_error': 0}` ✅ |
 | 批 3 后端 | PID 3809407 + 3809406 + 3809405 | batch 133/134 happy path + cancel 全通过 ✅ |
+
+---
+
+## 7. Phase 3.6 AI Copilot 后续工时（2026-06-29 收尾记录）
+
+> C1-C14 已完成 + C15（A/B/B.2/C/D）已闭环。下表为后续 sprint 待办，技术债等级 = Medium。
+
+| # | 任务 | 来源 | 落点 | 风险等级 | 建议处理 | 状态 |
+|---:|---|---|---|---|---|---|
+| F1 | `awx_job_id` 暂未回填 `ai_sql_audit` 行 | C14 commit `fb8addb` 实测：execute_service.commit() 时未写 audit.awx_job_id，只写 collector_run.awx_job_id | `backend/app/services/ai_sql_execute_service.py` + ORM `ai_sql_audit.awx_job_id` 字段 | Medium | 在 collector_run 落库阶段同步回填，或 callback 阶段加 UPDATE；当前 Schema policy 校验仍能 work，但前端 SQL Preview/audit 详情页 `awx_job_id` 显示空 | 待处理 |
+| F2 | `result_message_id` 双向绑定缺 E2E 验证 | C14 commit `fb8addb` 实测：ai_sql_audit.result_message_id 与 ai_chat_message.id 互相绑定已实现，但缺端到端 happy path（dev 库无 PG 实例） | `backend/app/services/ai_sql_callback_service.py` save_snapshots 阶段；live 走完 dev 库 PG 实例 | Medium | dev 库加 PG 实例 + `AI_SQL_EXECUTION_ENABLED=true` 触发完整 preview→AWX launch→collector callback→chat 卡片渲染；live 验证 result_message_id 双向绑定 | 待处理 |
+| F3 | Chat 流 sql_preview_link 渲染分支 | C14 commit `78e1768` 已落，Chat.vue onExecuteFromBubble + startPendingPolling + loadPendingExecutions 闭环 | `frontend/src/views/ai/Chat.vue:474-565` | — | ✅ C15-A 已闭环（验证见 `phase-3-6-c15-completed-2026-06-29.md`） | 已完成 |
+| F4 | Chat 流 sql_result 卡片「重新执行」/「查看详情」按钮 | C14 commit `78e1768` sql_result 卡片缺操作按钮 | `frontend/src/components/ai/ChatMessageBubble.vue` 新增按钮 + emit + Chat.vue onReExecuteFromResult（force=true 走 executeSql）+ onViewDetailFromResult（router.push /ai/sql/preview?audit_id=）；终态 disable 逻辑（plan §4 risk #1） | — | ✅ C15-B 已闭环 | 已完成 |
+| F5 | SqlPreview.vue 接 auditId from query 详情显示 | C14 commit `78e1768` 当前 SqlPreview.vue 不读 query.audit_id，「查看详情」跳转无处落 | `frontend/src/views/ai/SqlPreview.vue` parseAuditIdFromQuery + loadAuditDetail + 新增 audit 详情卡 + exitAuditDetailMode；plan §4 risk #2 兼容 query string 模式 | — | ✅ C15-B.2 已闭环 | 已完成 |
+| F6 | dev 库无 PG 实例（限制 live SQL Execute happy path） | C14 live curl 验证时确认 | dev 库 10.134.185.85:5432/dbops 当前仅 PG schema（无 dbops 实例绑定到 PG），需要为 ai_sql 演示专门起一个 dev-only PG 实例 | Low | 待现场确认：是否在 dev 库加一个 miniredis 类似作用的 dev-only PG 实例（与 dev 后端 PORT 60801 + AI_SQL_EXECUTION_ENABLED=true 配套） | 待确认 |
+| F7 | AI Copilot 测试覆盖率尚需补强 | C1-C14 共 511 pytest passed（含 38 ai 安全 + 22 preview + 24 execute + 19 callback），但 Chat → SQL Execute → Callback → sql_result 卡片 端到端 happy path 缺 | `backend/tests/test_chat_sql_execute_integration.py`（5 测试已写）覆盖 callback 三状态但缺真实 AWX launch + dev PG 实例 走通 | Medium | 下次 dev 库加 PG 实例后补一条 happy path 集成测（启动 AWX job → 模拟 collector callback → 断言 ai_chat_message.sql_result 落库） | 待处理 |
+| F8 | Vue 组件单测覆盖 | C1-C14 无 Vue 组件单测（项目原本未配置 vitest 模板） | 新增 `frontend/tests/components/ai/ChatMessageBubble.spec.ts` + SqlPreview.vue + Chat.vue 路由切换 | Low | 项目无 vitest 模板时跳过；下次新增 components 时配套加上 @vue/test-utils + vitest | 待处理（无模板） |
+| F9 | SSE / 流式 Chat（typing effect） | C5 落地 notes：stream_enabled 首版固定 false（SSE 留待后续） | `backend/app/services/dify_service.py` 加 streaming + `backend/app/api/ai.py` 用 `StreamingResponse` + 前端 `Chat.vue` EventSource 增量 push | Low | 与 Dify 流式接口协议 + SSE 长连接断线重连复杂度相关，sprint 单独排期 | 待排期 |
+| F10 | 跨方言 SQL 校验（MySQL/Oracle/MSSQL） | C11 sqlglot 权威层已实现 PostgreSQL 校验；MySQL/Oracle/MSSQL 各自 dialect 的 AST 误报可能未覆盖 | `backend/app/services/sql_safety_service.py` `validate_with_ast` 扩展方言分支 + 测试矩阵 `tests/test_sql_safety_*.py` 28 → 100+ | Medium | C12 已通过 `sql_dialect` 字段为 schema policy 留口；补全需 `capabilities.sql_supported_db_types` 扩展到所有 4 方言 + 各自 sqlglot dialect 测试夹具 | 待处理 |
+| F11 | `db_sql_readonly_collect` role 是否需要为 `ai_sql` 加 special handling | C10 决策：`ai_sql` 复用 inspection 路径（`db_schema_metadata_collect` role），未单独加 `ai_sql` play | `ansible-playbooks/playbooks/dbops_collector_generic.yml` + `ansible-playbooks/playbooks/roles/db_*` | Low | 当前复用无问题（schema_metadata + AWX launch + collector callback 全走通）；若未来 `ai_sql` 需要特殊的 readonly 校验策略（如禁止 pg_dump），可加 `db_sql_readonly_collect` role | 待观察 |
+
+### 7.1 Phase 3.6 后续 sprint 建议
+
+1. **优先解决 F1 + F2**：awx_job_id 回填 + result_message_id 端到端验证（一日内可完成）
+2. **F7 集成测试补强**：dev 库加 PG 实例后（待现场确认），补 1 条 happy path（半天）
+3. **F3-F5 已闭环**：仅在新功能扩展时回顾（避免回归）
+4. **F8 Vue 组件单测**：取决于项目 vitest 模板决策（CLAUDE.md 维护定位以外，需独立排期）
+5. **F9 SSE 流式**：与产品需求同步，单独 sprint
+6. **F10 跨方言**：C12 已扩展 schema policy 多 dialect 入口，补 sqlglot 测试矩阵
+7. **F11 是否需要 special role**：观察 `ai_sql` 复用 `db_schema_metadata_collect` 的真实使用 1-2 周后决定
+
+### 7.2 Phase 3.6 范围外但与 AI Copilot 相关
+
+- **Inspection AI 集成**：Phase 3.6 暂未覆盖（plan 已规划但 C1-C14 都没碰到 Inspection AI）。下阶段排期。
+- **Report Export AI 集成**：plan §16 提及但 C1-C14 未实现，capabilities 字段 `report_analysis_enabled` + `report_export_ai_enabled` 已保留 false 占位。
+- **Dify 会话上下文压缩**：Chat 会话无窗口限制；当前依赖 Dify 服务端 + dbops 端 ai_chat_message 完整留存。后续如需压缩，按 `dify_conversation_id` 维度。

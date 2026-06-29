@@ -1,7 +1,7 @@
 # 交付看板
 
 > 文档状态：已校准
-> 最近校准：2026-06-13
+> 最近校准：2026-06-29
 > 依据来源：真实代码
 
 ## 1. 维护定位
@@ -95,3 +95,46 @@
 - Phase 3.3B：PostgreSQL / MySQL 采集联调，需对应 DB 实例访问凭证
 - Phase 10 测试优先级：是否在开发下个功能前补全 Phase 3.3A 测试
 - 生产环境部署前 SECRET_KEY / POSTGRES_PASSWORD 须通过环境变量覆盖
+
+## 9. Phase 3.6 AI Copilot 交付物（2026-06-29 收尾）
+
+> Phase 3.6 B0/B1 含 Chat / Schema Snapshot / SQL Preview / SQL Execute 四大子模块，按 C1-C14 共 14 个 commit 落地。
+> 详见 `docs/10-module-map.md`（AI 助手三子模块） + `docs/contracts/api-inventory.md` §2.16 + `docs/30-runbook.md` §8.3 + `docs/db/ddl-history.md` §7 + `docs/db/schema-snapshot.md` §17。
+
+### 9.1 已完成（C1-C14，共 14 commit + 15 文件 + 511 pytest + vue-tsc 0 错 + live curl 6/6）
+
+| C# | 模块 | 内容 | commit (dbops) | commit (ansible-playbooks) |
+|---:|---|---|---|---|
+| C1 | AI 底座 | httpx + DifyService + capabilities (6 flags) | Phase 3.6 C1 | — |
+| C2 | Chat DDL | ai_chat_session / ai_chat_message / ai_chat_processing_lock 表 | Phase 3.6 C2 | — |
+| C3 | Chat Service | AiChatService + 4 Chat 端点 + stale cleanup | `1a6c7c2` | — |
+| C4 | Chat 前端 | types/ai.ts + api/ai.ts + router /ai/chat + Chat.vue 占位 | Phase 3.6 C4 | — |
+| C5 | Chat UI | 6 NEW 组件 + Chat.vue + crypto.randomUUID + 错误码兜底 | `3af1b15` | — |
+| C5+1 | BE-bug 修复 | metadata alias 500 | `72c1fda` | — |
+| C6 | Schema Snapshot DDL | ai_sql_schema_snapshot 底座（21 字段 / 4 CHECK / 2 FK / 5 索引） | `d6bfbba` | — |
+| C7 | Schema Snapshot SQL | pg_schema_columns.sql 固定 SQL 模板 | `7850c43` | — |
+| C8 | Schema Snapshot 跨仓库 | _AiSchemaMetadataBuilder + check_code 注册 | `a64e626` | `9b93fb3` |
+| C9 | Schema Snapshot Callback | AiSchemaSnapshotCallbackService + handle_callback | `fad6b66` | — |
+| C10 | Schema Snapshot Service + Context | 4 API 端点 + schema_policy_hash | `49daba1` | — |
+| C11 | SqlSafety AST | sqlglot≥25 权威 AST 校验 | Phase 3.6 C11 | — |
+| C12 | SQL Preview API | AiSqlPreviewService 6 步流程 + 7 类异常 | `6997359` | — |
+| C13 | SQL Preview 前端 | Layer 1 预检 + Code 节点 JSON 解析 + SqlPreview.vue | `72ca071` | — |
+| C14 | SQL Execute | 后端 + DDL + 前端 + docs | `fb8addb` + `78e1768` | `3b2ad2a` |
+
+### 9.2 进行中（C15，2026-06-29 起手）
+
+| 任务 | 范围 | 状态 |
+|---|---|---|
+| C15-A | Chat 流 sql_preview_link 卡片渲染分支 | ✅ C14 已闭环 |
+| C15-B | Chat 流 sql_result 卡片「重新执行」/「查看详情」按钮 | ✅ 完成 |
+| C15-B.2 | SqlPreview.vue 接 auditId from query 详情显示 | ✅ 完成 |
+| C15-C | Phase 3.6 收尾文档 3 件 | ✅ 完成（本 commit） |
+| C15-D | Test 覆盖补全 + verify.sh | ⏳ 本 commit 后续工时 |
+
+### 9.3 关键里程碑证据
+
+- **测试**：C1 起 60 → C14 终 511 passed / 0 failed / 2 skipped；vue-tsc 0 错（per commit `pytest` 增量）
+- **dev 库 DDL**：`dbops_phase3_6b1_ai_sql_execute.sql` 跑 2 次幂等 + 5 场景 CHECK 全过（dev 库 10.134.185.85:5432/dbops）
+- **dev 后端**：PID 1513328 重启后 `sql_execution_enabled: true` + capabilities 6 flags 全部读出
+- **live curl**：6/6 全绿（C14 commit 时验证；POST/GET 401/404/409/422/502/503/200 错误路径全覆盖）
+- **跨仓库**：dbops HEAD `78e1768`（feature/phase-3.6-ai-copilot）+ ansible-playbooks HEAD `3b2ad2a`（main 已 push `9b93fb3..3b2ad2a`）
