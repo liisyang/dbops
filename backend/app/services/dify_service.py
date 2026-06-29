@@ -17,6 +17,7 @@ from typing import Any, Optional
 import httpx
 
 from app.config import get_settings
+from app.services.ai_text import strip_think_blocks
 
 logger = logging.getLogger(__name__)
 
@@ -206,7 +207,8 @@ class DifyService:
             timeout: 本次调用的读超时（默认 settings.DIFY_CHAT_TIMEOUT_SECONDS）
 
         Returns:
-            Dify 原始响应 dict（含 answer / conversation_id / message_id 等）
+            Dify 原始响应 dict（含 answer / conversation_id / message_id 等）。
+            注意：answer 字段已剥离模型推理过程 ``...``，避免 Chat UI 显示中间思考链。
         """
         settings = get_settings()
         key = api_key or settings.DIFY_CHAT_API_KEY
@@ -220,12 +222,17 @@ class DifyService:
         }
         if conversation_id:
             body["conversation_id"] = conversation_id
-        return cls._post(
+        resp = cls._post(
             "/chat-messages",
             headers={"Authorization": f"Bearer {key}"},
             json_body=body,
             timeout=timeout if timeout is not None else settings.DIFY_CHAT_TIMEOUT_SECONDS,
         )
+        # 剥离推理模型（如 DeepSeek R1 / o1）在 answer 中混入的 `` 块，
+        # 单点 sink：所有 chat_message 调用者拿到的都是干净 answer。
+        if isinstance(resp, dict) and isinstance(resp.get("answer"), str):
+            resp["answer"] = strip_think_blocks(resp["answer"])
+        return resp
 
     @classmethod
     def run_sql_workflow(

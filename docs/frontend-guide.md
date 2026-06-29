@@ -34,7 +34,7 @@ src/
 ├── router/           # 路由配置（index.ts）
 ├── stores/           # Pinia Store
 ├── types/            # TypeScript 类型定义（api.ts）
-├── utils/            # 工具函数（i18n, timezone）
+├── utils/            # 工具函数（i18n, timezone, uuid, aiText）
 └── views/            # 页面组件，按模块分子目录
     ├── audit/        # 审计与安全
     ├── backup/       # 备份与恢复

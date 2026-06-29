@@ -182,3 +182,52 @@ describe('ChatMessageBubble — sql_result 操作按钮（C15）', () => {
   })
 })
 
+/* ------------------------------------------------------------------ *
+ * Refactor — hide ``：前端兜底剥离
+ *
+ * 验证 ChatMessageBubble 的 displayContent computed 对 chat 气泡内容剥离
+ *  ``...`` 块（后端 DifyService.chat_message 已做权威剥离，本处为
+ * 显示层最后防线）。
+ * ------------------------------------------------------------------ */
+
+describe('ChatMessageBubble — hide 块（Refactor 兜底）', () => {
+  const T_OPEN = '\<think\>'
+  const T_CLOSE = '\</think\>'
+
+  it('chat 气泡：剥离单个 块，仅显示 answer', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: `${T_OPEN}模型推理过程${T_CLOSE}\n\n你好，我可以帮你查 Schema。`,
+      },
+    })
+    const text = wrapper.text()
+    expect(text).not.toContain('模型推理过程')
+    expect(text).not.toContain(T_OPEN)
+    expect(text).not.toContain(T_CLOSE)
+    expect(text).toContain('你好')
+  })
+
+  it('chat 气泡：无 块时原样显示', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '这是普通回答。',
+      },
+    })
+    expect(wrapper.text()).toContain('这是普通回答')
+  })
+
+  it('sql_result 卡片内容分支不受前端剥离影响（保留 JSON 原文渲染）', () => {
+    // sql_result 的 content 是 JSON 字符串，渲染走 metadata 解析分支；剥离不应触发
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('success', 1100),
+    })
+    // sql_result 卡片渲染表格，不应被剥离逻辑误伤
+    expect(wrapper.find('table').exists()).toBe(true)
+  })
+})

@@ -206,6 +206,64 @@ def test_chat_message_missing_key_raises(mock_settings):
         DifyService.chat_message(query="x", inputs={}, user="dbops:1")
 
 
+# -----------------------------------------------------------------------------
+# Refactor — hide ``：chat_message 返回前对 answer 字段做剥离
+# -----------------------------------------------------------------------------
+@patch("app.services.dify_service.httpx.Client")
+@patch("app.services.dify_service.get_settings")
+def test_chat_message_strips_think_blocks_from_answer(mock_settings, mock_client_cls):
+    """Dify chat_message 返回 answer 含 `` 块时，剥离后再返回。
+
+    这是 refactor（隐藏推理过程）的核心场景：推理模型（DeepSeek R1 / o1）
+    可能把 `` 混入 answer，必须在后端权威节点剥离，避免持久化与 UI 泄露。
+    """
+    mock_settings.return_value = MagicMock(
+        DIFY_CHAT_API_KEY="chat-key",
+        DIFY_CHAT_TIMEOUT_SECONDS=30.0,
+    )
+    # Dify 模拟响应：answer 中夹带推理过程块
+    # 用 chr() 拼接开 / 闭 tag，避免与渲染字符冲突
+    TAG_OPEN = chr(60) + "think" + chr(62)   # "think-tag-open"
+    TAG_CLOSE = chr(60) + "/think" + chr(62)  # "think-tag-close"
+    raw_answer = (
+        TAG_OPEN + "让我先想想过程内容…\n多行推理" + TAG_CLOSE
+        + "\n\n最终答案：SELECT 1;"
+    )
+    # 期望：剥离块 + 折叠空行 + strip 首尾空白
+    expected_answer = "最终答案：SELECT 1;"
+    mock_client = MagicMock()
+    mock_client.post.return_value = _mock_response(
+        200,
+        {"answer": raw_answer, "conversation_id": "conv-x", "message_id": "msg-x"},
+    )
+    DifyService._client = mock_client
+
+    resp = DifyService.chat_message(query="hi", inputs={}, user="dbops:1")
+    assert resp["answer"] == expected_answer
+    # conversation_id / message_id 等元字段不被剥离影响
+    assert resp["conversation_id"] == "conv-x"
+    assert resp["message_id"] == "msg-x"
+
+
+@patch("app.services.dify_service.httpx.Client")
+@patch("app.services.dify_service.get_settings")
+def test_chat_message_keeps_answer_when_no_think_block(mock_settings, mock_client_cls):
+    """answer 不含 `` 块时，原样保留（仅 strip 首尾空白）。"""
+    mock_settings.return_value = MagicMock(
+        DIFY_CHAT_API_KEY="chat-key",
+        DIFY_CHAT_TIMEOUT_SECONDS=30.0,
+    )
+    mock_client = MagicMock()
+    mock_client.post.return_value = _mock_response(
+        200,
+        {"answer": "  你好，世界  "},
+    )
+    DifyService._client = mock_client
+
+    resp = DifyService.chat_message(query="hi", inputs={}, user="dbops:1")
+    assert resp["answer"] == "你好，世界"
+
+
 @patch("app.services.dify_service.httpx.Client")
 @patch("app.services.dify_service.get_settings")
 def test_run_sql_workflow_uses_sql_key_and_path(mock_settings, mock_client_cls):

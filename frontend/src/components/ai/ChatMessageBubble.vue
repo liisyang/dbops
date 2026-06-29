@@ -24,7 +24,7 @@
         ]"
       >
         <slot>
-          {{ content || '(空)' }}
+          {{ displayContent || '(空)' }}
         </slot>
       </div>
 
@@ -202,6 +202,11 @@
  *  - 「查看详情」始终显示，emit('view-detail', auditId)，路由到 /ai/sql/preview?audit_id=
  *  - 「已完成」徽章：success 终态时占位（避免重复触发，plan §4 risk #1）
  *  - 「执行中…」徽章：pending/running 且在 Chat.vue pendingAuditIds 集合内时占位
+ *
+ * Refactor — hide ``：
+ *  - 在 chat 气泡显示前对 content 做兜底剥离（避免历史脏数据 / 其它端点漏剥离时泄露）
+ *  - 只影响 chat / sql_preview / error 普通文本气泡，不影响 sql_preview_link / sql_result 卡片
+ *  - 后端 DifyService.chat_message 已对 answer 做权威剥离，本处为显示层最后防线
  */
 import { computed } from 'vue'
 import ChatStatusBadge from './ChatStatusBadge.vue'
@@ -210,6 +215,7 @@ import type {
   AiSqlResultMetadata,
   AiSqlResultPayload,
 } from '@/types/ai'
+import { stripThinkBlocks } from '@/utils/aiText'
 
 const props = defineProps<{
   role: 'user' | 'assistant' | 'system'
@@ -325,5 +331,21 @@ const resultStatusClass = computed(() => {
   if (status === 'failed') return 'inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] text-red-300'
   if (status === 'timeout') return 'inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-300'
   return 'inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] text-sky-300'
+})
+
+/**
+ * Refactor — hide ``：
+ * 普通 chat 气泡显示前剥离 content 中的 `` 推理过程块。
+ * 仅影响 messageType ∈ {chat, sql_preview, error, undefined} 分支；
+ * sql_preview_link / sql_result 两种卡片分支走 metadata 渲染，不经此处（无泄露风险）。
+ */
+const displayContent = computed<string>(() => {
+  if (
+    props.messageType === 'sql_preview_link' ||
+    props.messageType === 'sql_result'
+  ) {
+    return props.content ?? ''
+  }
+  return stripThinkBlocks(props.content)
 })
 </script>
