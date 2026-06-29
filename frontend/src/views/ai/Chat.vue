@@ -95,13 +95,33 @@
             :key="m.id"
             :role="m.role"
             :status="m.status"
+            :message-type="m.message_type"
             :content="m.content"
             :created-at="formatTime(m.created_at)"
             :error-code="m.error_code"
             :error-message="m.error_message"
             :elapsed-ms="m.elapsed_ms"
             :total-tokens="m.total_tokens"
+            :metadata-json="m.metadata_json"
+            :executing="pendingAuditIds.has(getAuditId(m))"
+            @execute="onExecuteFromBubble"
           />
+          <!-- C14 NEW — execute 错误条（局部，不污染 sendError） -->
+          <div
+            v-if="executeError"
+            class="flex items-start gap-2 rounded border border-red-400/30 bg-red-400/10 px-3 py-2 text-xs text-red-200"
+          >
+            <span class="material-symbols-outlined text-[16px]">error</span>
+            <span class="flex-1">{{ executeError }}</span>
+            <button
+              type="button"
+              class="text-on-surface-variant/70 hover:text-on-surface"
+              title="清空"
+              @click="executeError = null"
+            >
+              <span class="material-symbols-outlined text-[14px]">close</span>
+            </button>
+          </div>
         </div>
 
         <!-- 输入框（P4：发送中禁用 + 错误条） -->
@@ -150,9 +170,13 @@
  *
  * 未做（Phase 3.6B）：FAB 浮窗 + 抽屉（用户已确认双入口策略）
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
 import { aiApi } from '@/api/ai'
-import type { AiChatMessage, AiChatSession } from '@/types/ai'
+import type {
+  AiChatMessage,
+  AiChatSession,
+  AiSqlPreviewLinkMetadata,
+} from '@/types/ai'
 import { safeUuid } from '@/utils/uuid'
 import {
   ChatMessageBubble,
@@ -178,6 +202,19 @@ const loadError = ref<string | null>(null)
 const sendError = ref<string | null>(null)
 const sending = ref(false)
 const draft = ref('')
+
+// ---- C14 NEW — SQL 执行状态 ----
+const executeError = ref<string | null>(null)
+// 当前正在轮询的 audit_id 集合（sql_preview_link 卡片触发 execute 后 + 历史
+// pending audit 自动加载时填充；终态时移除）
+const pendingAuditIds = ref<Set<number>>(new Set())
+const pendingPollingEnabled = ref(false)
+let pendingPollTimer: ReturnType<typeof setInterval> | null = null
+
+function getAuditId(msg: AiChatMessage): number {
+  const md = msg.metadata_json as { audit_id?: number } | null | undefined
+  return typeof md?.audit_id === 'number' ? md.audit_id : -1
+}
 
 // ---- derived ----
 const activeSessionTitle = computed(() => {
@@ -406,5 +443,123 @@ async function onSend(value: string) {
 // ---- lifecycle ----
 onMounted(() => {
   loadSessions()
+  loadPendingExecutions()
 })
+
+onBeforeUnmount(() => {
+  stopPendingPolling()
+})
+
+// =============================================================================
+// C14 NEW — SQL Execute 集成（plan §6.1 + §8）
+// =============================================================================
+
+/** execute 专用：按状态码给特定中文提示（plan §11 错误码文档） */
+function describeExecuteError(err: unknown): string {
+  const ax = err as AxiosLikeError | null
+  const status = ax?.response?.status
+  const detail = ax?.response?.data?.detail
+  const detailStr =
+    typeof detail === 'string' ? detail
+    : detail && typeof detail === 'object' && 'message' in detail
+      ? String((detail as { message?: string }).message)
+      : null
+  if (status === 409) return `SQL 执行冲突（409）：${detailStr || '请检查 audit 状态或 schema policy'}`
+  if (status === 422) return `SQL 在 Execute 时被安全层拒绝（422）：${detailStr || '重新 Preview 后再试'}`
+  if (status === 502) return `AWX 调度失败（502）：${detailStr || '检查 AWX 凭证 / Job Template'}`
+  if (status === 503) return `SQL 执行功能未启用（AI_SQL_EXECUTION_ENABLED=false）`
+  return extractDetail(err, 'SQL 执行失败')
+}
+
+/** sql_preview_link 卡片点击「执行 SQL」 → aiApi.executeSql + 启动轮询 */
+async function onExecuteFromBubble(meta: AiSqlPreviewLinkMetadata) {
+  if (typeof meta?.audit_id !== 'number') {
+    executeError.value = '卡片 metadata 缺失 audit_id'
+    return
+  }
+  if (pendingAuditIds.value.has(meta.audit_id)) return
+  pendingAuditIds.value.add(meta.audit_id)
+  executeError.value = null
+  try {
+    await aiApi.executeSql({ audit_id: meta.audit_id, force: false })
+    startPendingPolling()
+  } catch (err) {
+    pendingAuditIds.value.delete(meta.audit_id)
+    executeError.value = describeExecuteError(err)
+    // eslint-disable-next-line no-console
+    console.error('[Chat] executeSql failed:', err)
+  }
+}
+
+/**
+ * 进入会话时扫描 activeMessages，找出 sql_preview_link 卡片 metadata 里的
+ * audit_id，对每个 audit_id 调 getExecutionStatus 检查是否仍在 pending/
+ * running 中，是的话加入 pendingAuditIds 集合 + 启动轮询。
+ *
+ * 设计：去重 + 最多 5 个并发（防止历史消息过多时同时发起多个轮询）。
+ */
+async function loadPendingExecutions() {
+  if (!activeMessages.value.length) return
+  const auditIds = new Set<number>()
+  for (const m of activeMessages.value) {
+    if (m.message_type !== 'sql_preview_link') continue
+    const id = getAuditId(m)
+    if (id > 0) auditIds.add(id)
+  }
+  if (!auditIds.size) return
+  // 限制最多 5 个并发
+  const slice = Array.from(auditIds).slice(0, 5)
+  await Promise.all(
+    slice.map(async (aid) => {
+      try {
+        const r = await aiApi.getExecutionStatus(aid)
+        if (r.execution_status === 'pending' || r.execution_status === 'running') {
+          pendingAuditIds.value.add(aid)
+        }
+      } catch {
+        // 单个失败不影响整体
+      }
+    }),
+  )
+  if (pendingAuditIds.value.size > 0) {
+    startPendingPolling()
+  }
+}
+
+function startPendingPolling() {
+  if (pendingPollingEnabled.value) return
+  pendingPollingEnabled.value = true
+  pendingPollTimer = setInterval(async () => {
+    if (pendingAuditIds.value.size === 0) {
+      stopPendingPolling()
+      return
+    }
+    const ids = Array.from(pendingAuditIds.value)
+    for (const aid of ids) {
+      try {
+        const r = await aiApi.getExecutionStatus(aid)
+        const s = r.execution_status
+        if (s === 'success' || s === 'failed' || s === 'timeout' || s === 'cancelled') {
+          pendingAuditIds.value.delete(aid)
+          // 重新拉一次消息，让 sql_result 卡片渲染
+          if (activeSessionId.value != null) {
+            loadMessages(activeSessionId.value).catch(() => {
+              /* 静默 */
+            })
+          }
+        }
+      } catch {
+        // 单次轮询失败不打断
+      }
+    }
+  }, 3000)
+}
+
+function stopPendingPolling() {
+  pendingPollingEnabled.value = false
+  if (pendingPollTimer != null) {
+    clearInterval(pendingPollTimer)
+    pendingPollTimer = null
+  }
+}
 </script>

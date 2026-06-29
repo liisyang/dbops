@@ -79,7 +79,7 @@ export interface AiChatMessage {
   user_id?: string | null
   client_request_id?: string | null
   role: 'user' | 'assistant' | 'system'
-  message_type: 'chat' | 'sql_preview' | 'sql_result' | 'error'
+  message_type: 'chat' | 'sql_preview' | 'sql_preview_link' | 'sql_result' | 'error'
   status: 'pending' | 'completed' | 'failed' | 'stale'
   content?: string | null
   parent_message_id?: number | null
@@ -178,4 +178,121 @@ export interface AiSqlPreviewResponse {
 
   // 时间戳
   previewed_at?: string | null
+}
+
+// =============================================================================
+// SQL Execute（C14）
+// =============================================================================
+
+/**
+ * POST /api/v1/ai/sql/execute 请求（plan §6.1）。
+ *
+ * - audit_id: 来自 Preview 阶段已 passed 的 ai_sql_audit.id
+ * - force: 强制重跑（仅当 audit.execution_status IN ('pending','running') 时生效）
+ */
+export interface AiSqlExecuteRequest {
+  audit_id: number
+  force?: boolean
+}
+
+/**
+ * POST /api/v1/ai/sql/execute 响应（plan §6.1）。
+ *
+ * execution_status='running' 表示 AWX 已接单；'failed' 表示 launch 失败
+ * （error_message 含 AWX 错误详情）。
+ */
+export interface AiSqlExecuteResponse {
+  audit_id: number
+  execution_status:
+    | 'not_requested'
+    | 'pending'
+    | 'running'
+    | 'success'
+    | 'failed'
+    | 'timeout'
+    | 'cancelled'
+  awx_job_id?: number | null
+  awx_job_url?: string | null
+  collector_run_id?: number | null
+  collector_run_item_id?: number | null
+  executed_at?: string | null
+  error_message?: string | null
+}
+
+/**
+ * GET /api/v1/ai/sql/audit/{audit_id}/execution 响应（plan §6.1，前端轮询）。
+ *
+ * callback 写库后 result_message_id + message_type='sql_result' 才有值。
+ */
+export interface AiSqlExecutionStatusResponse {
+  audit_id: number
+  execution_status:
+    | 'not_requested'
+    | 'pending'
+    | 'running'
+    | 'success'
+    | 'failed'
+    | 'timeout'
+    | 'cancelled'
+  row_count?: number | null
+  duration_ms?: number | null
+  completed_at?: string | null
+  error_message?: string | null
+  collector_run_id?: number | null
+  awx_job_id?: number | null
+  executed_at?: string | null
+  // chat message 关联（callback 写库后才有）
+  result_message_id?: number | null
+  message_type?: 'sql_result' | null
+  created_at: string
+}
+
+// =============================================================================
+// SQL Result 渲染（C14 Chat 集成）
+// =============================================================================
+
+/**
+ * sql_result chat message 的 metadata_json 内容（plan §6.5）。
+ *
+ * 列与行直接来自 collector_client 的 raw_result（dbops 端透传，不做改写）。
+ */
+export interface AiSqlResultMetadata {
+  audit_id: number
+  execution_status:
+    | 'not_requested'
+    | 'pending'
+    | 'running'
+    | 'success'
+    | 'failed'
+    | 'timeout'
+    | 'cancelled'
+  row_count: number
+  duration_ms: number
+}
+
+/**
+ * sql_result chat message 的 content JSON（callback 落库时序列化）。
+ */
+export interface AiSqlResultPayload {
+  columns: string[]
+  rows: Array<Array<string | number | boolean | null>>
+  row_count: number
+  duration_ms: number
+  status: string
+  error_message?: string | null
+  executed_at?: string | null
+}
+
+/**
+ * sql_preview_link chat message 的 metadata_json（preview 阶段写入，
+ * Chat 集成时把 approved_sql 卡片挂到 assistant message 上 + 提供执行入口）。
+ */
+export interface AiSqlPreviewLinkMetadata {
+  audit_id: number
+  instance_id: number
+  database_name?: string | null
+  approved_sql: string
+  approved_sql_hash?: string | null
+  schema_policy_hash?: string | null
+  preview_safety_status: 'passed' | 'rejected'
 }

@@ -8,6 +8,8 @@
  * - POST /v1/ai/chat/sessions/{session_id}/messages — 发送消息（核心）
  * - GET  /v1/ai/chat/sessions/{session_id}/messages — 历史
  * - POST /v1/ai/sql/preview — SQL Preview（C13 NEW）
+ * - POST /v1/ai/sql/execute — SQL Execute（C14 NEW）
+ * - GET  /v1/ai/sql/audit/{audit_id}/execution — 状态查询（C14 NEW）
  *
  * C4 范围仅 Chat；后续 commit 追加 SQL Preview / Execute / Inspection AI 等。
  */
@@ -20,6 +22,9 @@ import type {
   AiChatSession,
   AiChatSessionCreateRequest,
   AiChatSessionListResponse,
+  AiSqlExecutionStatusResponse,
+  AiSqlExecuteRequest,
+  AiSqlExecuteResponse,
   AiSqlPreviewRequest,
   AiSqlPreviewResponse,
 } from '@/types/ai'
@@ -98,6 +103,38 @@ export const aiApi = {
    */
   sqlPreview: (data: AiSqlPreviewRequest): Promise<AiSqlPreviewResponse> =>
     request.post('/v1/ai/sql/preview', data),
+
+  /**
+   * SQL Execute（C14 NEW — plan §6.1）。
+   *
+   * 引用 Preview 阶段已 passed 的 audit 行，通过 AWX collector 异步执行。
+   * Callback 完成后 ai_chat_message(sql_result) 落库 + ai_sql_audit
+   * execution_status → success/failed/timeout，前端通过 getExecutionStatus 轮询。
+   *
+   * 错误码（plan §11）：
+   *   404 AuditNotFoundError — audit_id 不存在
+   *   409 AuditNotPassedError / SnapshotPolicyMismatchError /
+   *      AuditAlreadyRunningError
+   *   422 AuditUnsafeOnExecuteError — approved_sql Execute 时 AST 二次校验失败
+   *   502 AwxLaunchError — AWX launch 失败
+   *   503 FeatureDisabledError — AI_SQL_EXECUTION_ENABLED=false
+   */
+  executeSql: (data: AiSqlExecuteRequest): Promise<AiSqlExecuteResponse> =>
+    request.post('/v1/ai/sql/execute', data),
+
+  /**
+   * 查询 audit 执行状态（C14 NEW — plan §6.1，前端轮询用）。
+   *
+   * 错误码：
+   *   404 AuditNotFoundError — audit_id 不存在
+   *
+   * Note：execution_status='running' 时 result_message_id 仍为 null，callback
+   * 落库后才有值；前端按 3s 间隔轮询直到 terminal 状态。
+   */
+  getExecutionStatus: (
+    auditId: number | string,
+  ): Promise<AiSqlExecutionStatusResponse> =>
+    request.get(`/v1/ai/sql/audit/${auditId}/execution`),
 }
 
 // =============================================================================

@@ -1,5 +1,6 @@
 <!--
-  AI Copilot SQL 生成器（Phase 3.6 C13 — plan §5.2 + §5.3 + §20）
+  AI Copilot SQL 生成器（Phase 3.6 C13 — plan §5.2 + §5.3 + §20；
+                              C14 — plan §6.1 + §8 SQL Execute）
 
   功能：
     - 选 instance（database_name 留空由后端 fallback）
@@ -10,6 +11,10 @@
     - 「接受并写回会话」按钮（accepted）：调 sendMessage 把
       approved_sql + audit_id 写回 ai_chat_message
       （message_type='sql_preview' + metadata_json.preview_audit_id）
+    - 「执行 SQL」按钮（C14 NEW）：passed 后调 aiApi.executeSql →
+      AWX 异步执行 → 3s 轮询 getExecutionStatus → success/failed/
+      timeout 终态。Callback 写 ai_chat_message(sql_result)，由 Chat
+      流轮询读取渲染（见 ChatMessageBubble.vue）。
 
   错误码（plan §11）：
     404 InstanceNotFoundError → 实例不存在
@@ -18,6 +23,14 @@
     502 Dify 不可用 / Workflow 失败
     503 FeatureDisabledError → AI_SQL_PREVIEW_ENABLED=false
     504 Dify 调用超时
+
+  C14 SQL Execute 错误码：
+    404 AuditNotFoundError — audit_id 不存在
+    409 AuditNotPassedError / SnapshotPolicyMismatchError /
+       AuditAlreadyRunningError
+    422 AuditUnsafeOnExecuteError — Execute 时 AST 二次校验失败
+    502 AwxLaunchError — AWX launch 失败
+    503 FeatureDisabledError — AI_SQL_EXECUTION_ENABLED=false
 
   注意：
     - 200 响应里 preview_safety_status='rejected' 不是错误，要展示给用户看
@@ -283,7 +296,7 @@
         <!-- 接受按钮：passed 时显示 -->
         <div
           v-if="result.preview_safety_status === 'passed' && result.approved_sql"
-          class="mt-4 flex items-center gap-2 border-t border-surface-variant/30 pt-4"
+          class="mt-4 flex flex-wrap items-center gap-2 border-t border-surface-variant/30 pt-4"
         >
           <button
             type="button"
@@ -298,8 +311,26 @@
             <span v-else class="material-symbols-outlined text-[16px]">task_alt</span>
             {{ accepting ? '写回中…' : '接受并写回会话' }}
           </button>
-          <span class="text-xs text-on-surface-variant">
-            （会创建一个 Chat 会话并把 approved_sql 作为 assistant 消息存入）
+          <!-- C14 NEW — 执行 SQL 按钮（capabilities.sql_execution_enabled 才显示） -->
+          <button
+            v-if="capabilities.sql_execution_enabled"
+            type="button"
+            class="ops-secondary-button inline-flex items-center gap-1.5 px-4 py-2 text-sm"
+            :disabled="!canExecute || executing"
+            @click="onExecuteSql"
+          >
+            <span
+              v-if="executing"
+              class="material-symbols-outlined animate-spin text-[16px]"
+            >sync</span>
+            <span v-else class="material-symbols-outlined text-[16px]">play_arrow</span>
+            {{ executing ? '执行中…' : '执行 SQL' }}
+          </button>
+          <span v-if="!capabilities.sql_execution_enabled" class="text-xs text-on-surface-variant">
+            （AI_SQL_EXECUTION_ENABLED=false，按钮禁用）
+          </span>
+          <span v-else class="text-xs text-on-surface-variant">
+            （写入 Chat 会话并把 approved_sql 作为 assistant 消息存入 / 执行 SQL 通过 AWX 异步调度）
           </span>
         </div>
 
@@ -322,19 +353,90 @@
             <span>{{ acceptError }}</span>
           </div>
         </div>
+
+        <!-- C14 NEW — SQL 执行状态面板 -->
+        <div
+          v-if="execution || executionError"
+          class="mt-4 rounded border border-surface-variant/30 bg-surface-variant/10 p-3 text-sm"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <div class="flex items-center gap-2">
+              <span class="text-xs font-medium text-on-surface-variant">SQL 执行状态</span>
+              <span v-if="execution" :class="executionBadgeClass">
+                <span class="material-symbols-outlined text-[14px]">{{ executionBadgeIcon }}</span>
+                {{ execution.execution_status.toUpperCase() }}
+              </span>
+            </div>
+            <button
+              v-if="polling"
+              type="button"
+              class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+              @click="stopPolling"
+            >
+              <span class="material-symbols-outlined text-[12px]">close</span>
+              停止轮询
+            </button>
+          </div>
+
+          <div v-if="execution" class="mt-2 grid gap-2 text-xs text-on-surface-variant md:grid-cols-2 lg:grid-cols-3">
+            <div v-if="execution.row_count != null">
+              <span class="text-on-surface-variant/70">rows:</span>
+              <code class="ml-1 text-on-surface">{{ execution.row_count }}</code>
+            </div>
+            <div v-if="execution.duration_ms != null">
+              <span class="text-on-surface-variant/70">duration:</span>
+              <code class="ml-1 text-on-surface">{{ execution.duration_ms }} ms</code>
+            </div>
+            <div v-if="execution.completed_at">
+              <span class="text-on-surface-variant/70">completed_at:</span>
+              <code class="ml-1 text-on-surface">{{ execution.completed_at }}</code>
+            </div>
+            <div v-if="execution.collector_run_id">
+              <span class="text-on-surface-variant/70">collector_run_id:</span>
+              <code class="ml-1 text-on-surface">#{{ execution.collector_run_id }}</code>
+            </div>
+            <div v-if="execution.executed_at">
+              <span class="text-on-surface-variant/70">executed_at:</span>
+              <code class="ml-1 text-on-surface">{{ execution.executed_at }}</code>
+            </div>
+            <div v-if="execution.result_message_id">
+              <span class="text-on-surface-variant/70">chat_msg:</span>
+              <code class="ml-1 text-on-surface">#{{ execution.result_message_id }}</code>
+            </div>
+          </div>
+
+          <p
+            v-if="execution?.error_message"
+            class="mt-2 text-xs text-red-300/90"
+          >
+            {{ execution.error_message }}
+          </p>
+
+          <div
+            v-if="executionError"
+            class="mt-2 rounded border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-200"
+          >
+            <div class="flex items-center gap-1.5">
+              <span class="material-symbols-outlined text-[14px]">error</span>
+              <span>{{ executionError }}</span>
+            </div>
+          </div>
+        </div>
       </OpsSectionCard>
     </div>
   </OpsPage>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { assetsApi } from '@/api/assets'
 import { aiApi, loadAiCapabilities } from '@/api/ai'
 import type { InstanceRow } from '@/types/api'
 import type {
   AiCapabilities,
   AiChatSessionCreateRequest,
+  AiSqlExecutionStatusResponse,
+  AiSqlExecuteRequest,
   AiSqlPreviewRequest,
   AiSqlPreviewResponse,
 } from '@/types/ai'
@@ -568,4 +670,117 @@ async function onAccept() {
     accepting.value = false
   }
 }
+
+// =============================================================================
+// SQL Execute（C14 NEW — plan §6.1 + §8 Chat 集成入口）
+// =============================================================================
+const executing = ref(false)
+const execution = ref<AiSqlExecutionStatusResponse | null>(null)
+const executionError = ref('')
+let pollTimer: ReturnType<typeof setInterval> | null = null
+const polling = ref(false)
+
+// 是否启用执行按钮：passed + capabilities + 不在终态
+const canExecute = computed(
+  () =>
+    !!result.value &&
+    result.value.preview_safety_status === 'passed' &&
+    !!result.value.approved_sql &&
+    capabilities.value.sql_execution_enabled,
+)
+
+const EXEC_TERMINAL_STATUSES = new Set(['success', 'failed', 'timeout', 'cancelled'])
+
+const executionBadgeClass = computed(() => {
+  const s = execution.value?.execution_status
+  if (s === 'success') return 'inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs text-emerald-300'
+  if (s === 'failed') return 'inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-xs text-red-300'
+  if (s === 'timeout') return 'inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-xs text-amber-300'
+  if (s === 'cancelled') return 'inline-flex items-center gap-1 rounded-full bg-zinc-500/15 px-2 py-0.5 text-xs text-zinc-300'
+  // running / pending / not_requested
+  return 'inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-xs text-sky-300'
+})
+
+const executionBadgeIcon = computed(() => {
+  const s = execution.value?.execution_status
+  if (s === 'success') return 'check_circle'
+  if (s === 'failed') return 'cancel'
+  if (s === 'timeout') return 'timer_off'
+  if (s === 'cancelled') return 'block'
+  return 'autorenew'  // running / pending
+})
+
+async function onExecuteSql() {
+  if (!canExecute.value || !result.value) return
+  executing.value = true
+  executionError.value = ''
+  execution.value = null
+  try {
+    const payload: AiSqlExecuteRequest = {
+      audit_id: result.value.audit_id,
+      force: false,
+    }
+    const r = await aiApi.executeSql(payload)
+    execution.value = {
+      audit_id: r.audit_id,
+      execution_status: r.execution_status,
+      executed_at: r.executed_at,
+      collector_run_id: r.collector_run_id,
+      // 其他字段（row_count / duration_ms / completed_at / result_message_id）由轮询补齐
+      row_count: null,
+      duration_ms: null,
+      completed_at: null,
+      error_message: r.error_message,
+      awx_job_id: r.awx_job_id,
+      result_message_id: null,
+      message_type: null,
+      created_at: new Date().toISOString(),
+    }
+    if (!EXEC_TERMINAL_STATUSES.has(r.execution_status)) {
+      startPolling(r.audit_id)
+    }
+  } catch (err: any) {
+    const status = err?.response?.status
+    const detail = err?.response?.data?.detail || err?.message || '未知错误'
+    let hint = ''
+    if (status === 409) hint = '请检查 audit 状态（pending/running 需 force=true）/ schema policy'
+    else if (status === 422) hint = 'Execute 时 AST 二次校验失败；请重新 Preview'
+    else if (status === 503) hint = '检查 backend/.env 的 AI_SQL_EXECUTION_ENABLED'
+    else if (status === 502) hint = 'AWX 调度失败；检查 AWX 凭证与 Job Template'
+    executionError.value = `执行请求失败（HTTP ${status || '网络错误'}）：${
+      typeof detail === 'string' ? detail : JSON.stringify(detail)
+    }${hint ? ' — ' + hint : ''}`
+  } finally {
+    executing.value = false
+  }
+}
+
+function startPolling(auditId: number) {
+  stopPolling()
+  polling.value = true
+  pollTimer = setInterval(async () => {
+    try {
+      const r = await aiApi.getExecutionStatus(auditId)
+      execution.value = r
+      if (EXEC_TERMINAL_STATUSES.has(r.execution_status)) {
+        stopPolling()
+      }
+    } catch (err: any) {
+      // 单次轮询失败 → log + continue（不打断流程）
+      console.warn('execute status poll failed:', err)
+    }
+  }, 3000)
+}
+
+function stopPolling() {
+  polling.value = false
+  if (pollTimer != null) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+onBeforeUnmount(() => {
+  stopPolling()
+})
 </script>
