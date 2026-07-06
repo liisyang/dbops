@@ -540,7 +540,7 @@ def execute_sql(
     return AiSqlExecuteResponse(
         audit_id=int(audit.id),
         execution_status=audit.execution_status,
-        awx_job_id=None,            # run.awx_job_id 在不同 session；execute_service 已 commit
+        awx_job_id=getattr(audit, "awx_job_id", None),  # C16-F1: 回填后由 execute_service 写入
         awx_job_url=None,
         collector_run_id=audit.collector_run_id,
         collector_run_item_id=audit.collector_run_item_id,
