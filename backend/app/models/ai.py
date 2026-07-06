@@ -357,6 +357,179 @@ class AiSchemaSnapshot(DbopsAssetBase):
 
 
 # =============================================================================
+# C16-F3: AI Object Metadata Snapshot（Phase 3.6B0 F3）
+# =============================================================================
+class AiObjectMetadataSnapshotStatus:
+    """Object Metadata Snapshot 状态枚举（与 C6 AiSchemaSnapshotStatus 对齐）。
+
+    状态机：
+    - pending  → 初始，等待 collector 启动
+    - running  → collector 执行中
+    - success  → 采集完成且数据完整（payload 必填字段齐）
+    - failed   → 采集失败（error_message 必填）
+    - unavailable → 该 db_type 当前不支持（如 ORACLE/MSSQL/MySQL，capabilities 端点不暴露）
+    """
+
+    PENDING = "pending"
+    RUNNING = "running"
+    SUCCESS = "success"
+    FAILED = "failed"
+    UNAVAILABLE = "unavailable"
+    ALL = (PENDING, RUNNING, SUCCESS, FAILED, UNAVAILABLE)
+
+
+class AiObjectMetadataSnapshot(DbopsAssetBase):
+    """数据库对象 DDL 快照（instance + database + schema 维度）。
+
+    设计要点（与 C6 AiSchemaSnapshot 对齐 + F3 增强）：
+    - 概念独立：DDL 文本（object_ddl_text）vs C6 列元数据（allowed_*）
+    - 两阶段发布：success 后才设 is_current=true，旧 snapshot 切 false（应用层控制）
+    - TTL：success 时 expires_at 必须设置（service 端按 AI_OBJECT_METADATA_TTL_HOURS 计算）
+    - 五态机：CHECK 约束在 DB 层兜底，应用层用 AiObjectMetadataSnapshotStatus 常量
+    - SHA-256 64 hex：object_ddl_sha256 / snapshot_hash 长度 64 由 DB CHECK 约束保证
+    - partial unique 加 schema_name 维度（DDL 粒度比 C6 更细）
+    """
+
+    __tablename__ = "ai_object_metadata_snapshot"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    instance_id = Column(
+        BigInteger,
+        ForeignKey("dbops.db_instance.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    db_type_code = Column(String(50), nullable=False)
+    # database_name NOT NULL：无明确 database 时存 '<default>'（与 C9 callback 一致）
+    database_name = Column(String(200), nullable=False)
+    schema_name = Column(String(200), nullable=False)
+
+    # 五态机：pending / running / success / failed / unavailable
+    status = Column(String(20), nullable=False, server_default=text("'pending'"))
+
+    # DDL 文本聚合（仅 success 时填充，1MB 截断兜底）
+    object_ddl_text = Column(Text, nullable=True)
+    object_ddl_sha256 = Column(String(64), nullable=True)
+
+    # 对象计数（仅 success 时填充）
+    table_count = Column(Integer, nullable=False, server_default=text("0"))
+    view_count = Column(Integer, nullable=False, server_default=text("0"))
+    index_count = Column(Integer, nullable=False, server_default=text("0"))
+    function_count = Column(Integer, nullable=False, server_default=text("0"))
+    total_object_count = Column(Integer, nullable=False, server_default=text("0"))
+
+    # 两阶段发布标志
+    is_current = Column(Boolean, nullable=False, server_default=text("false"))
+
+    # 关联 AWX 采集运行（删除 collector_run 时置 NULL）
+    collector_run_id = Column(
+        BigInteger,
+        ForeignKey("dbops.collector_run.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
+    # SHA-256 of canonical JSON (columns, rows)
+    snapshot_hash = Column(String(64), nullable=True)
+
+    # TTL：成功时必须设置
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    # 实际采集完成时间：成功时必须设置
+    collected_at = Column(DateTime(timezone=True), nullable=True)
+
+    # 错误：failed / unavailable 时 error_message 必须有
+    error_code = Column(String(100), nullable=True)
+    error_message = Column(Text, nullable=True)
+
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+    # CHECK 约束（与 DDL 对齐）
+    __table_args__ = (
+        CheckConstraint(
+            "db_type_code IN ('POSTGRESQL', 'ORACLE', 'MSSQL', 'MYSQL')",
+            name="chk_ai_object_metadata_snapshot_db_type",
+        ),
+        CheckConstraint(
+            "status IN ('pending', 'running', 'success', 'failed', 'unavailable')",
+            name="chk_ai_object_metadata_snapshot_status",
+        ),
+        # 状态机完整性（与 C6 chk_ai_sql_schema_snapshot_payload 对齐）
+        CheckConstraint(
+            "(status = 'success' "
+             "AND object_ddl_text IS NOT NULL AND object_ddl_sha256 IS NOT NULL "
+             "AND collected_at IS NOT NULL AND expires_at IS NOT NULL) "
+            "OR "
+            "(status IN ('pending', 'running') "
+             "AND error_message IS NULL AND error_code IS NULL) "
+            "OR "
+            "(status IN ('failed', 'unavailable') "
+             "AND error_message IS NOT NULL)",
+            name="chk_ai_object_metadata_snapshot_payload",
+        ),
+        CheckConstraint(
+            "object_ddl_sha256 IS NULL OR length(object_ddl_sha256) = 64",
+            name="chk_ai_object_metadata_snapshot_hash_len",
+        ),
+        CheckConstraint(
+            "snapshot_hash IS NULL OR length(snapshot_hash) = 64",
+            name="chk_ai_object_metadata_snapshot_snapshot_hash_len",
+        ),
+        # 部分唯一索引：同一 (instance_id, database_name, schema_name) 同时只有一个 is_current=true
+        Index(
+            "uq_ai_object_metadata_snapshot_current",
+            "instance_id",
+            "database_name",
+            "schema_name",
+            unique=True,
+            postgresql_where=text("is_current = true"),
+        ),
+        # 辅助索引（与 DDL 对齐）
+        Index(
+            "idx_ai_object_metadata_snapshot_instance_status",
+            "instance_id",
+            "status",
+        ),
+        Index(
+            "idx_ai_object_metadata_snapshot_collector_run",
+            "collector_run_id",
+            postgresql_where=text("collector_run_id IS NOT NULL"),
+        ),
+        Index(
+            "idx_ai_object_metadata_snapshot_expires_at",
+            "expires_at",
+            postgresql_where=text("status = 'success'"),
+        ),
+        Index(
+            "idx_ai_object_metadata_snapshot_schema",
+            "instance_id",
+            "schema_name",
+        ),
+        {"schema": "dbops"},
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AiObjectMetadataSnapshot id={self.id} instance_id={self.instance_id} "
+            f"db_type={self.db_type_code} database={self.database_name} "
+            f"schema={self.schema_name} status={self.status} is_current={self.is_current}>"
+        )
+
+    def is_usable(self) -> bool:
+        """判断 snapshot 是否可被 schema context 消费。
+
+        判定条件（与 C6 AiSchemaSnapshot.is_usable 对齐）：
+        1. status == 'success'
+        2. is_current == True
+        3. expires_at 未过期（无 expires_at 视为永久有效）
+        """
+        if self.status != AiObjectMetadataSnapshotStatus.SUCCESS:
+            return False
+        if not self.is_current:
+            return False
+        if self.expires_at is not None and self.expires_at < datetime.now(timezone.utc):
+            return False
+        return True
+
+
+# =============================================================================
 # C12: AI SQL Audit（Phase 3.6B1）
 # =============================================================================
 class AiSqlAuditPreviewSafety:
