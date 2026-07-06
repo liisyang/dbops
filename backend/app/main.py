@@ -81,6 +81,37 @@ async def lifespan(app: FastAPI):
                 "AI schema snapshot startup cleanup failed (continuing): %s", exc
             )
 
+    # Phase 3.6 C16-F3: object metadata snapshot running timeout cleanup
+    # (plan §4.4 + §18 C32). 与 C10 schema snapshot cleanup 同款策略 —
+    # startup 时把超过 AI_OBJECT_METADATA_COLLECTION_TIMEOUT_SECONDS 的
+    # running 行标 failed，避免 collector 异常退出后 running 永久卡住。
+    # 复用 AI_SQL_PREVIEW_ENABLED gate（F3 阶段不增加新 capability flag）。
+    if settings.AI_SQL_PREVIEW_ENABLED:
+        try:
+            from app.services.ai.ai_object_metadata_snapshot_service import (
+                AiObjectMetadataSnapshotService,
+            )
+
+            def _run_object_metadata_cleanup() -> int:
+                cleanup_db = SessionLocal()
+                try:
+                    return AiObjectMetadataSnapshotService.cleanup_running_timeouts(
+                        cleanup_db
+                    )
+                finally:
+                    cleanup_db.close()
+
+            cleaned_obj = await asyncio.to_thread(_run_object_metadata_cleanup)
+            logger.info(
+                "AI object metadata snapshot startup cleanup: marked %s running snapshots failed (timeout)",
+                cleaned_obj,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "AI object metadata snapshot startup cleanup failed (continuing): %s",
+                exc,
+            )
+
     # 主机监控已禁用（7表设计不需要）
     # from app.services.host_monitor import set_db_session
     # set_db_session(SessionLocal)

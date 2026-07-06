@@ -5,6 +5,7 @@ C2 范围：Chat 部分（ai_chat_session + ai_chat_message）
 C6 范围：SQL Schema Snapshot
 C10 范围：Schema Snapshot API（POST collect / GET status / GET history / GET context）
 C12 范围：SQL Preview（POST /ai/sql/preview + Audit 响应）
+C16-F3 范围：Object Metadata Snapshot API（POST collect / GET status / GET history / GET context）
 后续 commit 追加：
 - C19: SQL Execute
 - C24-C25: Inspection AI Analysis
@@ -443,3 +444,117 @@ class AiSqlExecutionStatusResponse(BaseModel):
     message_type: Optional[Literal["sql_result"]] = None
 
     created_at: datetime
+
+
+# =============================================================================
+# C16-F3: Object Metadata Snapshot API
+# =============================================================================
+class AiObjectMetadataCollectRequest(BaseModel):
+    """POST collect 请求（F3 plan §4.1）。
+
+    首版（plan §4.8 P1）只支持 PostgreSQL；前端无需传入 db_type_code，由后端
+    根据 instance_id 派生。database_name / schema_name 留空时分别 fallback 到
+    '<default>'。F3 与 C6 (Schema Snapshot) 区别：F3 多了 schema_name 维度
+    （DDL 粒度比 column 级 schema 更细）。
+    """
+
+    database_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="目标 database（留空时由 service 端 fallback 到 '<default>'）",
+    )
+    schema_name: Optional[str] = Field(
+        default=None,
+        max_length=200,
+        description="目标 schema（留空时由 service 端 fallback 到 '<default>'）",
+    )
+
+
+class AiObjectMetadataCollectResponse(BaseModel):
+    """POST collect 响应（F3 plan §4.1）。
+
+    返回 202 语义：collector_run 已创建，AWX 调度完成后通过 callback 落库。
+    """
+
+    detail: str
+    collector_run_id: int
+    run_id: str
+    awx_job_id: Optional[int] = None
+    awx_job_url: Optional[str] = None
+    status: str
+    item_count: int
+
+
+class AiObjectMetadataSnapshotItemResponse(BaseModel):
+    """单条 ai_object_metadata_snapshot 响应（C10 schema 风格复用）。
+
+    关键设计（避免 BE-bug1 复发）：
+    - 不使用 Field alias：Python 属性名 == JSON key
+    - 状态字段用 Literal 限定为五态机
+    - 数量统计字段（table_count / view_count / index_count / function_count /
+      total_object_count）必填 — service 层写入时已 server_default='0'，即便
+      failed 行也有值
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    instance_id: int
+    db_type_code: str
+    database_name: str
+    schema_name: str
+    status: Literal["pending", "running", "success", "failed", "unavailable"]
+    is_current: bool
+    table_count: int
+    view_count: int
+    index_count: int
+    function_count: int
+    total_object_count: int
+    object_ddl_sha256: Optional[str] = None
+    snapshot_hash: Optional[str] = None
+    expires_at: Optional[datetime] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    collected_at: Optional[datetime] = None
+    created_at: datetime
+
+
+class AiObjectMetadataListResponse(BaseModel):
+    """GET status / GET history 列表响应。"""
+
+    items: list[AiObjectMetadataSnapshotItemResponse]
+    total: int
+
+
+class AiObjectMetadataContextResponse(BaseModel):
+    """GET context 响应（F3 plan §4.6 — 实时构建 object_ddl_text）。
+
+    字段说明：
+    - available: 是否有已发布的 success snapshot
+    - object_ddl_text: 完整 DDL 文本（可能 1MB 截断，前端按需展示）
+    - counts: 各类对象数量（table / view / index / function）
+    - reason: available=false 时的原因码（no_snapshot / snapshot_not_success /
+      snapshot_expired / snapshot_not_current）
+
+    available=false 时仅 ``reason`` + ``instance_id`` + ``database_name`` +
+    ``schema_name`` 有意义，其余字段为 None。
+    """
+
+    available: bool
+    instance_id: int
+    db_type_code: Optional[str] = None
+    database_name: str
+    schema_name: str
+    object_ddl_text: Optional[str] = None
+    object_ddl_sha256: Optional[str] = None
+    table_count: Optional[int] = None
+    view_count: Optional[int] = None
+    index_count: Optional[int] = None
+    function_count: Optional[int] = None
+    total_object_count: Optional[int] = None
+    snapshot_id: Optional[int] = None
+    snapshot_hash: Optional[str] = None
+    published_at: Optional[datetime] = None
+    expires_at: Optional[datetime] = None
+    reason: Optional[str] = Field(default=None, description="available=false 时的原因码")
+

@@ -196,6 +196,17 @@ class AiSchemaContextService:
             "total_tables": snapshot.total_tables,
             "total_columns": snapshot.total_columns,
             "reason": None,
+            # Phase 3.6B0 C16-F3: append object_metadata if published snapshot
+            # exists. 不进入 schema_policy_hash 计算（DDL 文本可能 1MB 截断，
+            # 与 schema 策略语义不同；F3 阶段也只取 preview 截 8000 字符避免
+            # Dify token 超限）。try/except 包裹保证不破坏 schema_context
+            # 主流程（C8 已有 try/except 风格）。
+            "object_metadata": cls._build_object_metadata_field(
+                db,
+                instance_id=instance_id,
+                database_name=database_name or "<default>",
+                schema_name=allowed_schemas[0] if allowed_schemas else None,
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -334,6 +345,60 @@ class AiSchemaContextService:
     @classmethod
     def _dialect_for(cls, db_type_code: str) -> Optional[str]:
         return cls._DIALECT_MAP.get((db_type_code or "").upper())
+
+    # ------------------------------------------------------------------
+    # Phase 3.6B0 C16-F3: object_metadata 字段注入
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _build_object_metadata_field(
+        db,
+        *,
+        instance_id: int,
+        database_name: Optional[str],
+        schema_name: Optional[str],
+    ) -> Optional[dict[str, Any]]:
+        """返回已发布的 object metadata 注入 dict；无 snapshot 时返回 None。
+
+        严格包裹在 try/except 内 — 不得破坏 schema_context 主流程（C8
+        已有同款 try/except 风格）。
+
+        注入字段:
+        - snapshot_id / object_ddl_sha256 / counts / total
+        - object_ddl_text_preview（截前 8000 字符，避免 Dify token 超限；
+          完整 1MB 文本走独立 GET /sql/object-metadata/{id}/context 端点）
+        """
+        try:
+            from app.services.ai.ai_object_metadata_snapshot_service import (
+                AiObjectMetadataSnapshotService,
+            )
+
+            obj_snap = AiObjectMetadataSnapshotService.get_published_object_metadata(
+                db,
+                instance_id=instance_id,
+                database_name=database_name,
+                schema_name=schema_name,
+            )
+        except Exception:
+            logger.exception(
+                "object_metadata snapshot lookup failed for instance_id=%s (non-fatal)",
+                instance_id,
+            )
+            return None
+
+        if obj_snap is None:
+            return None
+
+        ddl_text = obj_snap.object_ddl_text or ""
+        return {
+            "snapshot_id": int(obj_snap.id),
+            "object_ddl_sha256": obj_snap.object_ddl_sha256,
+            "table_count": int(obj_snap.table_count or 0),
+            "view_count": int(obj_snap.view_count or 0),
+            "index_count": int(obj_snap.index_count or 0),
+            "function_count": int(obj_snap.function_count or 0),
+            "total_object_count": int(obj_snap.total_object_count or 0),
+            "object_ddl_text_preview": ddl_text[:8000],
+        }
 
     @staticmethod
     def _infer_db_type_code(db, instance_id: int) -> Optional[str]:

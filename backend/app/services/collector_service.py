@@ -1419,6 +1419,35 @@ class CollectorService:
                     "ai_sql execution save failed: run_id=%s err=%s", run.run_id, _exc
                 )
 
+        # Phase 3.6B0 C16-F3: ai_object_metadata callback dispatch. Mirrors
+        # ai_schema pattern (same shape as the two above). Independent of
+        # inspection/backup/ai_schema/ai_sql. Only
+        # ``business_domain == "ai_object_metadata"`` items are persisted to
+        # ``ai_object_metadata_snapshot``. Wrapped in try/except so an
+        # ai_object_metadata save failure cannot break the surrounding
+        # callback transaction.
+        if run_type == "ai_object_metadata" or any(
+            (getattr(cb, "business_domain", None) or "") == "ai_object_metadata"
+            for cb in callback_items
+        ):
+            try:
+                from app.services.ai.ai_object_metadata_callback_service import (
+                    save_snapshots as save_object_metadata_snapshots,
+                )
+
+                save_object_metadata_snapshots(
+                    db, run=run, callback_items=callback_items
+                )
+            except Exception as _exc:
+                # Defensive — log via the standard channel and continue.
+                import logging as _logging
+
+                _logging.getLogger(__name__).exception(
+                    "ai_object_metadata snapshot save failed: run_id=%s err=%s",
+                    run.run_id,
+                    _exc,
+                )
+
         run.status = CollectorService._summarize_run_status(
             db.query(CollectorRunItem).filter(CollectorRunItem.run_id == run.run_id).all()
         )

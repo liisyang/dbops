@@ -6,6 +6,7 @@ C3 范围追加：Chat CRUD/Send/History（4 端点）
 C10 范围追加：Schema Snapshot collect/status/history/context（4 端点）
 C12 范围追加：SQL Preview（POST /ai/sql/preview）
 C14 范围追加：SQL Execute（POST /ai/sql/execute + GET /ai/sql/audit/{id}/execution）
+C16-F3 范围追加：Object Metadata collect/status/history/context（4 端点）
 后续 commit 追加：
 - C16: Inspection AI Analysis
 - C17: Report AI Export
@@ -29,6 +30,11 @@ from app.schemas.ai import (
     AiChatSessionListResponse,
     AiChatSessionResponse,
     AiChatSendResponse,
+    AiObjectMetadataCollectRequest,
+    AiObjectMetadataCollectResponse,
+    AiObjectMetadataContextResponse,
+    AiObjectMetadataListResponse,
+    AiObjectMetadataSnapshotItemResponse,
     AiSchemaContextResponse,
     AiSchemaSnapshotCollectRequest,
     AiSchemaSnapshotCollectResponse,
@@ -40,6 +46,13 @@ from app.schemas.ai import (
     AiSqlExecutionStatusResponse,
     AiSqlPreviewRequest,
     AiSqlPreviewResponse,
+)
+from app.services.ai.ai_object_metadata_snapshot_service import (
+    AiObjectMetadataSnapshotService,
+    AwxLaunchError as ObjectMetadataAwxLaunchError,
+    FeatureDisabledError as ObjectMetadataFeatureDisabledError,
+    InstanceNotFoundError as ObjectMetadataInstanceNotFoundError,
+    UnsupportedDbTypeError as ObjectMetadataUnsupportedDbTypeError,
 )
 from app.services.ai.ai_schema_context_service import AiSchemaContextService
 from app.services.ai.ai_schema_snapshot_service import (
@@ -581,4 +594,188 @@ def get_execution_status(
         result_message_id=audit.result_message_id,
         message_type="sql_result" if audit.result_message_id else None,
         created_at=audit.created_at,
+    )
+
+
+# -----------------------------------------------------------------------------
+# C16-F3: Object Metadata — Collect / Status / History / Context
+# -----------------------------------------------------------------------------
+@router.post(
+    "/sql/object-metadata/{instance_id}/collect",
+    response_model=AiObjectMetadataCollectResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+def trigger_object_metadata_collection(
+    instance_id: int,
+    payload: AiObjectMetadataCollectRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiObjectMetadataCollectResponse:
+    """触发 instance 的 object metadata (table/view/index/function DDL) 采集（F3 plan §4.1）。
+
+    返回 202 Accepted + CollectorRun 元数据。Callback 通过
+    ``business_domain='ai_object_metadata'`` 路由到
+    ``AiObjectMetadataSnapshotCallbackService`` 落库；前端拿到 collector_run_id
+    后通过 GET status 轮询。
+
+    错误码（plan §11）：
+    - 404 — instance 不存在
+    - 422 — db_type 不在 capabilities 支持范围
+    - 502 — AWX launch 失败
+    - 503 — AI_SQL_PREVIEW_ENABLED=false
+    """
+    try:
+        result = AiObjectMetadataSnapshotService.trigger_collection(
+            db,
+            instance_id=instance_id,
+            database_name=payload.database_name,
+            schema_name=payload.schema_name,
+            requested_by=current_user.username,
+            request_base_url=str(request.base_url),
+        )
+    except ObjectMetadataInstanceNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ObjectMetadataFeatureDisabledError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except ObjectMetadataUnsupportedDbTypeError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ObjectMetadataAwxLaunchError as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    return AiObjectMetadataCollectResponse(**result)
+
+
+@router.get(
+    "/sql/object-metadata/{instance_id}",
+    response_model=AiObjectMetadataListResponse,
+)
+def get_object_metadata_status(
+    instance_id: int,
+    database_name: str | None = Query(default=None, max_length=200),
+    schema_name: str | None = Query(default=None, max_length=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiObjectMetadataListResponse:
+    """返回该 instance 最新 object metadata snapshot（is_current 优先，否则最新任意状态）。
+
+    返回 items 长度为 0 或 1：0 表示从未采集；1 表示有 snapshot（含
+    pending/running/failed），前端根据 ``status`` 字段渲染不同 UI。
+    """
+    snapshot = AiObjectMetadataSnapshotService.get_latest_any_status(
+        db,
+        instance_id=instance_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+    items = (
+        [AiObjectMetadataSnapshotItemResponse.model_validate(snapshot)]
+        if snapshot is not None
+        else []
+    )
+    return AiObjectMetadataListResponse(items=items, total=len(items))
+
+
+@router.get(
+    "/sql/object-metadata/{instance_id}/history",
+    response_model=AiObjectMetadataListResponse,
+)
+def list_object_metadata_history(
+    instance_id: int,
+    database_name: str | None = Query(default=None, max_length=200),
+    schema_name: str | None = Query(default=None, max_length=200),
+    limit: int = Query(default=50, ge=1, le=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiObjectMetadataListResponse:
+    """返回历史 object metadata snapshot 列表（created_at DESC）。
+
+    包含 pending/running/failed/success；前端按需过滤。
+    """
+    items, total = AiObjectMetadataSnapshotService.list_history(
+        db,
+        instance_id=instance_id,
+        database_name=database_name,
+        schema_name=schema_name,
+        limit=limit,
+    )
+    return AiObjectMetadataListResponse(
+        items=[AiObjectMetadataSnapshotItemResponse.model_validate(o) for o in items],
+        total=total,
+    )
+
+
+@router.get(
+    "/sql/object-metadata/{instance_id}/context",
+    response_model=AiObjectMetadataContextResponse,
+)
+def get_object_metadata_context(
+    instance_id: int,
+    database_name: str | None = Query(default=None, max_length=200),
+    schema_name: str | None = Query(default=None, max_length=200),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiObjectMetadataContextResponse:
+    """返回该 instance 已发布的 object metadata（is_current + success + 未过期）。
+
+    available=false 时仅 ``reason`` + ``instance_id`` + ``database_name`` +
+    ``schema_name`` 有意义，其余字段为 None。
+    """
+    snap = AiObjectMetadataSnapshotService.get_published_object_metadata(
+        db,
+        instance_id=instance_id,
+        database_name=database_name,
+        schema_name=schema_name,
+    )
+
+    db_name = AiObjectMetadataSnapshotService._normalize_database_name(database_name)
+    sch_name = AiObjectMetadataSnapshotService._normalize_schema_name(schema_name)
+
+    if snap is None:
+        # Fallback：尝试查 latest any status，给前端展示进度
+        latest = AiObjectMetadataSnapshotService.get_latest_any_status(
+            db,
+            instance_id=instance_id,
+            database_name=database_name,
+            schema_name=schema_name,
+        )
+        if latest is None:
+            reason = "no_snapshot"
+        elif latest.status == "success" and not latest.is_current:
+            reason = "snapshot_not_current"
+        elif latest.status == "success" and latest.expires_at is not None:
+            from datetime import datetime, timezone
+
+            if latest.expires_at <= datetime.now(tz=timezone.utc).replace(tzinfo=None):
+                reason = "snapshot_expired"
+            else:
+                reason = "snapshot_not_current"
+        else:
+            reason = "snapshot_not_success"
+        return AiObjectMetadataContextResponse(
+            available=False,
+            instance_id=instance_id,
+            db_type_code=None,
+            database_name=db_name,
+            schema_name=sch_name,
+            reason=reason,
+        )
+
+    return AiObjectMetadataContextResponse(
+        available=True,
+        instance_id=instance_id,
+        db_type_code=snap.db_type_code,
+        database_name=snap.database_name,
+        schema_name=snap.schema_name,
+        object_ddl_text=snap.object_ddl_text,
+        object_ddl_sha256=snap.object_ddl_sha256,
+        table_count=snap.table_count,
+        view_count=snap.view_count,
+        index_count=snap.index_count,
+        function_count=snap.function_count,
+        total_object_count=snap.total_object_count,
+        snapshot_id=int(snap.id),
+        snapshot_hash=snap.snapshot_hash,
+        published_at=snap.collected_at,
+        expires_at=snap.expires_at,
     )
