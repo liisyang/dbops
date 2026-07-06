@@ -576,7 +576,7 @@ def get_execution_status(
         completed_at=audit.completed_at,
         error_message=audit.error_message,
         collector_run_id=audit.collector_run_id,
-        awx_job_id=None,            # TODO: 关联 run.awx_job_id（需 join 查询）
+        awx_job_id=getattr(audit, "awx_job_id", None),  # C16-F1: launch 成功后由 execute_service 回填
         executed_at=audit.executed_at,
         result_message_id=audit.result_message_id,
         message_type="sql_result" if audit.result_message_id else None,

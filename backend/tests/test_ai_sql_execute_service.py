@@ -105,6 +105,81 @@ class _FakeExecuteResult:
     rowcount: int = 0
 
 
+def _eval_fake_update(stmt: Any, store: dict[str, list[Any]]) -> int:
+    """评估 SQLAlchemy update() 语句对 fake store 的影响；返回受影响 row 数。
+
+    仅支持形如：
+        update(<Model>).where(<col> <op> <val>).where(...).values(<col>=<val>, ...)
+    不支持 JOIN / 子查询；够覆盖 C16-F1 测试。
+
+    通过 `stmt.compile(compile_kwargs={"literal_binds": True})` 渲染成
+    字符串 SQL（如 `UPDATE dbops.ai_sql_audit SET awx_job_id=1234
+    WHERE id = 100 AND awx_job_id IS NULL`），再字符串解析即可。
+    """
+    if not (hasattr(stmt, "_where_criteria") and hasattr(stmt, "_values") and hasattr(stmt, "table")):
+        return 0
+    from sqlalchemy.dialects import postgresql as _pg_dialect
+    try:
+        compiled = stmt.compile(dialect=_pg_dialect.dialect(), compile_kwargs={"literal_binds": True})
+        sql_str = str(compiled).replace("\n", " ")
+    except Exception:
+        return 0
+    table = stmt.table
+    model_cls = getattr(table, "mapper", None)
+    if model_cls is None:
+        from app.models.ai import AiSqlAudit as _AuditMdl
+        model_cls = _AuditMdl
+    cls_name = model_cls.__name__
+    items = store.get(cls_name, [])
+    # 解析 SET 子句
+    set_part, _, where_part = sql_str.partition(" WHERE ")
+    set_dict: dict[str, Any] = {}
+    for tok in set_part.split("SET ", 1)[-1].split(", "):
+        if "=" in tok:
+            col, val = tok.split("=", 1)
+            col_key = col.strip().split(".")[-1]
+            v = val.strip()
+            if v.upper() == "NULL":
+                set_dict[col_key] = None
+            else:
+                try:
+                    set_dict[col_key] = int(v)
+                except ValueError:
+                    set_dict[col_key] = v.strip("'")
+    # 解析 WHERE 子句（每个条件为 AND 分隔）
+    matched_indexes: list[int] = []
+    conds = [c.strip() for c in where_part.split(" AND ")] if where_part else []
+    for idx, item in enumerate(items):
+        ok = True
+        for cond in conds:
+            if " = " in cond and " IS " not in cond:
+                col, val = cond.split(" = ", 1)
+                col_key = col.strip().split(".")[-1]
+                v = val.strip()
+                if v.upper() == "NULL":
+                    expected: Any = None
+                else:
+                    try:
+                        expected = int(v)
+                    except ValueError:
+                        expected = v.strip("'")
+                if getattr(item, col_key, None) != expected:
+                    ok = False
+                    break
+            elif cond.endswith(" IS NULL"):
+                col_key = cond[: -len(" IS NULL")].strip().split(".")[-1]
+                if getattr(item, col_key, None) is not None:
+                    ok = False
+                    break
+        if ok:
+            matched_indexes.append(idx)
+    for idx in matched_indexes:
+        item = items[idx]
+        for col_key, col_val in set_dict.items():
+            setattr(item, col_key, col_val)
+    return len(matched_indexes)
+
+
 @dataclass
 class _FakeSession:
     """Fake DB session — supports add/query/commit/refresh/rollback/execute/flush."""
@@ -128,7 +203,8 @@ class _FakeSession:
         return _FakeQueryResult(items=list(self.store.get(cls_name, [])))
 
     def execute(self, stmt: Any) -> _FakeExecuteResult:
-        return _FakeExecuteResult(rowcount=1)
+        rowcount = _eval_fake_update(stmt, self.store)
+        return _FakeExecuteResult(rowcount=rowcount)
 
     def commit(self) -> None:
         self.commits += 1
@@ -563,3 +639,85 @@ class TestGetExecutionStatus:
         result = AiSqlExecuteService.get_execution_status(db, audit_id=42)
         assert result.id == 42
         assert result.execution_status == AiSqlAuditExecutionStatus.SUCCESS
+
+
+# ---------------------------------------------------------------------------
+# 9. C16-F1 — awx_job_id 回填
+# ---------------------------------------------------------------------------
+class TestAwxJobIdBackfill:
+    """Phase 3.6 C16-F1：AWX launch 成功后回填 ai_sql_audit.awx_job_id。
+
+    验证点：
+    - 首次 launch：audit.awx_job_id 被写入；执行成功
+    - 已存在不覆盖：audit.awx_job_id 已有值时（callback/重试场景），
+      service 不应再覆盖（DB IS NULL guard + ORM 仅当 None 时刷新）
+    """
+
+    def test_awx_job_id_backfilled_on_first_launch(self, monkeypatch):
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch, awx_job_id=1234)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        db = _FakeSession()
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(schema_snapshot_id=1, audit_id=100)
+        assert audit.awx_job_id is None  # 前置条件：launch 前为 None
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        result = AiSqlExecuteService.execute(db, audit_id=audit.id, force=False)
+        # C16-F1: 首次 launch 应回填
+        assert result.audit.awx_job_id == 1234
+        assert audit.awx_job_id == 1234
+
+    def test_awx_job_id_not_overwritten_when_exists(self, monkeypatch):
+        """幂等：audit.awx_job_id 已有值（callback 重试场景）时不覆盖。
+
+        前置：audit.awx_job_id = 9999（模拟已 callback 写入的值）
+        操作：execute（force=True 跳过 pending/running 校验）
+        期望：DB IS NULL guard 让 UPDATE 不生效（rowcount=0）；
+              ORM 侧仅当原值为 None 时刷新 → 保留 9999。
+        """
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch, awx_job_id=5555)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        db = _FakeSession()
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(
+            schema_snapshot_id=1, audit_id=200, exec_status=AiSqlAuditExecutionStatus.RUNNING,
+        )
+        audit.awx_job_id = 9999  # 已存在的值（callback 重试场景）
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        result = AiSqlExecuteService.execute(db, audit_id=audit.id, force=True)
+        # IS NULL guard 阻止 UPDATE；ORM 也保留原值
+        assert result.audit.awx_job_id == 9999
+        assert audit.awx_job_id == 9999
+
+    def test_awx_job_id_none_when_launch_returns_none(self, monkeypatch):
+        """AWX launch 返回 awx_job_id=None 时，不应回填（DB 与 ORM 均 None）。"""
+        _patch_settings(monkeypatch)
+        # 模拟 launch 返回的 dict 不含 awx_job_id
+        def fake_launch_no_id(**kwargs):
+            return {"awx_job_url": "http://awx/#/jobs/?"}  # 无 awx_job_id
+        monkeypatch.setattr(svc_mod.AwxService, "launch_job", staticmethod(fake_launch_no_id))
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        db = _FakeSession()
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(schema_snapshot_id=1, audit_id=300)
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        result = AiSqlExecuteService.execute(db, audit_id=audit.id, force=False)
+        # launch 未返回 awx_job_id 时，跳过回填分支
+        assert result.audit.awx_job_id is None
+        assert audit.awx_job_id is None

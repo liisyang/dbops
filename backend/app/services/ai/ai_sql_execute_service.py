@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import update as _sa_update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -448,6 +449,23 @@ class AiSqlExecuteService:
             awx_job_id = launch.get("awx_job_id")
             run.awx_job_id = int(awx_job_id) if awx_job_id else None
             run.status = "launched"
+            # C16-F1：回填 audit.awx_job_id。
+            # 幂等：UPDATE WHERE id=:aid AND awx_job_id IS NULL ——
+            # 避免覆盖 callback 重试或异常分支已写入的值。
+            # ORM 侧同步条件：仅当 audit.awx_job_id 为 None 时刷新；
+            # 若 ORM 已缓存非空值（DB 同样非空），保留原值。
+            if awx_job_id:
+                stmt = (
+                    _sa_update(AiSqlAudit)
+                    .where(AiSqlAudit.id == int(audit.id))
+                    .where(AiSqlAudit.awx_job_id.is_(None))
+                    .values(awx_job_id=int(awx_job_id))
+                )
+                db.execute(stmt)
+                # ORM 缓存同步：仅在原值为 None 时刷新，避免覆盖 callback
+                # 重试已写入的值（与 DB IS NULL guard 语义对齐）。
+                if audit.awx_job_id is None:
+                    audit.awx_job_id = int(awx_job_id)
             db.commit()
         except AwxServiceError as exc:
             logger.warning(

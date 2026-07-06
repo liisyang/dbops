@@ -510,6 +510,10 @@ class AiSqlAudit(DbopsAssetBase):
         ForeignKey("dbops.collector_run_item.id", ondelete="SET NULL"),
         nullable=True,
     )
+    # C16-F1：Execute launch 成功后回填（plan §7 F1）；幂等 UPDATE WHERE
+    # awx_job_id IS NULL；不通过 FK 关联 collector_run（launch_job 后 collector
+    # 可能未落 run 行；awx_job_id 是更上游的 AWX 标识，独立保留更可靠）
+    awx_job_id = Column(BigInteger, nullable=True)
 
     # 执行结果统计
     row_count = Column(Integer, nullable=True)
