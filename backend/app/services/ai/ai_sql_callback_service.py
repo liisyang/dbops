@@ -281,21 +281,36 @@ def _write_sql_result_chat_message(
 # ---------------------------------------------------------------------------
 
 def _extract_business_context(cb: Any) -> dict[str, Any]:
-    """从 callback item 的 business_context 字段解 audit_id / session_id。"""
+    """从 callback item 的 business_context 字段解 audit_id / session_id。
+
+    解析优先级（C16-F2 闭环）：
+    1. ``cb.business_context`` 字段（dispatch 时由 dbops 注入，AWX 回传）
+    2. ``cb.item_key`` 解析：``ai_sql:{audit_id}:{instance_id}`` 格式
+       （item_key 是 ai_sql_execute_service 创建时拼出，是 fallback 兜底）
+    """
     bc = getattr(cb, "business_context", None)
-    if bc is None:
-        return {}
-    if isinstance(bc, str):
-        try:
-            return json.loads(bc)
-        except (json.JSONDecodeError, ValueError):
-            return {}
-    if not isinstance(bc, dict):
-        return {}
-    nested = bc.get("business_context")
-    if isinstance(nested, dict):
-        return nested
-    return bc
+    parsed: dict[str, Any] = {}
+    if bc is not None:
+        if isinstance(bc, str):
+            try:
+                bc = json.loads(bc)
+            except (json.JSONDecodeError, ValueError):
+                bc = None
+        if isinstance(bc, dict):
+            nested = bc.get("business_context")
+            if isinstance(nested, dict):
+                parsed = dict(nested)
+            else:
+                parsed = dict(bc)
+
+    # ---- 兜底：item_key 解析（AWX 没透传 business_context 时的最后保险）----
+    if "audit_id" not in parsed:
+        item_key = getattr(cb, "item_key", None) or ""
+        if isinstance(item_key, str) and item_key.startswith("ai_sql:"):
+            parts = item_key.split(":")
+            if len(parts) >= 2 and parts[1].isdigit():
+                parsed["audit_id"] = int(parts[1])
+    return parsed
 
 
 def _resolve_db_type_code(db: Session, instance_id: int) -> str:

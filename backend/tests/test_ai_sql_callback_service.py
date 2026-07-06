@@ -351,3 +351,172 @@ class TestErrorTolerance:
         save_execution_results(db, run=_make_audit_run(), callback_items=[cb])
         assert audit.execution_status == AiSqlAuditExecutionStatus.SUCCESS
         assert "AiChatMessage" not in db.store
+
+
+# ---------------------------------------------------------------------------
+# 5. C16-F2 — business_context passthrough + item_key fallback
+# ---------------------------------------------------------------------------
+class TestF2BusinessContextResolution:
+    """C16-F2: 修复 F1 时代码正确但 Pydantic schema drop business_context 的
+    隐性 bug。callback 必须能从 item 中拿到 audit_id，本组测试覆盖：
+    1) 标准 nested business_context（正常路径，仍可用）
+    2) flat business_context（AWX 简化格式回传）
+    3) business_context 缺失时 item_key 兜底解析
+    4) audit_id 拿到后 → audit 状态推进 + chat_message(message_type='sql_result') 落库
+       + result_message_id 反向写回
+    """
+
+    def test_nested_business_context_still_works(self):
+        """嵌套格式 business_context.business_context.audit_id 仍正确解析。"""
+        from app.services.ai.ai_sql_callback_service import _extract_business_context
+
+        cb = _FakeCallbackItem(
+            business_domain="ai_sql",
+            check_code="DB_READONLY_SQL_EXEC",
+            item_key="ai_sql:100:965",
+            business_context={
+                "business_domain": "ai_sql",
+                "business_context": {"audit_id": 100, "session_id": 1},
+            },
+            raw_result={},
+        )
+        result = _extract_business_context(cb)
+        assert result.get("audit_id") == 100
+        assert result.get("session_id") == 1
+
+    def test_flat_business_context_works(self):
+        """扁平格式 business_context.audit_id（AWX 直传简化）。"""
+        from app.services.ai.ai_sql_callback_service import _extract_business_context
+
+        cb = _FakeCallbackItem(
+            business_domain="ai_sql",
+            check_code="DB_READONLY_SQL_EXEC",
+            item_key="ai_sql:100:965",
+            business_context={"audit_id": 100, "session_id": 1},
+            raw_result={},
+        )
+        result = _extract_business_context(cb)
+        assert result.get("audit_id") == 100
+
+    def test_item_key_fallback_when_business_context_missing(self):
+        """business_context=None 时从 item_key=ai_sql:{audit_id}:{instance_id} 解析。"""
+        from app.services.ai.ai_sql_callback_service import _extract_business_context
+
+        cb = _FakeCallbackItem(
+            business_domain="ai_sql",
+            check_code="DB_READONLY_SQL_EXEC",
+            item_key="ai_sql:42:965",
+            business_context=None,
+            raw_result={},
+        )
+        result = _extract_business_context(cb)
+        assert result.get("audit_id") == 42
+        assert "session_id" not in result
+
+    def test_item_key_fallback_when_business_context_is_empty_dict(self):
+        """business_context={} 时同样走 item_key 兜底。"""
+        from app.services.ai.ai_sql_callback_service import _extract_business_context
+
+        cb = _FakeCallbackItem(
+            business_domain="ai_sql",
+            check_code="DB_READONLY_SQL_EXEC",
+            item_key="ai_sql:7:965",
+            business_context={},
+            raw_result={},
+        )
+        result = _extract_business_context(cb)
+        assert result.get("audit_id") == 7
+
+    def test_item_key_fallback_does_not_break_when_format_invalid(self):
+        """item_key 不是 ai_sql: 前缀时 fallback 不抛异常。"""
+        from app.services.ai.ai_sql_callback_service import _extract_business_context
+
+        cb = _FakeCallbackItem(
+            business_domain="ai_sql",
+            check_code="DB_READONLY_SQL_EXEC",
+            item_key="other:scope:123",
+            business_context=None,
+            raw_result={},
+        )
+        result = _extract_business_context(cb)
+        assert result == {}
+
+    def test_end_to_end_via_item_key_fallback_writes_chat_message(self):
+        """End-to-end: business_context 缺失时，callback 通过 item_key 解析 audit_id，
+        写 audit 状态 + chat_message(message_type='sql_result') + 反向 result_message_id。
+        """
+        db = _FakeSession()
+        audit = _make_audit(audit_id=99, session_id=1, message_id=10)
+        db.store["AiSqlAudit"] = [audit]
+        # 直接构造一个无 business_context 的 callback，item_key 携带 audit_id
+        cb = _FakeCallbackItem(
+            business_domain="ai_sql",
+            check_code="DB_READONLY_SQL_EXEC",
+            item_key="ai_sql:99:965",
+            business_context=None,  # 关键：缺失
+            raw_result={
+                "columns": ["n"],
+                "rows": [[1], [2], [3]],
+                "result_status": "ok",
+            },
+            status="verified",
+            message="",
+            duration_ms=200,
+        )
+
+        save_execution_results(db, run=_make_audit_run(), callback_items=[cb])
+        assert audit.execution_status == AiSqlAuditExecutionStatus.SUCCESS
+        assert audit.row_count == 3
+        assert audit.duration_ms == 200
+        msgs = db.store.get("AiChatMessage", [])
+        assert len(msgs) == 1
+        m = msgs[0]
+        assert m.message_type == "sql_result"
+        assert m.role == "assistant"
+        assert m.session_id == 1
+        assert m.parent_message_id == 10
+        assert audit.result_message_id == m.id
+
+
+# ---------------------------------------------------------------------------
+# 6. C16-F2 — Pydantic schema accepts business_context (drop 修复)
+# ---------------------------------------------------------------------------
+class TestF2SchemaAcceptsBusinessContext:
+    """C16-F2: CollectorCallbackItem schema 之前未声明 business_context 字段，
+    Pydantic v2 默认 extra='ignore' 会把 AWX 回传的 business_context 静默丢掉。
+    本组测试确认 schema 显式声明后，business_context 能进回调链。"""
+
+    def test_collector_callback_item_accepts_business_context(self):
+        from app.schemas.collector import CollectorCallbackItem
+
+        item = CollectorCallbackItem(
+            item_key="ai_sql:4:965",
+            check_code="DB_READONLY_SQL_EXEC",
+            target_scope="db_instance",
+            asset_id=965,
+            target_host="10.134.185.228",
+            target_port=5432,
+            status="verified",
+            business_domain="ai_sql",
+            business_context={
+                "business_domain": "ai_sql",
+                "business_context": {"audit_id": 4, "session_id": 1},
+            },
+        )
+        assert item.business_context is not None
+        assert item.business_context["business_context"]["audit_id"] == 4
+
+    def test_collector_callback_item_business_context_optional(self):
+        """不传 business_context 时 None（旧 callback 兼容）。"""
+        from app.schemas.collector import CollectorCallbackItem
+
+        item = CollectorCallbackItem(
+            item_key="x:1:1",
+            check_code="DB_BASIC_FACT_COLLECTION",
+            target_scope="db_instance",
+            asset_id=1,
+            target_host="x",
+            target_port=5432,
+            status="collected",
+        )
+        assert item.business_context is None

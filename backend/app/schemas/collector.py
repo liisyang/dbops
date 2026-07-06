@@ -175,6 +175,19 @@ class CollectorCallbackItem(BaseModel):
     policy_id: Optional[int] = None
     backup_type: Optional[str] = None
 
+    # ------------------------------------------------------------------
+    # C16-F2: business_context passthrough.
+    # Schema-validated optional dict carrying dispatch-time metadata that
+    # must reach the callback (e.g. ``{"audit_id": 4, "session_id": 1}``
+    # for ai_sql). When AWX sends it back at the top level of each item
+    # we want the backend to ACCEPT it (Pydantic v2 default ignores
+    # undeclared fields; declaring the field here makes it part of the
+    # contract). If AWX does not propagate it the callback service
+    # still has an item_key-based fallback (see
+    # ai_sql_callback_service._extract_business_context).
+    # ------------------------------------------------------------------
+    business_context: Optional[dict[str, Any]] = None
+
 
 class CollectorInspectionCallbackItem(BaseModel):
     item_code: str = Field(min_length=1, max_length=100)
