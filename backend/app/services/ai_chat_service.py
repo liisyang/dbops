@@ -275,6 +275,54 @@ class AiChatService:
             raise ChatSessionNotFoundError(f"Chat session {session_id} not found or not owned by user")
         return obj
 
+    @staticmethod
+    def get_session_for_user(
+        db: Session,
+        *,
+        session_id: int,
+        user: User,
+    ) -> AiChatSession:
+        """C16-F2b 复用 helper — 加载 session 并做完整 ownership 校验。
+
+        与 :meth:`get_session` 区别：本方法在 ownership 失败时区分两种异常：
+        - session 不存在 → ChatSessionNotFoundError (404)
+        - session 存在但不属于 current_user → ChatSessionNotFoundError (404 统一隔离)
+
+        SQL Preview 端点（C16-F2b）能精确反馈 404 vs 403，便于前端调试；
+        同时不泄露「会话存在但属于他人」的存在性信息 — 统一 404 隔离，
+        与既有 get_session 行为一致。
+
+        Args:
+            db: SQLAlchemy Session
+            session_id: ai_chat_session.id
+            user: 当前用户
+
+        Returns:
+            AiChatSession（已校验 user_id 归属）
+
+        Raises:
+            ChatSessionNotFoundError: session 不存在或不属于当前用户（统一 404）
+        """
+        # 先按 id 查存在性
+        obj = (
+            db.query(AiChatSession)
+            .filter(AiChatSession.id == session_id)
+            .first()
+        )
+        if obj is None:
+            raise ChatSessionNotFoundError(f"Chat session {session_id} not found")
+        # 再校验 user_id 归属（统一返回 404 避免泄露）
+        if obj.user_id != user.id:
+            logger.warning(
+                "AiChatService.get_session_for_user forbidden access: "
+                "session_id=%s requested_by=%s actual_owner=%s",
+                session_id, user.id, obj.user_id,
+            )
+            raise ChatSessionNotFoundError(
+                f"Chat session {session_id} not found or not owned by user"
+            )
+        return obj
+
     # ------------------------------------------------------------------
     # Message
     # ------------------------------------------------------------------

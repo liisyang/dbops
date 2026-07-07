@@ -260,17 +260,27 @@ class AiSchemaContextResponse(BaseModel):
 # C12: SQL Preview
 # =============================================================================
 class AiSqlPreviewRequest(BaseModel):
-    """POST /ai/sql/preview 请求（plan §5.2 + §5.3）。
+    """POST /ai/sql/preview 请求（plan §5.2 + §5.3 + C16-F2b）。
 
-    关键字段：
-    - instance_id: 目标实例；后端派生 db_type_code，前端不直接传
-    - database_name: 可选；留空时 service fallback 到 '<default>'
-    - user_question: 用户原始问题，传给 Dify sql-generator workflow
-    - session_id / message_id: 可选；用于关联 ai_chat_session/message
-      （直接调用 /ai/sql/preview 时可不带，由 Chat 集成时填充）
-    - current_page: 白名单内的页面标识（ai_chat / instance_detail 等）
+    C16-F2b 起字段收紧（plan §21.3 C16-3 — Chat 流强制）：
+    - session_id:        必填；消费 chat session.id，鉴权 session.user_id + chat_mode='instance_sql'
+    - client_request_id: 必填；UUID 幂等键（同 session+UUID 重复请求返回原 audit）
+    - message_id:        移除；由 service 内部生成 user_message 后回填 audit.message_id
+    - instance_id:       目标实例；后端派生 db_type_code，前端不直接传
+    - database_name:     可选；留空时 service fallback 到 '<default>'
+    - user_question:     用户原始问题，传给 Dify sql-generator workflow
+    - current_page:      白名单内的页面标识（ai_chat / instance_detail 等）
     """
 
+    # === C16-F2b 新增（plan §21.3 C16-3）===
+    session_id: int = Field(
+        gt=0,
+        description="Chat session.id（必填；plan §21.3 强绑定）",
+    )
+    client_request_id: UUID = Field(
+        description="前端生成的 UUID（P0-2 幂等键；partial unique 天然支持）",
+    )
+    # === C12 既有 ===
     instance_id: int = Field(gt=0, description="目标 db_instance.id")
     database_name: Optional[str] = Field(
         default=None, max_length=200,
@@ -280,8 +290,6 @@ class AiSqlPreviewRequest(BaseModel):
         min_length=1, max_length=8000,
         description="用户原始问题，传给 Dify sql-generator workflow",
     )
-    session_id: Optional[int] = Field(default=None, gt=0)
-    message_id: Optional[int] = Field(default=None, gt=0)
     current_page: Optional[str] = Field(
         default="ai_chat", max_length=100,
         description="当前页面（白名单）；非法值降级为 ai_chat",
@@ -289,7 +297,13 @@ class AiSqlPreviewRequest(BaseModel):
 
 
 class AiSqlPreviewResponse(BaseModel):
-    """POST /ai/sql/preview 响应（plan §5.2 + §5.3 + §19 状态机）。
+    """POST /ai/sql/preview 响应（plan §5.2 + §5.3 + §19 状态机 + C16-F2b）。
+
+    C16-F2b 新增字段（plan §21.3 C16-3 — Chat 流耦合）：
+    - session_id:          chat session.id（与 request 一致）
+    - user_message_id:     ai_chat_message.id（role='user'，content=user_question）
+    - preview_message_id:  ai_chat_message.id（role='assistant'，message_type='sql_preview_link'）
+    - idempotent_replay:   client_request_id 命中已有 user message → 返回原三元组
 
     preview_safety_status='passed' 时：
       - approved_sql + approved_sql_hash 必填（落 ai_sql_audit）
@@ -300,6 +314,17 @@ class AiSqlPreviewResponse(BaseModel):
       - errors 列表（AST 校验原始 error）
       - audit_id 仍可能返回（rejected 也落库用于审计）
     """
+
+    # === C16-F2b 新增（plan §21.3 C16-3）===
+    session_id: int = Field(description="Chat session.id（与 request 一致）")
+    user_message_id: int = Field(description="ai_chat_message.id，role='user'")
+    preview_message_id: int = Field(
+        description="ai_chat_message.id，role='assistant'，message_type='sql_preview_link'",
+    )
+    idempotent_replay: bool = Field(
+        default=False,
+        description="client_request_id 命中已有 user message → 返回原 audit 三元组",
+    )
 
     # 核心结果
     audit_id: int = Field(description="ai_sql_audit.id，供后续 Execute 引用")

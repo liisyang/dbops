@@ -32,6 +32,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+import uuid
 from unittest.mock import patch
 
 import pytest
@@ -315,6 +316,49 @@ def _patch_instance(db: _FakeSession, instance_id: int, db_type_code: str = "POS
     db.store["DbType"] = [db_type]
 
 
+def _patch_chat_session(
+    db: _FakeSession,
+    *,
+    session_id: int = 1,
+    instance_id: int = 1,
+    user_id: Optional[Any] = uuid.UUID("00000000-0000-0000-0000-000000000001"),
+    chat_mode: str = "instance_sql",
+    bound_instance_id: Optional[int] = None,
+    instance_status: str = "active",
+):
+    """C16-F2b — 向 fake session 注入 AiChatSession 让 _auth_check 通过。
+
+    默认 session_id=1, chat_mode='instance_sql', bound_instance_id=instance_id,
+    user_id 任意 UUID；user/instance 不一致场景可显式覆盖。
+
+    顺带保证 DbInstance.status='active' 让 _auth_check 第 4 步通过（仅当
+    store 中还没有 DbInstance 时；否则由调用方决定）。
+    """
+    from app.models.ai import AiChatSession
+
+    session_obj = AiChatSession(
+        session_code=f"FAKE-{session_id}",
+        user_id=user_id,
+        title="fake",
+        chat_mode=chat_mode,
+        bound_instance_id=bound_instance_id if bound_instance_id is not None else instance_id,
+    )
+    session_obj.id = session_id
+    db.store["AiChatSession"] = [session_obj]
+    # 默认同时保证 DbInstance.status='active' 让 _auth_check 第 4 步通过
+    if "DbInstance" not in db.store:
+        _patch_instance(db, instance_id)
+    if instance_status != "active":
+        # 显式标记 inactive 测试场景（覆盖默认 active）
+        if "DbInstance" not in db.store:
+            _patch_instance(db, instance_id)
+        db.store["DbInstance"][0].status = instance_status
+
+
+# C16-F2b: 测试统一 client_request_id（fake UUID，partial unique 不校验 fake session）
+TEST_CLIENT_REQUEST_ID = uuid.UUID("00000000-0000-0000-0000-000000000001")
+
+
 def _patch_dify_configured(monkeypatch, configured: bool = True):
     monkeypatch.setattr(DifyService, "is_configured", classmethod(lambda cls: configured))
 
@@ -330,21 +374,30 @@ class TestFeatureDisabled:
 
         db = _FakeSession()
         _patch_instance(db, 1)
+        _patch_chat_session(db)
+        _patch_chat_session(db)
         with pytest.raises(FeatureDisabledError):
             AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
 
 
-class TestInstanceNotFound:
-    def test_missing_instance_raises(self, monkeypatch):
-        _patch_settings(monkeypatch)
-        # 不注入 DbInstance → _resolve_instance 抛 InstanceNotFoundError
+class TestInstanceInactive:
+    def test_instance_inactive_raises_chat_instance_not_accessible(self, monkeypatch):
+        """C16-F2b：bound_instance 存在但 status='inactive' → ChatInstanceNotAccessibleError (404)。
 
+        C12 旧版用 _resolve_instance 抛 InstanceNotFoundError；C16-F2b 把
+        instance 校验合并到 auth 链 step 4（status='active' 检查），异常
+        类型变为 ChatInstanceNotAccessibleError（语义上等价 + 复用 C16-F2a）。
+        """
+        from app.services.ai.ai_sql_preview_service import ChatInstanceNotAccessibleError
+
+        _patch_settings(monkeypatch)
         db = _FakeSession()
-        with pytest.raises(InstanceNotFoundError):
+        _patch_chat_session(db, instance_status="inactive")
+        with pytest.raises(ChatInstanceNotAccessibleError):
             AiSqlPreviewService.preview(
-                db, instance_id=999, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
 
 
@@ -354,9 +407,11 @@ class TestUnsupportedDbType:
 
         db = _FakeSession()
         _patch_instance(db, 1, db_type_code="ORACLE")
+        _patch_chat_session(db)
+        _patch_chat_session(db)
         with pytest.raises(UnsupportedDbTypeError):
             AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
 
 
@@ -368,9 +423,11 @@ class TestSnapshotUnavailable:
 
         db = _FakeSession()
         _patch_instance(db, 1)
+        _patch_chat_session(db)
+        _patch_chat_session(db)
         with pytest.raises(SnapshotUnavailableError) as exc_info:
             AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
         assert exc_info.value.reason == "no_snapshot"
 
@@ -381,9 +438,11 @@ class TestSnapshotUnavailable:
 
         db = _FakeSession()
         _patch_instance(db, 1)
+        _patch_chat_session(db)
+        _patch_chat_session(db)
         with pytest.raises(SnapshotUnavailableError) as exc_info:
             AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
         assert exc_info.value.reason == "snapshot_not_success"
 
@@ -394,9 +453,11 @@ class TestSnapshotUnavailable:
 
         db = _FakeSession()
         _patch_instance(db, 1)
+        _patch_chat_session(db)
+        _patch_chat_session(db)
         with pytest.raises(SnapshotUnavailableError) as exc_info:
             AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
         assert exc_info.value.reason == "snapshot_expired"
 
@@ -409,9 +470,11 @@ class TestDifyNotConfigured:
 
         db = _FakeSession()
         _patch_instance(db, 1)
+        _patch_chat_session(db)
+        _patch_chat_session(db)
         with pytest.raises(DifyUnavailableError):
             AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
 
 
@@ -425,9 +488,11 @@ class TestDifyTimeout:
             mock.side_effect = DifyTimeoutErrorOrig("test timeout")
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             with pytest.raises(DifyTimeoutError_):
                 AiSqlPreviewService.preview(
-                    db, instance_id=1, database_name=None, user_question="q",
+                    db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
                 )
 
 
@@ -441,9 +506,11 @@ class TestDifyWorkflowFailed:
             mock.side_effect = DifyWorkflowFailedErrorOrig("workflow failed")
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             with pytest.raises(DifyWorkflowFailedError_):
                 AiSqlPreviewService.preview(
-                    db, instance_id=1, database_name=None, user_question="q",
+                    db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
                 )
 
 
@@ -462,8 +529,10 @@ class TestDifyNoGeneratedSql:
 
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
             assert result.audit is not None
             assert result.audit.preview_safety_status == AiSqlAuditPreviewSafety.REJECTED
@@ -485,8 +554,10 @@ class TestASTReject:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
             assert result.audit.preview_safety_status == AiSqlAuditPreviewSafety.REJECTED
             assert "FOR UPDATE" in (result.audit.preview_safety_reason or "")
@@ -504,8 +575,10 @@ class TestASTReject:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
             assert result.audit.preview_safety_status == AiSqlAuditPreviewSafety.REJECTED
 
@@ -523,8 +596,10 @@ class TestHappyPath:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
-                db, instance_id=1, database_name=None, user_question="q",
+                db, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
             )
             audit = result.audit
             assert audit.preview_safety_status == AiSqlAuditPreviewSafety.PASSED
@@ -556,13 +631,15 @@ class TestHashStability:
                 }
                 db1 = _FakeSession()
                 _patch_instance(db1, 1)
+                _patch_chat_session(db1)
                 r1 = AiSqlPreviewService.preview(
-                    db1, instance_id=1, database_name=None, user_question="q",
+                    db1, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
                 )
                 db2 = _FakeSession()
                 _patch_instance(db2, 1)
+                _patch_chat_session(db2)
                 r2 = AiSqlPreviewService.preview(
-                    db2, instance_id=1, database_name=None, user_question="q",
+                    db2, session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1, database_name=None, user_question="q",
                 )
                 return r1.audit.approved_sql_hash, r2.audit.approved_sql_hash
 
@@ -642,9 +719,11 @@ class TestLayer1Integration:
         with patch.object(DifyService, "run_sql_workflow") as mock_dify:
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="DROP TABLE app.users",
             )
@@ -668,9 +747,11 @@ class TestLayer1Integration:
         with patch.object(DifyService, "run_sql_workflow") as mock_dify:
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="把过期数据删除",
             )
@@ -691,9 +772,11 @@ class TestLayer1Integration:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="查询活跃用户ID",
             )
@@ -716,9 +799,11 @@ class TestLayer1Integration:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="DROP TABLE x",  # 即使命中也调 Dify
             )
@@ -864,9 +949,11 @@ class TestCodeNodePayloadIntegration:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="查询用户列表",
             )
@@ -888,9 +975,11 @@ class TestCodeNodePayloadIntegration:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="查询用户ID",
             )
@@ -913,9 +1002,11 @@ class TestCodeNodePayloadIntegration:
             }
             db = _FakeSession()
             _patch_instance(db, 1)
+            _patch_chat_session(db)
+            _patch_chat_session(db)
             result = AiSqlPreviewService.preview(
                 db,
-                instance_id=1,
+                session_id=1, client_request_id=TEST_CLIENT_REQUEST_ID, instance_id=1,
                 database_name=None,
                 user_question="查询用户列表",
             )

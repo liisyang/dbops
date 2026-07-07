@@ -1,33 +1,47 @@
-"""Phase 3.6B1 C12 — AiSqlPreviewService.
+"""Phase 3.6B1 C12 + Phase 3.6B2 C16-F2b — AiSqlPreviewService.
 
-SQL Preview 业务编排（plan §5.2 + §5.3 + §6.5）：
+SQL Preview 业务编排（plan §5.2 + §5.3 + §6.5 + §21.3 C16-3）：
+
+  C16-F2b 鉴权链（plan §21.3）：
+    1. session ownership（session.user_id == current_user.id）
+    2. session.chat_mode == 'instance_sql'
+    3. session.bound_instance_id == request.instance_id（P0-1 不可变绑定）
+    4. DbInstance.status == 'active'（复用 C16-F2a ChatInstanceNotAccessibleError）
+
+  C16-F2b 幂等分支：
+    - SELECT ai_chat_message WHERE session_id=? AND client_request_id=?
+      AND role='user'
+    - 命中 + 已关联 audit（ai_sql_audit.message_id = m.id 存在）
+      → 返回已有 (audit_id, user_message_id, preview_message_id)，idempotent_replay=True
+    - 命中但 audit 不存在 → PreviewIncompleteRetryRequiredError 409（事务 1 中途中断）
 
   事务 1（DB）：
-    1. 校验 instance 存在 + db_type 在 capabilities
-    2. 调 AiSchemaContextService.build_schema_context 取实时 snapshot 策略
-    3. 若 available=false → 直接构造 rejected audit 返回
-    4. 调 DifyService.run_sql_workflow（sql-generator app）取 generated_sql
-       - Dify 失败 → 构造 rejected audit 落库，返回错误给前端
-    5. 调 SqlSafetyService.validate_with_ast（6 层防御 Layer 3）取 approved_sql
-    6. 落 ai_sql_audit：
-       - passed  → approved_sql + approved_sql_hash + schema_snapshot_id +
-                    schema_policy_hash + previewed_at + workflow_run_id
-       - rejected → preview_safety_reason 记录 errors
+    1-4. 鉴权链（C16-F2b）
+    5. 幂等检查
+    6. 校验 instance 存在 + db_type 在 capabilities
+    7. 调 AiSchemaContextService.build_schema_context 取实时 snapshot 策略
+    8. 若 available=false → 直接构造 rejected audit 返回
+    9. Layer 1 正则预检（C13）→ 命中 → rejected audit + preview_message 卡片
+    10. 调 DifyService.run_sql_workflow → generated_sql（C13 Code 节点解析）
+    11. 调 SqlSafetyService.validate_with_ast → approved_sql
+    12. 写 ai_chat_message × 2（事务内 — C16-F2b）：
+        - user message (role='user', message_type='chat', client_request_id=...)
+        - preview message (role='assistant', message_type='sql_preview_link')
+        - 更新 audit.message_id + audit.result_message_id
+    13. 落 ai_sql_audit（passed/rejected 都落 — C16-F2b P1-3）
 
   事务外：
     无（Dify 调用与 commit 必须严格分事务 — 避免 lock 持有过久）
 
 设计要点：
 - 复用 C10 AiSchemaContextService._compute_schema_policy_hash 计算 schema_policy_hash
-  （同一个 hash 算法，preview/execute 校验才能对齐）
 - SQL 安全 6 层防御：Layer 3（AST 权威）+ approved_sql 与 generated_sql 双轨
   + SHA-256 hash（plan §5 P0-4）
-- 不直接复用 chat idempotency — SQL Preview 是无状态端点，前端无需 client_request_id
-  （无并发约束，由前端 UI 防抖；plan §14 C12 不实现）
-- 错误码映射（plan §11）：
-  - 404 — instance 不存在
-  - 422 — db_type 不在 capabilities（不支持）
-  - 409 — schema snapshot 未就绪 / 不可用
+- 错误码映射（plan §11 + C16-F2b）：
+  - 403 — session 存在但不属于当前用户（理论上不可达，统一 404 隔离）
+  - 404 — instance 不存在 / session 不存在 / DbInstance.status != 'active'
+  - 409 — PreviewIncompleteRetryRequiredError（client_request_id 命中但 audit 缺失）
+  - 422 — db_type 不在 capabilities / chat_mode != 'instance_sql' / bound_instance_id 不一致
   - 502 — Dify 不可用或网络错误
   - 503 — AI_SQL_PREVIEW_ENABLED=false
   - 504 — Dify 调用超时
@@ -43,8 +57,11 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from uuid import UUID
+
 from app.config import get_settings
 from app.models.ai import (
+    AiChatSession,
     AiSqlAudit,
     AiSqlAuditExecutionStatus,
     AiSqlAuditPreviewSafety,
@@ -54,6 +71,7 @@ from app.services.ai.ai_schema_context_service import (
     AiSchemaContextService,
     ContextUnavailableReason,
 )
+from app.services.ai_chat_service import ChatInstanceNotAccessibleError
 from app.services.dify_service import (
     DifyConfigurationError,
     DifyConnectionError,
@@ -117,11 +135,74 @@ class DifyWorkflowFailedError_(AiSqlPreviewError):
 
 
 # =============================================================================
+# C16-F2b — SQL Preview 在 Chat 流内的鉴权链异常
+# =============================================================================
+# 设计原则（plan §21.3 C16-3）：
+# - 不复用 ai_chat_service 的同名异常，避免 AiSqlPreviewService 与 AiChatService
+#   互相依赖（保持 service 层低耦合）
+# - 命名以 Preview 为后缀，与 chat service 异常明确区分
+class ChatSessionNotFoundErrorPreview(AiSqlPreviewError):
+    """session_id 不存在 → 404（C16-F2b P0-1）。
+
+    注：当前设计统一返回 404 隔离（不区分 session 不存在 vs 不属于当前用户），
+    与 ai_chat_service.get_session 行为一致。Forbidden 用 ChatSessionForbiddenErrorPreview。
+    """
+
+
+class ChatSessionForbiddenErrorPreview(AiSqlPreviewError):
+    """session 存在但不属于 current_user → 403（C16-F2b P0-1）。
+
+    注：当前 AiChatService.get_session_for_user 仍统一返回 404 隔离以避免泄露；
+    本异常类保留作为防御性兜底（service 层未来可选择性 raise，由 API 层映射 403）。
+    """
+
+
+class ChatModeNotInstanceSqlError(AiSqlPreviewError):
+    """session.chat_mode != 'instance_sql' → 422（C16-F2b P0-1）。
+
+    普通 general session 不能调用 /ai/sql/preview；前端应改用 /ai/chat/sessions/{id}/messages。
+    """
+
+
+class ChatImmutableViolationErrorPreview(AiSqlPreviewError):
+    """session.bound_instance_id != request.instance_id → 422（C16-F2b P0-1 不可变绑定）。
+
+    一旦 session 创建，bound_instance_id 不可变；前端调用 /ai/sql/preview 时必须
+    用 session 创建时绑定的 instance_id，否则报本异常。
+    """
+
+
+class PreviewIncompleteRetryRequiredError(AiSqlPreviewError):
+    """client_request_id 命中已有 user message 但未关联 audit → 409（C16-F2b P0-2）。
+
+    场景：上一次 preview 请求在事务 1/2 中途中断（如 process killed），导致 user
+    message 已落库但 ai_sql_audit 行未创建。partial unique 兜底阻止创建新 user message，
+    但旧 user message 没有 audit，状态不一致。
+
+    缓解：前端提示用户「上一次请求未完成，请重试或换 client_request_id」，service
+    层暂不自动重试（避免无穷递归）。
+    """
+
+    def __init__(self, message: str, *, user_message_id: int) -> None:
+        super().__init__(message)
+        self.user_message_id = user_message_id
+
+
+# =============================================================================
 # Service 返回类型
 # =============================================================================
 @dataclass
 class PreviewResult:
-    """preview() 内部返回（audit_id + preview safety payload）。"""
+    """preview() 内部返回（audit_id + preview safety payload）。
+
+    C16-F2b commit 2 扩展计划（plan §21.3 C16-3）：
+    - session_id:          与 request.session_id 一致
+    - user_message_id:     ai_chat_message.id（role='user'）
+    - preview_message_id:  ai_chat_message.id（role='assistant'，message_type='sql_preview_link'）
+    - idempotent_replay:   True 表示命中已有 user_message，未调 Dify、未创建新 audit
+
+    commit 1 仅添加鉴权链；PreviewResult 扩展字段在 commit 2 补齐。
+    """
 
     audit: AiSqlAudit
 
@@ -158,33 +239,44 @@ class AiSqlPreviewService:
         instance_id: int,
         database_name: Optional[str],
         user_question: str,
-        session_id: Optional[int] = None,
-        message_id: Optional[int] = None,
+        session_id: int,
+        client_request_id: UUID,
         current_page: Optional[str] = None,
         requested_by: Optional[Any] = None,
     ) -> PreviewResult:
         """触发 SQL Preview，生成 approved_sql 并落 ai_sql_audit。
 
-        流程（plan §5.2 + §5.3 + C13 Layer 1）：
-          1. 功能开关（503 FeatureDisabledError）
-          2. instance 存在性 + db_type capability（404 / 422）
-          3. Schema snapshot 可用性（409 SnapshotUnavailableError）
-          3.5. Layer 1 正则预检 user_question（C13 NEW；命中 → rejected audit）
-          4. 调 Dify sql-generator workflow 取 generated_sql
-             - 解析 Code 节点结构化 JSON（C13 NEW）
-             - 失败 / 解析失败 → 构造 rejected audit 落库
-          5. 调 SqlSafetyService.validate_with_ast 取 approved_sql
-             - rejected → 构造 rejected audit 落库
-          6. 落 ai_sql_audit（passed / rejected 都落库）
+        C16-F2b 起 session_id + client_request_id 必填（plan §21.3 C16-3）；
+        message_id 由 service 内部生成 user_message 后回填 audit，不再由调用方传入。
+
+        流程（plan §5.2 + §5.3 + C13 Layer 1 + C16-F2b 鉴权链）：
+          1.  功能开关（503 FeatureDisabledError）
+          2.  session ownership + chat_mode='instance_sql' + bound_instance_id 一致
+              + DbInstance.status='active'（C16-F2b 鉴权链；404/422/403）
+          3.  instance 存在性 + db_type capability（404 / 422）
+          4.  Schema snapshot 可用性（409 SnapshotUnavailableError）
+          4.5. Layer 1 正则预检 user_question（C13 NEW；命中 → rejected audit）
+          5.  调 Dify sql-generator workflow 取 generated_sql
+              - 解析 Code 节点结构化 JSON（C13 NEW）
+              - 失败 / 解析失败 → 构造 rejected audit 落库
+          6.  调 SqlSafetyService.validate_with_ast 取 approved_sql
+              - rejected → 构造 rejected audit 落库
+          7.  落 ai_sql_audit（passed / rejected 都落库）
+          8.  C16-F2b commit 2 追加：写 ai_chat_message × 2（user + preview）+ 幂等分支
 
         Raises:
-            InstanceNotFoundError: instance_id 不存在 → 404
-            FeatureDisabledError: AI_SQL_PREVIEW_ENABLED=false → 503
-            UnsupportedDbTypeError: db_type 不支持 → 422
-            SnapshotUnavailableError: snapshot 不可用 → 409
-            DifyUnavailableError: Dify 客户端未配置 → 502
-            DifyTimeoutError_: Dify 超时 → 504
-            DifyError: 其他 Dify 错误 → 502
+            ChatSessionNotFoundErrorPreview:    session 不存在 → 404
+            ChatSessionForbiddenErrorPreview:   session 不属于 current_user → 403（保留接口）
+            ChatModeNotInstanceSqlError:        session.chat_mode != 'instance_sql' → 422
+            ChatImmutableViolationErrorPreview: instance_id 与 bound_instance_id 不一致 → 422
+            ChatInstanceNotAccessibleError:     DbInstance.status != 'active' → 404（复用 C16-F2a）
+            InstanceNotFoundError:              instance_id 不存在 → 404
+            FeatureDisabledError:               AI_SQL_PREVIEW_ENABLED=false → 503
+            UnsupportedDbTypeError:             db_type 不支持 → 422
+            SnapshotUnavailableError:           snapshot 不可用 → 409
+            DifyUnavailableError:               Dify 客户端未配置 → 502
+            DifyTimeoutError_:                  Dify 超时 → 504
+            DifyError:                          其他 Dify 错误 → 502
         """
         settings = get_settings()
 
@@ -192,7 +284,12 @@ class AiSqlPreviewService:
         if not settings.AI_SQL_PREVIEW_ENABLED:
             raise FeatureDisabledError("AI_SQL_PREVIEW_ENABLED=false")
 
-        # 2. instance 校验 + db_type capability 校验
+        # 2. C16-F2b 鉴权链 — session ownership + chat_mode + bound_instance_id + status
+        session_obj = cls._auth_check_session_for_preview(
+            db, session_id=session_id, instance_id=instance_id, user=requested_by,
+        )
+
+        # 3. instance 校验 + db_type capability 校验
         instance, db_type_code = cls._resolve_instance(db, instance_id)
 
         if db_type_code.upper() not in settings.sql_supported_db_types:
@@ -244,7 +341,7 @@ class AiSqlPreviewService:
                     db_type_code=db_type_code,
                     user_question=user_question,
                     session_id=session_id,
-                    message_id=message_id,
+                    message_id=None,  # C16-F2b commit 1: 暂不写 user_message，commit 2 补齐
                     user_id=getattr(requested_by, "id", None),
                     schema_snapshot_id=schema_snapshot_id,
                     schema_policy_hash=schema_policy_hash,
@@ -353,7 +450,7 @@ class AiSqlPreviewService:
                 db_type_code=db_type_code,
                 user_question=user_question,
                 session_id=session_id,
-                message_id=message_id,
+                message_id=None,  # C16-F2b commit 1: 暂不写 user_message，commit 2 补齐
                 user_id=getattr(requested_by, "id", None),
                 schema_snapshot_id=schema_snapshot_id,
                 schema_policy_hash=schema_policy_hash,
@@ -404,7 +501,7 @@ class AiSqlPreviewService:
                 db_type_code=db_type_code,
                 user_question=user_question,
                 session_id=session_id,
-                message_id=message_id,
+                message_id=None,  # C16-F2b commit 1: 暂不写 user_message，commit 2 补齐
                 user_id=getattr(requested_by, "id", None),
                 schema_snapshot_id=schema_snapshot_id,
                 schema_policy_hash=schema_policy_hash,
@@ -435,7 +532,7 @@ class AiSqlPreviewService:
 
         audit = AiSqlAudit(
             session_id=session_id,
-            message_id=message_id,
+            message_id=None,  # C16-F2b commit 1: 暂不写 user_message，commit 2 补齐
             user_id=getattr(requested_by, "id", None),
             instance_id=instance_id,
             db_type_code=db_type_code.upper(),
@@ -482,6 +579,104 @@ class AiSqlPreviewService:
             db_type_code = "POSTGRESQL"
 
         return instance, db_type_code
+
+    @staticmethod
+    def _auth_check_session_for_preview(
+        db: Session,
+        *,
+        session_id: int,
+        instance_id: int,
+        user: Optional[Any],
+    ) -> AiChatSession:
+        """C16-F2b 鉴权链 — session ownership + chat_mode + bound_instance_id + status（4 步）。
+
+        Args:
+            db:          SQLAlchemy Session
+            session_id:  ai_chat_session.id（必填）
+            instance_id: request.instance_id（与 session.bound_instance_id 比对）
+            user:        current_user（与 session.user_id 比对）
+
+        Returns:
+            AiChatSession（鉴权通过）
+
+        Raises:
+            ChatSessionNotFoundErrorPreview:    session 不存在 → 404
+            ChatSessionForbiddenErrorPreview:   session 不属于 current_user → 403（保留）
+            ChatModeNotInstanceSqlError:        session.chat_mode != 'instance_sql' → 422
+            ChatImmutableViolationErrorPreview: instance_id 与 bound_instance_id 不一致 → 422
+            ChatInstanceNotAccessibleError:     DbInstance.status != 'active' → 404（复用 C16-F2a）
+
+        Notes:
+            - 不复用 ai_chat_service.get_session_for_user：preview service 需对 4 步
+              做精细化异常映射（404/403/422），chat service 只做 ownership 一项。
+            - ChatSessionNotFoundErrorPreview 与 ChatSessionForbiddenErrorPreview
+              都在 chat_service 中存在对应类型（ChatSessionNotFoundError / ChatSessionForbiddenError），
+              但此处不复用以避免 preview ↔ chat service 互相依赖。
+        """
+        # 步骤 1：session 存在性（统一 404 隔离存在性，避免泄露）
+        session_obj = (
+            db.query(AiChatSession)
+            .filter(AiChatSession.id == session_id)
+            .first()
+        )
+        if session_obj is None:
+            raise ChatSessionNotFoundErrorPreview(
+                f"Chat session {session_id} not found"
+            )
+
+        # 步骤 1.5：session ownership（统一 404 隔离避免泄露「会话存在但属于他人」）
+        if user is not None and session_obj.user_id is not None:
+            if session_obj.user_id != getattr(user, "id", None):
+                logger.warning(
+                    "AiSqlPreviewService._auth_check forbidden: session_id=%s "
+                    "requested_by=%s actual_owner=%s instance_id=%s",
+                    session_id,
+                    getattr(user, "id", None),
+                    session_obj.user_id,
+                    instance_id,
+                )
+                raise ChatSessionForbiddenErrorPreview(
+                    f"Chat session {session_id} not owned by user"
+                )
+
+        # 步骤 2：chat_mode 必须是 'instance_sql'
+        if session_obj.chat_mode != "instance_sql":
+            raise ChatModeNotInstanceSqlError(
+                f"Chat session {session_id} has chat_mode={session_obj.chat_mode!r}; "
+                "only 'instance_sql' sessions can call /ai/sql/preview"
+            )
+
+        # 步骤 3：bound_instance_id 必须 == instance_id（P0-1 不可变绑定）
+        if session_obj.bound_instance_id != int(instance_id):
+            raise ChatImmutableViolationErrorPreview(
+                f"Chat session {session_id} bound_instance_id="
+                f"{session_obj.bound_instance_id} != request.instance_id={instance_id}; "
+                "bound_instance_id is immutable per plan §21.2 P0-1"
+            )
+
+        # 步骤 4：DbInstance.status == 'active'（复用 C16-F2a 校验）
+        # 注：DbInstance 已通过 _resolve_instance 验证存在；此处只检查 status
+        # 但 _resolve_instance 在 commit 1 中尚未调用（顺序：先鉴权再 _resolve_instance），
+        # 因此这里需要直接查一次 DbInstance
+        instance = (
+            db.query(DbInstance)
+            .filter(DbInstance.id == int(instance_id))
+            .first()
+        )
+        if instance is None:
+            # 理论上 chat session.bound_instance_id FK 已保证 instance 存在；
+            # 但 instance 可能被级联删除（如 ON DELETE CASCADE）— 兜底 404
+            raise ChatInstanceNotAccessibleError(
+                f"db_instance id={instance_id} not found (bound from session {session_id})"
+            )
+        instance_status = getattr(instance, "status", None) or "active"
+        if instance_status != "active":
+            raise ChatInstanceNotAccessibleError(
+                f"db_instance id={instance_id} is not accessible "
+                f"(status={instance_status!r}; bound from session {session_id})"
+            )
+
+        return session_obj
 
     @staticmethod
     def _extract_generated_sql(dify_response: dict[str, Any]) -> Optional[str]:
@@ -724,7 +919,7 @@ class AiSqlPreviewService:
 
         audit = AiSqlAudit(
             session_id=session_id,
-            message_id=message_id,
+            message_id=None,  # C16-F2b commit 1: 暂不写 user_message，commit 2 补齐
             user_id=user_id,
             instance_id=instance_id,
             db_type_code=db_type_code.upper(),
