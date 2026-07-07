@@ -9,6 +9,14 @@ AI Chat 服务（Phase 3.6 C3）
 - 租约：assistant pending 消息设置 processing_expires_at = now() + AI_CHAT_LEASE_SECONDS；过期后下一次 send_message 标记 stale
 - 并发保护：DB 层 UNIQUE(session_id) WHERE role='assistant' AND status='pending'
 - 错误码：会话正在处理 → 409；功能关闭 → 503；Dify 不可用 → 502；超时 → 504
+
+C16-F2a 扩展（plan §21.2）：
+- Session 创建接受 mode ('general'/'instance_sql') + bound_instance_id
+- mode='general' → bound_instance_id 必须 NULL
+- mode='instance_sql' → bound_instance_id 必须 NOT NULL + 实例存在且 is_active=True
+- 已存在同 user+mode+bound_instance_id session 时复用（不重建）
+- chat_mode + bound_instance_id 创建后不可变
+- 新异常：ChatModeInvalidError / ChatInstanceNotAccessibleError / ChatImmutableViolationError
 """
 from __future__ import annotations
 
@@ -18,13 +26,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
-from sqlalchemy import and_, update
+from sqlalchemy import and_, select, update
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.ai import AiChatMessage, AiChatSession
+from app.models.dbops_assets import DbInstance
 from app.models.user import User
-from app.schemas.ai import AiChatMessageSendRequest
+from app.schemas.ai import ALL_CHAT_MODES, AiChatMessageSendRequest, ChatMode
 from app.services.dify_service import (
     DifyConfigurationError,
     DifyConnectionError,
@@ -47,7 +56,7 @@ class AiChatError(Exception):
 
 
 class ChatSessionNotFoundError(AiChatError):
-    """会话不存在或不属于当前用户（统一返回 404，避免泄露存在性）。"""
+    """会话不存在或属于当前用户（统一返回 404，避免泄露存在性）。"""
 
 
 class ChatConcurrentPendingError(AiChatError):
@@ -66,6 +75,18 @@ class ChatDifyTimeoutError(AiChatError):
     """Dify 调用超时 → 504 Gateway Timeout。"""
 
 
+class ChatModeInvalidError(AiChatError):
+    """mode 字段非法或 mode/bound_instance_id 不匹配 → 422。"""
+
+
+class ChatInstanceNotAccessibleError(AiChatError):
+    """bound_instance_id 不存在或 is_active=False → 404。"""
+
+
+class ChatImmutableViolationError(AiChatError):
+    """chat_mode / bound_instance_id 已存在但与请求不一致 → 409 Conflict。"""
+
+
 # =============================================================================
 # Service 返回类型
 # =============================================================================
@@ -76,6 +97,14 @@ class SendMessageResult:
     user_message: AiChatMessage
     assistant_message: Optional[AiChatMessage]
     idempotent_replay: bool
+
+
+@dataclass
+class CreateSessionResult:
+    """create_session 内部返回（session + 是否复用标记）。"""
+
+    session: AiChatSession
+    reused: bool
 
 
 # =============================================================================
@@ -100,17 +129,117 @@ class AiChatService:
     # Session
     # ------------------------------------------------------------------
     @staticmethod
-    def create_session(db: Session, *, user: User, title: Optional[str] = None) -> AiChatSession:
-        """创建新会话（user 维度）。"""
+    def create_session(
+        db: Session,
+        *,
+        user: User,
+        title: Optional[str] = None,
+        mode: ChatMode = "general",
+        bound_instance_id: Optional[int] = None,
+        source_page: Optional[str] = None,
+    ) -> CreateSessionResult:
+        """创建或复用 Chat session（C16-F2a 扩展）。
+
+        Args:
+            db:                SQLAlchemy Session
+            user:              当前用户
+            title:             会话标题（默认 '新会话'）
+            mode:              Chat 模式（'general'/'instance_sql'），默认 'general'
+            bound_instance_id: 实例 ID（mode='instance_sql' 时必填；mode='general' 时必须 NULL）
+            source_page:       来源页面（仅日志记录，不持久化到 session 层）
+
+        Returns:
+            CreateSessionResult(session=<AiChatSession>, reused=<bool>)
+            - reused=True:  同 user+mode+bound_instance_id session 已存在，已复用（不重建）
+            - reused=False: 新建 session
+
+        Raises:
+            ChatModeInvalidError:           mode 非法或与 bound_instance_id 不匹配
+            ChatInstanceNotAccessibleError: bound_instance_id 不存在或 is_active=False
+
+        Rules（plan §21.2 P0-2）:
+            1. mode='general'       → bound_instance_id 必须 NULL（传了 → 422）
+            2. mode='instance_sql'  → bound_instance_id 必须 NOT NULL（缺 → 422）
+            3. bound_instance_id 必须存在且 is_active=True（否则 404）
+            4. 复用已有同 user+mode+bound_instance_id session（partial unique 兜底）
+            5. 创建后 chat_mode + bound_instance_id 不可变（应用层不更新，DB CHECK 兜底）
+        """
+        # 1. 校验 mode 枚举
+        if mode not in ALL_CHAT_MODES:
+            raise ChatModeInvalidError(
+                f"Invalid chat mode: {mode!r}; must be one of {ALL_CHAT_MODES}"
+            )
+
+        # 2. mode 与 bound_instance_id 一致性校验
+        if mode == "general" and bound_instance_id is not None:
+            raise ChatModeInvalidError(
+                "mode='general' must not have bound_instance_id (got "
+                f"bound_instance_id={bound_instance_id})"
+            )
+        if mode == "instance_sql" and bound_instance_id is None:
+            raise ChatModeInvalidError(
+                "mode='instance_sql' requires bound_instance_id (got None)"
+            )
+
+        # 3. bound_instance_id 存在 + is_active 校验
+        if bound_instance_id is not None:
+            instance = (
+                db.query(DbInstance)
+                .filter(DbInstance.id == bound_instance_id)
+                .first()
+            )
+            if instance is None:
+                raise ChatInstanceNotAccessibleError(
+                    f"db_instance id={bound_instance_id} not found"
+                )
+            if not getattr(instance, "is_active", True):
+                raise ChatInstanceNotAccessibleError(
+                    f"db_instance id={bound_instance_id} is not active"
+                )
+
+        # 4. 复用已有 session（仅 instance_sql 模式；general 模式用户可建多个独立会话）
+        #    partial unique uq_ai_chat_session_user_instance_sql 仅约束 instance_sql，
+        #    general 模式下 bound_instance_id 始终 NULL，多会话并存为正常预期
+        if mode == "instance_sql":
+            existing = (
+                db.query(AiChatSession)
+                .filter(
+                    AiChatSession.user_id == user.id,
+                    AiChatSession.chat_mode == mode,
+                    AiChatSession.bound_instance_id == bound_instance_id,
+                )
+                .first()
+            )
+            if existing is not None:
+                logger.info(
+                    "AiChatService.create_session reused session id=%s mode=%s bound=%s user=%s",
+                    existing.id,
+                    mode,
+                    bound_instance_id,
+                    user.id,
+                )
+                return CreateSessionResult(session=existing, reused=True)
+
+        # 5. 新建 session
         session_obj = AiChatSession(
             session_code=AiChatService._make_session_code(),
             user_id=user.id,
             title=(title or "新会话").strip()[:200] or "新会话",
             message_count=0,
+            chat_mode=mode,
+            bound_instance_id=bound_instance_id,
         )
+        # source_page 仅日志记录（AiChatSession 没有 metadata_json 列，AiChatMessage 才有；
+        # 真实 source_page 由前端在使用 session 时附带）
+        if source_page:
+            logger.debug(
+                "AiChatService.create_session source_page=%s (not persisted at session level)",
+                source_page,
+            )
+
         db.add(session_obj)
         db.flush()
-        return session_obj
+        return CreateSessionResult(session=session_obj, reused=False)
 
     @staticmethod
     def list_sessions(db: Session, *, user: User, limit: int = 50) -> tuple[list[AiChatSession], int]:

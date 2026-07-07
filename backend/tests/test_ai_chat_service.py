@@ -195,9 +195,14 @@ def test_session(db_session, current_user):
 # 1. create_session
 # -----------------------------------------------------------------------------
 def test_create_session_returns_valid_session(db_session, current_user):
-    """创建会话：返回 AiChatSession 且 session_code 唯一。"""
-    obj = AiChatService.create_session(db_session, user=current_user, title="新测试")
+    """创建会话：返回 CreateSessionResult(session, reused) 且 session_code 唯一。
+
+    C16-F2a 升级：create_session 改为返回 CreateSessionResult 包装对象，
+    兼容旧的 kwargs（mode/bound_instance_id 默认 'general'/None 即老行为）。
+    """
+    result = AiChatService.create_session(db_session, user=current_user, title="新测试")
     db_session.commit()
+    obj = result.session
     db_session.refresh(obj)
 
     assert obj.id is not None
@@ -205,6 +210,11 @@ def test_create_session_returns_valid_session(db_session, current_user):
     assert obj.user_id == current_user.id
     assert obj.title == "新测试"
     assert obj.message_count == 0
+    # C16-F2a 默认 mode='general' + bound_instance_id=None
+    assert obj.chat_mode == "general"
+    assert obj.bound_instance_id is None
+    # 首次创建：reused=False
+    assert result.reused is False
 
     # Teardown
     db_session.query(AiChatSession).filter(AiChatSession.id == obj.id).delete()

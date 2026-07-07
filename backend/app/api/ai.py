@@ -86,6 +86,9 @@ from app.services.ai_chat_service import (
     ChatDifyTimeoutError,
     ChatDifyUnavailableError,
     ChatFeatureDisabledError,
+    ChatImmutableViolationError,
+    ChatInstanceNotAccessibleError,
+    ChatModeInvalidError,
     ChatSessionNotFoundError,
 )
 from app.services.dify_service import DifyError
@@ -152,19 +155,50 @@ def create_chat_session(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AiChatSessionResponse:
-    """创建新会话（user 维度）。
+    """创建或复用 Chat session（C16-F2a 扩展）。
 
     Returns:
-        201 Created + 新会话响应
+        201 Created + 新会话响应（reused=True 时返回已有 session，状态码仍 201）
+
+    错误码（plan §21.2）：
+    - 404 — bound_instance_id 不存在或 is_active=False
+    - 409 — ChatImmutableViolationError（保留接口：当前未使用，预留 mode/session 不一致场景）
+    - 422 — mode 非法或 mode/bound_instance_id 不匹配（Pydantic 自动校验 + service ChatModeInvalidError）
+    - 503 — AI_CHAT_ENABLED=false（保留接口）
 
     Notes:
         - 不要求 AI_CHAT_ENABLED（先建会话，再尝试发送时再校验开关）
-        - 但 Dify 未配置时仍允许建会话（plan §11: send_message 才报 502）
+        - mode='instance_sql' 时 SQL Preview 入口鉴权依赖 bound_instance_id 不可变
+        - 同 user+mode+bound_instance_id 已存在 session 时复用（reused 字段语义）
     """
-    obj = AiChatService.create_session(db, user=current_user, title=payload.title)
-    db.commit()
-    db.refresh(obj)
-    return AiChatSessionResponse.model_validate(obj)
+    try:
+        result = AiChatService.create_session(
+            db,
+            user=current_user,
+            title=payload.title,
+            mode=payload.mode,
+            bound_instance_id=payload.bound_instance_id,
+            source_page=payload.source_page,
+        )
+        obj = result.session
+        db.commit()
+        db.refresh(obj)
+        # 复用场景：日志记录但 HTTP 仍 201（前端不区分）
+        if result.reused:
+            logger.info(
+                "chat session reused id=%s user=%s mode=%s bound=%s",
+                obj.id,
+                current_user.id,
+                obj.chat_mode,
+                obj.bound_instance_id,
+            )
+        return AiChatSessionResponse.model_validate(obj)
+    except ChatModeInvalidError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    except ChatInstanceNotAccessibleError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ChatImmutableViolationError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
 
 
 @router.get(
