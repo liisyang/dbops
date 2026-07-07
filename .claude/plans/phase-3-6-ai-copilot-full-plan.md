@@ -2307,6 +2307,37 @@ Preview 卡片按钮：
   - 不显示执行按钮
 ```
 
+##### C16-4 实施记录 — C16-F2c 已闭环（2026-07-07）
+
+起手 commits（按 plan §21.6 顺序 3 步拆分）：
+
+1. **commit 1 `387ad97`** — Chat.vue boundInstanceId 模式分流 + F2b 遗留 bug 修复
+   - 6 files / +404 −42
+   - `backend/app/schemas/ai.py`：`AiChatMessageResponse.message_type` Literal 加 `'sql_preview_link'`（F2b 漏修）
+   - `frontend/src/types/ai.ts`：`AiChatSessionCreateRequest` 3 字段（`mode?` / `bound_instance_id?` / `source_page?`）+ `AiChatSession` 2 字段（`chat_mode?` / `bound_instance_id?`）+ `AiSqlPreviewRequest` 必填 `session_id` + `client_request_id`（移除 `message_id`）+ `AiSqlPreviewResponse` 4 字段（`session_id` / `user_message_id` / `preview_message_id` / `idempotent_replay`）+ `AiSqlPreviewLinkMetadata.reason?`
+   - `frontend/src/views/ai/Chat.vue`：`parseBoundInstanceId` + `loadBoundInstanceContext` + `createBoundSession` + `exitBoundMode` + `activeSessionIsInstanceSql` computed + `inputPlaceholder` computed + `describePreviewError` helper + onSend 分流（`aiApi.sqlPreview` 走 instance_sql；调用后 `loadMessages` 同步后端实际状态）+ onMounted `Promise.all([loadBoundInstanceContext, createBoundSession])` + 模板：bound 模式隐藏会话侧栏、显示实例上下文 header（`instance_name / db_type_code / server_ip:port`）、「返回通用 Chat」按钮、placeholder 切换
+   - `frontend/src/views/InstanceDetail.vue`：`useRouter` + `gotoAiChat` + 「AI 查询」按钮（`auto_awesome` 图标 + `data-testid="instance-ai-chat-button"`）
+   - `frontend/src/components/ai/ChatMessageBubble.vue`：重写 `previewLinkMeta` computed（合并 `metadata_json` audit_id/status + `content` JSON approved_sql/schema_policy_hash/reason）+ rejected 分支模板（红框 + 「SQL Preview 被拒绝（audit #N）」 + reason 显示 + 无执行按钮）
+   - `frontend/src/api/ai.ts`：`createSession` 透传 `mode` / `bound_instance_id` / `source_page`
+
+2. **commit 2 `209bff7`** — SqlPreview.vue boundInstanceId 重定向
+   - 1 file / +21
+   - `frontend/src/views/ai/SqlPreview.vue`：`parseBoundInstanceIdFromQuery` helper + onMounted 检测 `route.query.boundInstanceId` → `router.replace({name: 'AiChat', query: {boundInstanceId}})`（用户只看到自然语言交互和 SQL 卡片，不跳独立预览页）
+
+3. **commit 3 (本次收尾)** — 测试 + 文档 + memory
+   - 1 测试文件 `backend/tests/test_ai_chat_message_response_c16_f2c.py`（3 回归测试用例：接受 `sql_preview_link` / 5 枚举全过 / 拒绝 unknown）
+   - 4 docs 同步：`docs/40-tech-debt.md` F16 row + `docs/10-module-map.md` AI Copilot - Chat 行扩展 + 新行 "AI Copilot - Chat 前端 boundInstanceId 模式分流（C16-F2c）" + `docs/contracts/api-inventory.md` §2.16.C 补 `message_type` 5 值 Literal + §2.16.D 新增（C16-F2c 模式分流规则 + 端点调用矩阵 + ChatMessageBubble.previewLinkMeta 合并规则） + `docs/30-runbook.md` §8.8 新增（8 行排障：按钮缺失 / header 不显示 / 退出无反应 / 500 bug / Preview 卡片不渲染 / reason 不显示 / 重定向失败 / onSend 调错端点）
+   - 1 memory：`phase-3-6-c16-f2c-completed-2026-07-07.md` + MEMORY.md 指针
+
+**验证**：
+- `bash scripts/ai/verify.sh` → 0 failed（2 skipped 系历史 C13 sqlglot 环境问题，与本次无关）
+- pytest：693 passed（含 3 新增 C16-F2c 回归测试；C8/C10/C14/F2a/F2b 全部回归无副作用）
+- vue-tsc：0 错
+- 现场 live E2E：dev 库 `POST /api/v1/ai/chat/sessions` + `POST /api/v1/ai/sql/preview` 走通 instance_sql 全链路（创建/复用 session + Preview 5 态机 + 双消息写入 + 执行结果回流 Chat）
+- 3 步 commit 都已 push 到 `feature/phase-3-6-ai-copilot` 分支
+
+**下轮起手**：F17 跨入口一致性回归（`/ai/sql/preview` form 模式 vs Chat 模式，前端 form 表单入口已 commit 1 改造 + commit 2 重定向，待补自动化测试覆盖双向一致性）/ Phase 3.7 下一阶段（Inspection AI 集成）。
+
 ---
 
 #### C16-5：Execute 按钮和结果卡片闭环（NEW）

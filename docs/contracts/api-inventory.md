@@ -220,9 +220,9 @@
 | 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
 |---|---|---|---|---|---|---|
 | GET | `/api/v1/ai/capabilities` | `api/ai.py` | - | 匿名 | 已实现（Phase 3.6 C1） | `backend/app/api/ai.py:108` |
-| POST | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3 + C16-F2a 扩展 chat_mode/bound_instance_id） | `backend/app/api/ai.py:132` |
+| POST | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3 + C16-F2a 扩展 chat_mode/bound_instance_id + C16-F2c 前端 boundInstanceId 模式分流入口） | `backend/app/api/ai.py:132` |
 | GET | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:157` |
-| POST | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:177` |
+| POST | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3 + C16-F2c 复用为 general 模式发送端点） | `backend/app/api/ai.py:177` |
 | GET | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:230` |
 | POST | `/api/v1/ai/sql/schema-snapshots/{instance_id}/collect` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:264` |
 | GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:308` |
@@ -286,6 +286,39 @@
 | `POST /ai/sql/preview` (C16-F2b) | `user_message_id` | int | ai_chat_message.id（role='user'，message_type='chat'） | `backend/app/schemas/ai.py:AiSqlPreviewResponse` |
 | `POST /ai/sql/preview` (C16-F2b) | `preview_message_id` | int | ai_chat_message.id（role='assistant'，message_type='sql_preview_link'） | 同上 |
 | `POST /ai/sql/preview` (C16-F2b) | `idempotent_replay` | bool | client_request_id 命中已有 user message → 返回原 audit 三元组（不调 Dify） | 同上 |
+| `AiChatMessageResponse.message_type` (C16-F2c 修) | enum | 5 值 Literal：`"chat"` / `"sql_preview"` / `"sql_preview_link"` / `"sql_result"` / `"error"`（F2b 漏修，F2c 补上 `'sql_preview_link'`，否则 listMessages 触发 Pydantic 500） | `backend/app/schemas/ai.py:AiChatMessageResponse` |
+| `POST /ai/chat/sessions` (C16-F2a) | `mode` | Literal `"general"` / `"instance_sql"` | Chat session.chat_mode；与 bound_instance_id 联动 | `backend/app/schemas/ai.py:AiChatSessionCreateRequest` |
+| `POST /ai/chat/sessions` (C16-F2a) | `bound_instance_id` | int? | 仅 mode='instance_sql' 必填；partial unique `uq_ai_chat_session_user_instance_sql` 天然复用 | 同上 |
+| `POST /ai/chat/sessions` (C16-F2a) | `source_page` | string? | 来源标识（如 `instance_detail` / `sql_preview_legacy`），用于审计追溯 | 同上 |
+
+#### 2.16.D C16-F2c Chat 前端 boundInstanceId 模式分流
+
+> 3.6B2 增量能力。前端 Chat.vue 走 `route.query.boundInstanceId` → 创建/复用 instance_sql session → onSend 分流到 SQL Preview 端点；InstanceDetail.vue 「AI 查询」按钮作为统一入口。
+
+**前端发送分流规则**（`frontend/src/views/ai/Chat.vue:onSend`）：
+
+```text
+mode = 'instance_sql'  (有 boundInstanceId) → POST /api/v1/ai/sql/preview
+mode = 'general'       (无 boundInstanceId) → POST /api/v1/ai/chat/sessions/{id}/messages
+```
+
+**端点调用矩阵**（C16-F2c 起手后）：
+
+| 前端入口 | route query | 模式 | 创建/复用 session | 发送端点 |
+|---|---|---|---|---|
+| `InstanceDetail.vue` 「AI 查询」按钮 | `boundInstanceId={id}` | `instance_sql` | `POST /ai/chat/sessions` `{mode: 'instance_sql', bound_instance_id: id, source_page: 'instance_detail'}` | `POST /ai/sql/preview` |
+| `Chat.vue` 默认入口 | 无 query | `general` | `POST /ai/chat/sessions` `{mode: 'general'}` | `POST /ai/chat/sessions/{id}/messages` |
+| `SqlPreview.vue` boundInstanceId 检测 | `boundInstanceId={id}` | `instance_sql` | onMounted → `router.replace` 重定向到 Chat.vue | 同 row 1 |
+
+**ChatMessageBubble.previewLinkMeta 合并规则**（`frontend/src/components/ai/ChatMessageBubble.vue`）：
+
+| 来源 | 字段 | 说明 |
+|---|---|---|
+| `metadata_json` | `audit_id` | ai_sql_audit.id |
+| `metadata_json` | `status` (`passed` / `rejected`) | 渲染徽章颜色 |
+| `content` JSON | `approved_sql` | 渲染代码块 |
+| `content` JSON | `schema_policy_hash` | 显示 hash 前 8 位（绑定一致性） |
+| `content` JSON | `reason` | rejected 分支显示拒绝原因 |
 
 
 ## 3. 前端 API 封装清单
