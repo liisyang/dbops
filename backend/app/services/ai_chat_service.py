@@ -181,7 +181,9 @@ class AiChatService:
                 "mode='instance_sql' requires bound_instance_id (got None)"
             )
 
-        # 3. bound_instance_id 存在 + is_active 校验
+        # 3. bound_instance_id 存在 + status 校验
+        #    DbInstance.status 字段：'active'（默认）/ 'inactive' / 'decommissioned' 等
+        #    仅 active 实例可被 Chat 绑定（C16-F2a MVP）
         if bound_instance_id is not None:
             instance = (
                 db.query(DbInstance)
@@ -192,9 +194,11 @@ class AiChatService:
                 raise ChatInstanceNotAccessibleError(
                     f"db_instance id={bound_instance_id} not found"
                 )
-            if not getattr(instance, "is_active", True):
+            # status 字段无 CHECK 约束，自由文本；保守判定非 active 即不可访问
+            instance_status = getattr(instance, "status", None) or "active"
+            if instance_status != "active":
                 raise ChatInstanceNotAccessibleError(
-                    f"db_instance id={bound_instance_id} is not active"
+                    f"db_instance id={bound_instance_id} is not accessible (status={instance_status!r})"
                 )
 
         # 4. 复用已有 session（仅 instance_sql 模式；general 模式用户可建多个独立会话）

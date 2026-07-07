@@ -2031,6 +2031,28 @@ Authorization: Bearer <TOKEN>
 7. chat_mode='instance_sql' 的 session 不允许调用普通 /ai/chat/sessions/{id}/messages。
 ```
 
+#### C16-2a 实施记录（2026-07-07 闭环）
+
+- DDL: `backend/db/dbops_phase3_6b2_c16_f2a_chat_mode.sql`（idempotent，2 次幂等验证 OK）
+  - `chat_mode VARCHAR(30) NOT NULL DEFAULT 'general'`（'general'/'instance_sql'）
+  - `bound_instance_id BIGINT NULL` FK → `db_instance.id` ON DELETE CASCADE
+  - 2 CHECK: `chk_ai_chat_session_mode` (枚举) + `chk_ai_chat_session_bound_instance` ((general↔NULL) OR (instance_sql↔NOT NULL))
+  - partial unique `uq_ai_chat_session_user_instance_sql` (user_id, bound_instance_id) WHERE chat_mode='instance_sql' AND bound_instance_id IS NOT NULL
+  - 辅助 idx `idx_ai_chat_session_bound_instance`
+- ORM: `AiChatSession` 加 chat_mode + bound_instance_id + 2 CheckConstraint + 2 Index
+- Schemas: `AiChatSessionCreateRequest` 加 mode + bound_instance_id + source_page；`AiChatSessionResponse` 暴露 chat_mode + bound_instance_id；`ChatMode = Literal['general', 'instance_sql']`
+- Service: `AiChatService.create_session` 签名扩展，返回 `CreateSessionResult(session, reused)` dataclass
+  - 校验链: mode 枚举 → mode/bound 一致 → DbInstance.status='active' → instance_sql 复用 → 新建
+  - 3 新异常: `ChatModeInvalidError` / `ChatInstanceNotAccessibleError` / `ChatImmutableViolationError`
+  - 复用: 仅 `mode='instance_sql'` 复用（general 用户可建多个独立会话；与 partial unique 设计一致）
+  - **修正**：access check 用 `DbInstance.status` 字段（不是 `is_active` — DbInstance 无该字段；DbType 才有；status='active' 即视为可访问）
+- API: `POST /api/v1/ai/chat/sessions` 透传 mode/bound_instance_id/source_page；422/404/409 异常映射
+- Tests: `backend/tests/test_ai_chat_service_c16_f2a.py` 15 cases（14 passed / 1 skipped 因 dev 库只有 1 active user）；verify.sh 0 failed / 2 skipped（历史 C13 sqlglot）
+- Docs: tech-debt F14 + module-map + api-inventory + runbook §8.6 (6 排障行)
+- Commits: 3 个 (`cb0aed8` DDL+ORM+Schemas / `2fe07b0` Service+API / commit 3 测试+文档+memory)
+
+**下轮起手 (C16-2b)**：重构 SQL Preview API 为 Chat 可调用入口（plan §21.3），消费 `session.chat_mode='instance_sql'` + `session.bound_instance_id` 鉴权 + 写 user/preview 双消息。
+
 ---
 
 #### C16-3：重构 SQL Preview API 为 Chat 可调用入口（NEW）

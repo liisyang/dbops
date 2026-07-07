@@ -220,7 +220,7 @@
 | 方法 | 路径 | 后端入口 | Service | 认证要求 | 状态 | 代码依据 |
 |---|---|---|---|---|---|---|
 | GET | `/api/v1/ai/capabilities` | `api/ai.py` | - | 匿名 | 已实现（Phase 3.6 C1） | `backend/app/api/ai.py:108` |
-| POST | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:132` |
+| POST | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3 + C16-F2a 扩展 chat_mode/bound_instance_id） | `backend/app/api/ai.py:132` |
 | GET | `/api/v1/ai/chat/sessions` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:157` |
 | POST | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:177` |
 | GET | `/api/v1/ai/chat/sessions/{session_id}/messages` | `api/ai.py` | AiChatService | JWT | 已实现（Phase 3.6 C3） | `backend/app/api/ai.py:230` |
