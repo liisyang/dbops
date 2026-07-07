@@ -22,10 +22,44 @@ from pydantic import BaseModel, ConfigDict, Field
 # =============================================================================
 # Chat — Session
 # =============================================================================
+# C16-F2a：Chat 模式枚举（plan §21.2）
+# - general:       普通多轮 Chat，调用 /ai/chat/sessions/{id}/messages
+# - instance_sql:  实例绑定 SQL Copilot，调用 /ai/sql/preview
+ChatMode = Literal["general", "instance_sql"]
+ALL_CHAT_MODES = ("general", "instance_sql")
+
+
 class AiChatSessionCreateRequest(BaseModel):
-    """创建新会话的请求（前端在用户首次发消息时调用）。"""
+    """创建新会话的请求（前端在用户首次发消息时调用）。
+
+    C16-F2a 新增字段（plan §21.2）：
+    - mode:              'general'（普通多轮）或 'instance_sql'（实例绑定 SQL Copilot）
+    - bound_instance_id: 当 mode='instance_sql' 时必填
+                         当 mode='general' 时必须不传（传了 422）
+    - source_page:       辅助信息（落 metadata_json），不影响行为
+
+    互斥规则（service 层兜底）：
+    1. mode='general'       → bound_instance_id 必须 NULL
+    2. mode='instance_sql'  → bound_instance_id 必须 NOT NULL
+    3. bound_instance_id 必须存在且 is_active=True
+    4. 已存在同 user+mode+bound_instance_id 的未删除 session 时优先复用
+    """
 
     title: Optional[str] = Field(default=None, max_length=200, description="可选会话标题")
+    mode: ChatMode = Field(
+        default="general",
+        description="Chat 模式：general（普通多轮）/ instance_sql（实例绑定 SQL Copilot）",
+    )
+    bound_instance_id: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="实例 ID（mode='instance_sql' 时必填；mode='general' 时必须 NULL）",
+    )
+    source_page: Optional[str] = Field(
+        default=None,
+        max_length=100,
+        description="来源页面（落 metadata_json；不影响行为）",
+    )
 
 
 class AiChatSessionResponse(BaseModel):
@@ -41,6 +75,9 @@ class AiChatSessionResponse(BaseModel):
     model_provider: str
     message_count: int
     last_message_at: Optional[datetime] = None
+    # C16-F2a：返回 chat_mode + bound_instance_id 让前端可路由入口
+    chat_mode: ChatMode = "general"
+    bound_instance_id: Optional[int] = None
     created_at: datetime
     updated_at: datetime
 

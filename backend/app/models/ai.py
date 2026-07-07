@@ -45,7 +45,12 @@ from app.models.dbops_assets import DbopsAssetBase
 # 1. AiChatSession — 聊天会话
 # -----------------------------------------------------------------------------
 class AiChatSession(DbopsAssetBase):
-    """聊天会话（user 维度）。"""
+    """聊天会话（user 维度）。
+
+    C16-F2a 新增字段（plan §21.2）：
+    - chat_mode: 模式枚举 general/instance_sql，SQL Preview 入口鉴权依赖此字段
+    - bound_instance_id: 当 chat_mode='instance_sql' 时必填；不可变绑定（P0-1）
+    """
 
     __tablename__ = "ai_chat_session"
 
@@ -71,12 +76,57 @@ class AiChatSession(DbopsAssetBase):
         onupdate=func.now(),
     )
 
+    # ---- C16-F2a: Chat 模式 + 实例绑定 ----
+    # chat_mode 枚举：general（普通多轮）/ instance_sql（实例绑定 SQL Copilot）
+    chat_mode = Column(String(30), nullable=False, server_default=text("'general'"))
+    # bound_instance_id：当 chat_mode='instance_sql' 时 NOT NULL；创建后不可变
+    bound_instance_id = Column(
+        BigInteger,
+        ForeignKey("dbops.db_instance.id", ondelete="CASCADE", name="fk_ai_chat_session_bound_instance"),
+        nullable=True,
+    )
+
+    # CHECK 约束（与 DDL 对齐）
+    __table_args__ = (
+        CheckConstraint(
+            "chat_mode IN ('general', 'instance_sql')",
+            name="chk_ai_chat_session_mode",
+        ),
+        CheckConstraint(
+            "(chat_mode = 'general' AND bound_instance_id IS NULL) "
+            "OR "
+            "(chat_mode = 'instance_sql' AND bound_instance_id IS NOT NULL)",
+            name="chk_ai_chat_session_bound_instance",
+        ),
+        # 部分唯一索引：同 user + 同 instance 只复用一个 instance_sql session
+        Index(
+            "uq_ai_chat_session_user_instance_sql",
+            "user_id",
+            "bound_instance_id",
+            unique=True,
+            postgresql_where=text("chat_mode = 'instance_sql' AND bound_instance_id IS NOT NULL"),
+        ),
+        # 辅助索引：按 bound_instance_id 查询
+        Index(
+            "idx_ai_chat_session_bound_instance",
+            "bound_instance_id",
+            postgresql_where=text("bound_instance_id IS NOT NULL"),
+        ),
+        {"schema": "dbops"},
+    )
+
     messages = relationship(
         "AiChatMessage",
         back_populates="session",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AiChatSession id={self.id} user_id={self.user_id} "
+            f"chat_mode={self.chat_mode} bound_instance_id={self.bound_instance_id}>"
+        )
 
 
 # -----------------------------------------------------------------------------
