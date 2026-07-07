@@ -128,6 +128,22 @@ class _FakeSession:
     def rollback(self) -> None:
         pass
 
+    def flush(self) -> None:
+        """C16-F2b: 模拟 SQLAlchemy flush — 给 add 进去的对象分配 id。"""
+        for cls_name, items in self.store.items():
+            for item in items:
+                if getattr(item, "id", None) is None:
+                    item.id = self._next_id(cls_name)
+
+    next_id_counter: dict[str, int] = None  # type: ignore[assignment]
+
+    def _next_id(self, cls_name: str) -> int:
+        if self.next_id_counter is None:
+            object.__setattr__(self, "next_id_counter", {})
+        counter = self.next_id_counter
+        counter[cls_name] = counter.get(cls_name, 1000) + 1
+        return counter[cls_name]
+
     def refresh(self, obj: Any) -> None:
         self.refreshes += 1
         if obj.id is None:

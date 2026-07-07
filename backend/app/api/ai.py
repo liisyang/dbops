@@ -74,9 +74,14 @@ from app.services.ai.ai_sql_execute_service import (
 )
 from app.services.ai.ai_sql_preview_service import (
     AiSqlPreviewService,
+    ChatImmutableViolationErrorPreview,
+    ChatModeNotInstanceSqlError,
+    ChatSessionForbiddenErrorPreview,
+    ChatSessionNotFoundErrorPreview,
     DifyTimeoutError_,
     DifyUnavailableError,
     DifyWorkflowFailedError_,
+    PreviewIncompleteRetryRequiredError,
     SnapshotUnavailableError,
     UnsupportedDbTypeError as SqlUnsupportedDbTypeError,
 )
@@ -437,29 +442,28 @@ def preview_sql(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> AiSqlPreviewResponse:
-    """SQL Preview（plan §5.2 + §5.3 + §6.5）。
+    """SQL Preview（plan §5.2 + §5.3 + §6.5 + §21.3 C16-F2b）。
 
-    流程：
-      1. 校验 instance + db_type capability
-      2. 取 is_current snapshot 的 schema_policy
-      3. 调 Dify sql-generator workflow → generated_sql
-      4. 调 SqlSafetyService.validate_with_ast（sqlglot） → approved_sql
-      5. 落 ai_sql_audit（passed / rejected 都落库）
+    C16-F2b 起（plan §21.3 C16-3 — Chat 流强制）：
+    - session_id + client_request_id 必填
+    - 4 步鉴权链：session ownership + chat_mode='instance_sql' + bound_instance_id 一致
+      + DbInstance.status='active'
+    - 幂等：client_request_id 命中已有 user_message → 返回原 audit 三元组
+    - 双消息写入：passed/rejected 都落 user + preview 两条 ai_chat_message
+      并关联 audit.message_id / audit.result_message_id
 
-    preview_safety_status='passed' 时返回 approved_sql + approved_sql_hash
-    + schema_snapshot_id + schema_policy_hash — Execute 阶段（C17-C19）会
-    校验这些字段一致。审计行 ``audit_id`` 在 passed/rejected 都返回，用于
-    后续 Execute 引用。
-
-    错误码（plan §11）：
-    - 404 — instance 不存在
-    - 409 — Schema snapshot 不可用（pending/running/failed/expired/no_snapshot）
-    - 422 — db_type 不在 capabilities 支持范围
+    错误码（plan §11 + C16-F2b）：
+    - 403 — session 存在但不属于当前用户（保留接口；当前统一 404 隔离）
+    - 404 — session 不存在 / instance 不存在 / DbInstance.status != 'active'
+    - 409 — client_request_id 命中但 audit 缺失（事务中断）/ Schema snapshot 不可用
+    - 422 — chat_mode != 'instance_sql' / bound_instance_id 不一致 /
+      db_type 不在 capabilities
     - 502 — Dify 不可用 / 网络错误 / Workflow 失败
     - 503 — AI_SQL_PREVIEW_ENABLED=false
     - 504 — Dify 调用超时
 
-    注意：本端点是**有状态**的，每次调用都落 audit 行；前端需自行去重（UI 防抖）。
+    注意：本端点是**有状态**的，每次调用都落 audit 行；
+    前端通过 client_request_id 幂等（partial unique 兜底）。
     """
     try:
         result = AiSqlPreviewService.preview(
@@ -468,9 +472,52 @@ def preview_sql(
             database_name=payload.database_name,
             user_question=payload.user_question,
             session_id=payload.session_id,
-            message_id=payload.message_id,
+            client_request_id=payload.client_request_id,
             current_page=payload.current_page,
             requested_by=current_user,
+        )
+    except ChatSessionNotFoundErrorPreview as exc:
+        # 404 — session 不存在（或不属于 current_user，统一隔离）
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ChatSessionForbiddenErrorPreview as exc:
+        # 403 — 保留接口（当前 service 统一抛 404 隔离，不会到这里）
+        raise HTTPException(status_code=403, detail=str(exc))
+    except ChatModeNotInstanceSqlError as exc:
+        # 422 — session.chat_mode != 'instance_sql'
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "chat_mode_not_instance_sql",
+                "message": str(exc),
+            },
+        )
+    except ChatImmutableViolationErrorPreview as exc:
+        # 422 — bound_instance_id != request.instance_id（P0-1 不可变绑定）
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "chat_immutable_violation",
+                "message": str(exc),
+            },
+        )
+    except ChatInstanceNotAccessibleError as exc:
+        # 404 — DbInstance.status != 'active'（C16-F2a 复用）
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "chat_instance_not_accessible",
+                "message": str(exc),
+            },
+        )
+    except PreviewIncompleteRetryRequiredError as exc:
+        # 409 — client_request_id 命中但 audit 缺失（旧请求中断）
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "preview_incomplete_retry_required",
+                "user_message_id": exc.user_message_id,
+                "message": str(exc),
+            },
         )
     except InstanceNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
@@ -502,6 +549,12 @@ def preview_sql(
     warnings_list = getattr(audit, "_preview_warnings", []) or []
 
     return AiSqlPreviewResponse(
+        # === C16-F2b 新增字段 ===
+        session_id=int(result.session_id),
+        user_message_id=int(result.user_message_id),
+        preview_message_id=int(result.preview_message_id),
+        idempotent_replay=bool(result.idempotent_replay),
+        # === C12 既有字段 ===
         audit_id=int(audit.id),
         preview_safety_status=audit.preview_safety_status,
         generated_sql=audit.generated_sql,

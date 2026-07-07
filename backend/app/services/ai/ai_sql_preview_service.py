@@ -61,6 +61,7 @@ from uuid import UUID
 
 from app.config import get_settings
 from app.models.ai import (
+    AiChatMessage,
     AiChatSession,
     AiSqlAudit,
     AiSqlAuditExecutionStatus,
@@ -193,18 +194,22 @@ class PreviewIncompleteRetryRequiredError(AiSqlPreviewError):
 # =============================================================================
 @dataclass
 class PreviewResult:
-    """preview() 内部返回（audit_id + preview safety payload）。
+    """preview() 内部返回（audit_id + 双 message_id + 幂等标记）。
 
-    C16-F2b commit 2 扩展计划（plan §21.3 C16-3）：
+    C16-F2b commit 2 扩展字段（plan §21.3 C16-3）：
     - session_id:          与 request.session_id 一致
     - user_message_id:     ai_chat_message.id（role='user'）
     - preview_message_id:  ai_chat_message.id（role='assistant'，message_type='sql_preview_link'）
     - idempotent_replay:   True 表示命中已有 user_message，未调 Dify、未创建新 audit
 
-    commit 1 仅添加鉴权链；PreviewResult 扩展字段在 commit 2 补齐。
+    Backward-compat: audit 字段保留（C12-C14 测试/调用方仍使用）。
     """
 
     audit: AiSqlAudit
+    session_id: int
+    user_message_id: int
+    preview_message_id: int
+    idempotent_replay: bool = False
 
 
 # =============================================================================
@@ -289,6 +294,48 @@ class AiSqlPreviewService:
             db, session_id=session_id, instance_id=instance_id, user=requested_by,
         )
 
+        # 2.5 幂等检查（C16-F2b P0-2 — plan §21.3）
+        # 命中已有 user_message + audit → 直接返回（不调 Dify）
+        existing_user_msg = (
+            db.query(AiChatMessage)
+            .filter(
+                AiChatMessage.session_id == session_id,
+                AiChatMessage.role == "user",
+                AiChatMessage.client_request_id == client_request_id,
+            )
+            .first()
+        )
+        if existing_user_msg is not None:
+            existing_audit = (
+                db.query(AiSqlAudit)
+                .filter(AiSqlAudit.message_id == existing_user_msg.id)
+                .first()
+            )
+            if existing_audit is None:
+                # 旧请求在事务 1/2 中途中断 → user_message 已落但 audit 未创建
+                raise PreviewIncompleteRetryRequiredError(
+                    f"client_request_id={client_request_id} matched user_message id="
+                    f"{existing_user_msg.id} but no associated ai_sql_audit row; "
+                    "previous preview request was interrupted. "
+                    "Please retry with a new client_request_id.",
+                    user_message_id=existing_user_msg.id,
+                )
+            # 命中完整三元组 → 找 preview_message
+            preview_msg_id = existing_audit.result_message_id or 0
+            logger.info(
+                "AiSqlPreviewService.preview idempotent replay: session_id=%s "
+                "client_request_id=%s user_message_id=%s audit_id=%s preview_message_id=%s",
+                session_id, client_request_id,
+                existing_user_msg.id, existing_audit.id, preview_msg_id,
+            )
+            return PreviewResult(
+                audit=existing_audit,
+                session_id=session_id,
+                user_message_id=existing_user_msg.id,
+                preview_message_id=preview_msg_id,
+                idempotent_replay=True,
+            )
+
         # 3. instance 校验 + db_type capability 校验
         instance, db_type_code = cls._resolve_instance(db, instance_id)
 
@@ -356,10 +403,15 @@ class AiSqlPreviewService:
                 # 标记 layer1 命中（前端可据此显示"非只读查询"提示而非 AST 错误）
                 audit._preview_layer1_blocked = True  # type: ignore[attr-defined]
                 audit._preview_layer1_keyword = precheck.get("matched_keyword")  # type: ignore[attr-defined]
-                db.add(audit)
-                db.commit()
-                db.refresh(audit)
-                return PreviewResult(audit=audit)
+                return cls._finalize_preview_with_chat_messages(
+                           db,
+                           audit=audit,
+                           session_id=session_id,
+                           user_question=user_question,
+                           client_request_id=client_request_id,
+                           user_id=getattr(requested_by, "id", None),
+                           current_page=current_page,
+                       )
 
         # 4. 调 Dify sql-generator workflow
         dify_run_id: Optional[str] = None
@@ -463,10 +515,15 @@ class AiSqlPreviewService:
                 safety_policy_version=cls.SAFETY_POLICY_VERSION,
                 previewed_at=now,
             )
-            db.add(audit)
-            db.commit()
-            db.refresh(audit)
-            return PreviewResult(audit=audit)
+            return cls._finalize_preview_with_chat_messages(
+                       db,
+                       audit=audit,
+                       session_id=session_id,
+                       user_question=user_question,
+                       client_request_id=client_request_id,
+                       user_id=getattr(requested_by, "id", None),
+                       current_page=current_page,
+                   )
 
         # 6a. 双轨 SQL hash（Dify 原始）
         generated_sql_stripped = generated_sql.strip()
@@ -517,10 +574,15 @@ class AiSqlPreviewService:
                 safety_policy_version=cls.SAFETY_POLICY_VERSION,
                 previewed_at=now,
             )
-            db.add(audit)
-            db.commit()
-            db.refresh(audit)
-            return PreviewResult(audit=audit)
+            return cls._finalize_preview_with_chat_messages(
+                       db,
+                       audit=audit,
+                       session_id=session_id,
+                       user_question=user_question,
+                       client_request_id=client_request_id,
+                       user_id=getattr(requested_by, "id", None),
+                       current_page=current_page,
+                   )
 
         # 6c. AST 通过 → passed audit 落库
         # C13: passed 也合并 code_node_warnings + AST warnings 到 _preview_warnings
@@ -552,10 +614,15 @@ class AiSqlPreviewService:
             execution_status=AiSqlAuditExecutionStatus.NOT_REQUESTED,
         )
         audit._preview_warnings = merged_passed_warnings  # type: ignore[attr-defined]
-        db.add(audit)
-        db.commit()
-        db.refresh(audit)
-        return PreviewResult(audit=audit)
+        return cls._finalize_preview_with_chat_messages(
+                   db,
+                   audit=audit,
+                   session_id=session_id,
+                   user_question=user_question,
+                   client_request_id=client_request_id,
+                   user_id=getattr(requested_by, "id", None),
+                   current_page=current_page,
+               )
 
     # ------------------------------------------------------------------
     # 内部辅助
@@ -943,6 +1010,155 @@ class AiSqlPreviewService:
         audit._preview_errors = errors  # type: ignore[attr-defined]
         audit._preview_warnings = list(warnings or [])  # type: ignore[attr-defined]
         return audit
+
+    # ------------------------------------------------------------------
+    # C16-F2b — 双消息写入 + audit 关联（事务内）
+    # ------------------------------------------------------------------
+    @classmethod
+    def _finalize_preview_with_chat_messages(
+        cls,
+        db: Session,
+        *,
+        audit: AiSqlAudit,
+        session_id: int,
+        user_question: str,
+        client_request_id: UUID,
+        user_id: Optional[Any],
+        current_page: Optional[str],
+    ) -> PreviewResult:
+        """C16-F2b 关键：把 audit 与 user/preview 双消息同事务提交。
+
+        步骤（plan §21.3 C16-3 step 12-13）：
+          1. 创建 user message（role='user'，message_type='chat'，含 client_request_id）
+          2. flush 取 user_message.id
+          3. 创建 preview message（role='assistant'，message_type='sql_preview_link'，
+             parent_message_id=user_msg.id，content 写拒绝原因或 audit_id JSON）
+          4. flush 取 preview_message.id
+          5. 更新 audit.message_id / audit.result_message_id
+          6. db.add(audit) + 提交（user_msg / preview_msg 已 add 但未 commit）
+          7. 更新 session.last_message_at + message_count += 2
+          8. db.commit + db.refresh(audit)
+          9. 返回 PreviewResult
+
+        Notes:
+        - audit 此时可能尚未 add（调用方负责构造，未必 commit）。
+          本方法负责 add+commit，调用方不要再 db.add / db.commit。
+        - rejected 也写 preview_message：P1-3 要求 rejected 卡片也要展示。
+          content 字段写 {audit_id, status, reason} JSON（无 approved_sql）。
+        - passed 时 preview_message.content 写 {audit_id, status, approved_sql_hash} JSON，
+          UI 据此渲染「执行」按钮（plan §21.3 C16-3）。
+        - 事务粒度：user + preview + audit + session 4 张表同事务；失败全部回滚。
+        """
+        # 1. user message
+        user_msg = AiChatMessage(
+            session_id=session_id,
+            user_id=user_id,
+            client_request_id=client_request_id,
+            role="user",
+            message_type="chat",
+            status="completed",
+            content=user_question,
+            metadata_json={
+                "current_page": cls._normalize_current_page(current_page),
+                "instance_id": int(audit.instance_id),
+            },
+            attempt_count=0,
+        )
+        db.add(user_msg)
+        db.flush()
+        user_msg_id = int(user_msg.id)
+
+        # 2. preview message
+        # content 是 JSON 字符串（前端 Chat UI 据此渲染卡片）：
+        #   rejected → {audit_id, status, reason}（无执行按钮）
+        #   passed   → {audit_id, status, approved_sql_hash, schema_snapshot_id, schema_policy_hash}
+        preview_payload: dict[str, Any] = {
+            "audit_id": None,  # 暂留空；audit.id 由 audit.id 设置后回填
+            "preview_safety_status": audit.preview_safety_status,
+            "errors": list(getattr(audit, "_preview_errors", []) or []),
+            "warnings": list(getattr(audit, "_preview_warnings", []) or []),
+        }
+        if audit.preview_safety_status == AiSqlAuditPreviewSafety.PASSED:
+            preview_payload["approved_sql_hash"] = audit.approved_sql_hash
+            preview_payload["schema_snapshot_id"] = audit.schema_snapshot_id
+            preview_payload["schema_policy_hash"] = audit.schema_policy_hash
+            preview_payload["db_type_code"] = audit.db_type_code
+            preview_payload["sql_dialect"] = cls._dialect_for_safe(audit.db_type_code)
+            preview_payload["generated_sql"] = audit.generated_sql
+            preview_payload["approved_sql"] = audit.approved_sql
+        else:
+            preview_payload["reason"] = audit.preview_safety_reason
+
+        preview_msg = AiChatMessage(
+            session_id=session_id,
+            user_id=user_id,
+            client_request_id=None,
+            role="assistant",
+            message_type="sql_preview_link",
+            status="completed",
+            content=json.dumps(preview_payload, ensure_ascii=False),
+            parent_message_id=user_msg_id,
+            metadata_json={
+                "audit_id": None,  # 同上，commit 后回填
+                "preview_safety_status": audit.preview_safety_status,
+            },
+            attempt_count=0,
+        )
+        db.add(preview_msg)
+        db.flush()
+        preview_msg_id = int(preview_msg.id)
+
+        # 3. 关联 audit + 更新 session
+        audit.message_id = user_msg_id
+        audit.result_message_id = preview_msg_id
+
+        # 写回 preview_payload.audit_id（重新序列化 content）
+        try:
+            payload = json.loads(preview_msg.content)
+            payload["audit_id"] = audit.id
+            preview_msg.content = json.dumps(payload, ensure_ascii=False)
+            meta = dict(preview_msg.metadata_json or {})
+            meta["audit_id"] = audit.id
+            preview_msg.metadata_json = meta
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+        # 更新 session 元数据
+        session_obj = (
+            db.query(AiChatSession).filter(AiChatSession.id == session_id).first()
+        )
+        if session_obj is not None:
+            session_obj.last_message_at = cls._utcnow()
+            session_obj.message_count = (session_obj.message_count or 0) + 2
+
+        db.add(audit)
+        db.commit()
+        db.refresh(audit)
+
+        logger.info(
+            "AiSqlPreviewService._finalize_preview_with_chat_messages: "
+            "session_id=%s user_msg_id=%s preview_msg_id=%s audit_id=%s status=%s",
+            session_id, user_msg_id, preview_msg_id, audit.id, audit.preview_safety_status,
+        )
+
+        return PreviewResult(
+            audit=audit,
+            session_id=session_id,
+            user_message_id=user_msg_id,
+            preview_message_id=preview_msg_id,
+            idempotent_replay=False,
+        )
+
+    @staticmethod
+    def _dialect_for_safe(db_type_code: str) -> Optional[str]:
+        """轻量级 dialect 派生（避免导入 AiSchemaContextService 的私有方法）。"""
+        mapping = {
+            "POSTGRESQL": "postgres",
+            "ORACLE": "oracle",
+            "MSSQL": "tsql",
+            "MYSQL": "mysql",
+        }
+        return mapping.get(db_type_code.upper())
 
 
 def compute_sql_hash(sql_text: str) -> str:
