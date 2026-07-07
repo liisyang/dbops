@@ -228,7 +228,7 @@
 | GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:308` |
 | GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}/history` | `api/ai.py` | AiSchemaSnapshotService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:332` |
 | GET | `/api/v1/ai/sql/schema-snapshots/{instance_id}/context` | `api/ai.py` | AiSchemaContextService | JWT | 已实现（Phase 3.6 C10） | `backend/app/api/ai.py:359` |
-| POST | `/api/v1/ai/sql/preview` | `api/ai.py` | AiSqlPreviewService | JWT | 已实现（Phase 3.6 C12-C13） | `backend/app/api/ai.py:384` |
+| POST | `/api/v1/ai/sql/preview` | `api/ai.py` | AiSqlPreviewService | JWT | 已实现（Phase 3.6 C12-C13 + C16-F2b 绑定鉴权 + 幂等 + 双消息写入） | `backend/app/api/ai.py:431` |
 | POST | `/api/v1/ai/sql/execute` | `api/ai.py` | AiSqlExecuteService | JWT | 已实现（Phase 3.6 C14） | `backend/app/api/ai.py:481` |
 | GET | `/api/v1/ai/sql/audit/{audit_id}/execution` | `api/ai.py` | AiSqlExecuteService | JWT | 已实现（Phase 3.6 C14） | `backend/app/api/ai.py:552` |
 | POST | `/api/v1/ai/sql/object-metadata/{instance_id}/collect` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:585` |
@@ -281,6 +281,11 @@
 | `POST /ai/sql/execute` | detail.code | enum | 409 snapshot_policy_mismatch / 422 audit_unsafe_on_execute 时结构化 detail | `backend/app/api/ai.py:514-533` |
 | `GET /ai/sql/audit/{id}/execution` | `result_message_id` | int? | callback 写入的 chat_message id（sql_result 卡片） | `backend/app/api/ai.py:581` |
 | `GET /ai/sql/audit/{id}/execution` | `message_type` | enum? | `sql_result` 表示有 chat_message 卡片渲染 | `backend/app/api/ai.py:582` |
+| `POST /ai/sql/preview` (C16-F2b) | `session_id` | int (必填) | Chat session.id；鉴权 session.user_id + chat_mode='instance_sql' + bound_instance_id 一致 | `backend/app/schemas/ai.py:AiSqlPreviewRequest` |
+| `POST /ai/sql/preview` (C16-F2b) | `client_request_id` | UUID (必填) | 前端生成的 UUID（P0-2 幂等键；partial unique `uq_ai_chat_message_session_client_request_idx` 天然支持） | 同上 |
+| `POST /ai/sql/preview` (C16-F2b) | `user_message_id` | int | ai_chat_message.id（role='user'，message_type='chat'） | `backend/app/schemas/ai.py:AiSqlPreviewResponse` |
+| `POST /ai/sql/preview` (C16-F2b) | `preview_message_id` | int | ai_chat_message.id（role='assistant'，message_type='sql_preview_link'） | 同上 |
+| `POST /ai/sql/preview` (C16-F2b) | `idempotent_replay` | bool | client_request_id 命中已有 user message → 返回原 audit 三元组（不调 Dify） | 同上 |
 
 
 ## 3. 前端 API 封装清单

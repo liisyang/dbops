@@ -2212,6 +2212,37 @@ reason         — str，生成决策原因
 
 ---
 
+##### C16-3 实施记录 — C16-F2b 已闭环（2026-07-07）
+
+3 commit 闭环（dbops HEAD `c6e4e0c...` 后续 + `babe687` + `54b122d`）：
+
+| Commit | 内容 | 影响 |
+|---|---|---|
+| `babe687` | Schemas + Service 鉴权链 + 异常类型 | `AiSqlPreviewRequest` 加 `session_id`(必填) + `client_request_id`(必填) 移除 `message_id`；`AiSqlPreviewResponse` 加 `session_id/user_message_id/preview_message_id/idempotent_replay`；preview() 签名加 `client_request_id`；`_auth_check_session_for_preview` 4 步鉴权链；5 类新异常（`ChatSessionNotFoundErrorPreview` / `ChatSessionForbiddenErrorPreview` / `ChatModeNotInstanceSqlError` / `ChatImmutableViolationErrorPreview` / `PreviewIncompleteRetryRequiredError`）；`AiChatService.get_session_for_user` helper |
+| `54b122d` | API 端点映射 + Service 幂等分支 + 双消息写入事务 | step 2.5 幂等检查（client_request_id 命中已有 user_message → 返回原三元组 + `idempotent_replay=True`；audit 缺失 → 409）；`_finalize_preview_with_chat_messages` helper（user + preview sql_preview_link + audit 同事务 + session.message_count += 2）；`api/ai.py` 5 类异常 HTTP 映射（404/403/422/409）；`PreviewResult` 扩 4 字段；rejected 也写 preview_message 卡片（P1-3） |
+| 后续 commit | 测试 + 文档 + memory 收尾 | `tests/test_ai_sql_preview_c16_f2b.py` 14 cases（5 鉴权链 / 3 幂等 / 4 双消息写入 / 1 响应字段 / 1 兜底）；4 docs 同步（`40-tech-debt.md` F15 / `10-module-map.md` §2 / `contracts/api-inventory.md` §2.16 / `30-runbook.md` §8.7 6 排障行）；memory + MEMORY.md 指针 |
+
+**关键设计决策（实施中验证）**：
+
+1. **session ownership 统一 404 隔离** — `_auth_check_session_for_preview` step 1.5 把 session 不存在 vs 不属于当前用户统一返回 `ChatSessionNotFoundErrorPreview` (404)，避免泄露「会话存在但属于他人」；`ChatSessionForbiddenErrorPreview` 类保留作为防御性兜底（当前不会抛）。
+2. **5 类新异常不复用 chat service 同名异常** — preview service 与 chat service 保持低耦合；命名以 `Preview` 后缀明确区分。
+3. **`PreviewResult` 数据类扩展 4 字段** — `session_id` / `user_message_id` / `preview_message_id` / `idempotent_replay`，向后兼容旧字段。
+4. **幂等命中不重写 preview_message** — 直接返回原 `preview_message_id`；前端用 `idempotent_replay=true` 提示用户「已使用缓存结果」。
+5. **rejected 也写双消息（P1-3 落地）** — preview_message.content 写 `{audit_id, status, reason}` JSON（无 approved_sql/execute 按钮）。
+6. **双消息事务** — `db.flush() × 2` 取 id → 关联 audit.message_id + result_message_id → commit；与 C14 `AiSqlCallbackService` 同模式。
+7. **`_dialect_for_safe` 私有映射** — 避免 preview service 依赖 `AiSchemaContextService` 私有方法。
+
+**Live E2E 验收**（dev 库 PG 实例 id=965）：
+- 创建 instance_sql session + 首次 Preview → audit + user + preview 三元组写入
+- 同 `client_request_id` 重复 → 三元组一致 + `idempotent_replay=true`（不调 Dify）
+- DB 直查验证（plan §21.3 幂等验收 SQL）：user_msg + preview_msg + audit_id 单行
+- `instance_id=999` 越界 → 422 `chat_immutable_violation`
+- general 模式 session → 422 `chat_mode_not_instance_sql`
+
+**下轮起手**：C16-F2c `Chat.vue` boundInstanceId 模式分流 + `SqlPreview.vue` 重构（plan §21.3 C16-4）。
+
+---
+
 #### C16-4：Chat.vue boundInstanceId 前端重构（NEW）
 
 目标：资产实例详情进入 Chat 后，用户只看到自然语言交互和 SQL 卡片，不需要跳转到独立预览页。
