@@ -48,6 +48,7 @@ from app.services.ai.ai_sql_execute_service import (
     AuditAlreadyRunningError,
     AuditNotFoundError,
     AuditNotPassedError,
+    AuditOwnershipError,
     AuditUnsafeOnExecuteError,
     AwxLaunchError,
     FeatureDisabledError,
@@ -282,6 +283,8 @@ def _make_audit(
     schema_snapshot_id: Optional[int] = 1,
     schema_policy_hash: Optional[str] = None,
     approved_sql_hash: Optional[str] = None,
+    user_id: Optional[Any] = None,
+    session_id: Optional[int] = None,
 ) -> AiSqlAudit:
     if schema_policy_hash is None:
         schema_policy_hash = "a" * 64
@@ -292,6 +295,8 @@ def _make_audit(
         instance_id=instance_id,
         db_type_code=db_type_code,
         user_question="q",
+        user_id=user_id,
+        session_id=session_id,
         generated_sql=approved_sql,
         generated_sql_hash=approved_sql_hash,
         approved_sql=approved_sql,
@@ -308,6 +313,14 @@ def _make_audit(
     )
     audit.id = audit_id
     return audit
+
+
+@dataclass
+class _FakeRequester:
+    """请求者：模拟 current_user（带 id 字段）。"""
+
+    id: Any
+    username: str = "tester"
 
 
 def _patch_settings(monkeypatch, *, exec_enabled: bool = True):
@@ -721,3 +734,315 @@ class TestAwxJobIdBackfill:
         # launch 未返回 awx_job_id 时，跳过回填分支
         assert result.audit.awx_job_id is None
         assert audit.awx_job_id is None
+
+
+# ---------------------------------------------------------------------------
+# 10. C16-5 P0-4 — ownership 校验
+# ---------------------------------------------------------------------------
+class TestAuditOwnership:
+    """C16-5 P0-4：audit.user_id / session.user_id 与 requested_by 不匹配 → 403。
+
+    覆盖：
+    - user 不匹配 → AuditOwnershipError
+    - session 不匹配 → AuditOwnershipError
+    - audit.user_id 匹配，无 session → 放行
+    """
+
+    def test_user_mismatch_raises_403(self, monkeypatch):
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        owner_uuid = "11111111-1111-1111-1111-111111111111"
+        requester_uuid = "22222222-2222-2222-2222-222222222222"
+        db = _FakeSession()
+        audit = _make_audit(
+            schema_snapshot_id=1,
+            audit_id=400,
+            user_id=owner_uuid,
+        )
+        snap = _make_snapshot(snapshot_id=1)
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+
+        requester = _FakeRequester(id=requester_uuid)
+        with pytest.raises(AuditOwnershipError) as exc_info:
+            AiSqlExecuteService.execute(
+                db, audit_id=audit.id, force=False, requested_by=requester,
+            )
+        assert "user_id" in str(exc_info.value)
+        assert "1111" in str(exc_info.value)  # owner uuid (truncated)
+        assert "2222" in str(exc_info.value)  # requester uuid (truncated)
+
+    def test_session_mismatch_raises_403(self, monkeypatch):
+        """audit.user_id=None 但 session.user_id 与 requested_by 不匹配 → 403。"""
+        from app.models.ai import AiChatSession
+
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        owner_uuid = "33333333-3333-3333-3333-333333333333"
+        requester_uuid = "44444444-4444-4444-4444-444444444444"
+        db = _FakeSession()
+        audit = _make_audit(
+            schema_snapshot_id=1,
+            audit_id=500,
+            user_id=None,  # 无直接归属，依赖 session.user_id
+            session_id=10,
+        )
+        snap = _make_snapshot(snapshot_id=1)
+        chat_session = AiChatSession(id=10, user_id=owner_uuid)
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        db.store["AiChatSession"] = [chat_session]
+
+        requester = _FakeRequester(id=requester_uuid)
+        with pytest.raises(AuditOwnershipError) as exc_info:
+            AiSqlExecuteService.execute(
+                db, audit_id=audit.id, force=False, requested_by=requester,
+            )
+        assert "session" in str(exc_info.value).lower()
+
+    def test_owner_passes_through(self, monkeypatch):
+        """audit.user_id 与 requested_by.id 一致 → 正常执行不抛 AuditOwnershipError。"""
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch, awx_job_id=999)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        owner_uuid = "55555555-5555-5555-5555-555555555555"
+        db = _FakeSession()
+        audit = _make_audit(
+            schema_snapshot_id=1,
+            audit_id=600,
+            user_id=owner_uuid,
+        )
+        snap = _make_snapshot(snapshot_id=1)
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        requester = _FakeRequester(id=owner_uuid)
+        result = AiSqlExecuteService.execute(
+            db, audit_id=audit.id, force=False, requested_by=requester,
+        )
+        assert result.audit.execution_status == AiSqlAuditExecutionStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# 11. C16-5 P0-4 — PENDING 中间态
+# ---------------------------------------------------------------------------
+class TestPendingState:
+    """C16-5 P0-4：audit 在 AWX launch 之前先写 PENDING，launch 成功后升 RUNNING。
+
+    覆盖：
+    - flush 期间 audit.execution_status == PENDING（中间态可见）
+    - launch 失败时 PENDING 被 FAILED 覆盖（终态推进）
+    - force=true 跳过 pending/running 校验，状态机重新走 pending → running
+    """
+
+    def test_audit_marked_pending_before_launch(self, monkeypatch):
+        """audit.execution_status 在 launch 之前的 flush 期间等于 PENDING。"""
+        _patch_settings(monkeypatch)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        # 包装 db.flush 捕获 audit 状态
+        captured_states: list[str] = []
+        db = _FakeSession()
+        original_flush = db.flush
+
+        def wrapped_flush() -> None:
+            original_flush()
+            # flush 后再读取 audit 状态（保证 ORM 已 sync）
+            audit_list = db.store.get("AiSqlAudit", [])
+            if audit_list:
+                captured_states.append(audit_list[0].execution_status)
+
+        db.flush = wrapped_flush  # type: ignore[method-assign]
+
+        # launch 也要执行（PENDING 已经写入）
+        _patch_awx_launch(monkeypatch, awx_job_id=700)
+
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(schema_snapshot_id=1, audit_id=700)
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        result = AiSqlExecuteService.execute(db, audit_id=audit.id, force=False)
+        # 中间态：在某个 flush 时点必须是 PENDING（launch 前）
+        assert AiSqlAuditExecutionStatus.PENDING in captured_states
+        # 终态：commit 后必须是 RUNNING
+        assert result.audit.execution_status == AiSqlAuditExecutionStatus.RUNNING
+
+    def test_failed_state_overrides_pending_on_launch_failure(self, monkeypatch):
+        """AWX launch 抛异常 → PENDING 被 FAILED 覆盖（终态推进）。"""
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(
+            monkeypatch,
+            raise_exc=AwxServiceError("AWX 503 unreachable"),
+        )
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        db = _FakeSession()
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(schema_snapshot_id=1, audit_id=800)
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        with pytest.raises(AwxLaunchError):
+            AiSqlExecuteService.execute(db, audit_id=audit.id, force=False)
+        # 终态：FAILED（覆盖 PENDING 中间态）
+        assert audit.execution_status == AiSqlAuditExecutionStatus.FAILED
+        assert "AWX launch failed" in (audit.error_message or "")
+
+    def test_force_rerun_walks_state_machine_again(self, monkeypatch):
+        """audit 已在 running 状态时，force=true 触发完整状态机重走：running → pending → running。"""
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch, awx_job_id=1100)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        captured_transitions: list[str] = []
+        db = _FakeSession()
+        original_flush = db.flush
+
+        def wrapped_flush() -> None:
+            audit_list = db.store.get("AiSqlAudit", [])
+            if audit_list:
+                captured_transitions.append(audit_list[0].execution_status)
+            return original_flush()
+
+        db.flush = wrapped_flush  # type: ignore[method-assign]
+
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(
+            schema_snapshot_id=1,
+            audit_id=900,
+            exec_status=AiSqlAuditExecutionStatus.RUNNING,  # 已 running
+        )
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        result = AiSqlExecuteService.execute(db, audit_id=audit.id, force=True)
+        # capture 序列解读（audit 初始 RUNNING，因为 force 重跑已有 running 审计）：
+        #   - flush #1: RUNNING (initial, unchanged)
+        #   - flush #2: RUNNING (still unchanged)
+        #   - line 464 写入 PENDING + flush #3: PENDING (中间态)
+        #   - line 522 写入 RUNNING + commit: 终态 RUNNING
+        # 重要：PENDING 必须出现，且不作为首个捕获点（证明它是中间过渡态）。
+        pending_indices = [
+            i for i, s in enumerate(captured_transitions)
+            if s == AiSqlAuditExecutionStatus.PENDING
+        ]
+        assert pending_indices, f"PENDING not in transitions: {captured_transitions}"
+        # PENDING 必须出现在 flush #1 之后（不能是首个，因为首个捕获的是原状态）
+        assert pending_indices[0] > 0, (
+            f"PENDING must be intermediate, not first: {captured_transitions}"
+        )
+        # commit 后终态仍是 RUNNING（force 重新走完整个状态机后保持 RUNNING）
+        assert result.audit.execution_status == AiSqlAuditExecutionStatus.RUNNING
+
+
+# ---------------------------------------------------------------------------
+# 12. C16-5 P0-4 — 状态机转换
+# ---------------------------------------------------------------------------
+class TestStateMachineTransition:
+    """C16-5 P0-4：完整状态机 not_requested → pending → running → {success,failed}。
+
+    覆盖：
+    - not_requested → pending → running 成功路径
+    - pending → failed 失败路径
+    """
+
+    def test_state_machine_pending_to_running_success(self, monkeypatch):
+        """完整状态机：not_requested → pending（中间） → running（终态）。"""
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(monkeypatch, awx_job_id=1200)
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        captured: list[str] = []
+        db = _FakeSession()
+        original_flush = db.flush
+
+        def wrapped_flush() -> None:
+            audit_list = db.store.get("AiSqlAudit", [])
+            if audit_list:
+                captured.append(audit_list[0].execution_status)
+            return original_flush()
+
+        db.flush = wrapped_flush  # type: ignore[method-assign]
+
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(
+            schema_snapshot_id=1,
+            audit_id=1100,
+            exec_status=AiSqlAuditExecutionStatus.NOT_REQUESTED,
+        )
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        result = AiSqlExecuteService.execute(db, audit_id=audit.id, force=False)
+        # capture 序列解读（audit 初始 NOT_REQUESTED）：
+        #   - flush #1: NOT_REQUESTED (initial)
+        #   - flush #2: NOT_REQUESTED
+        #   - line 464 写入 PENDING + flush #3: PENDING (中间态)
+        #   - line 522 写入 RUNNING + commit: 终态 RUNNING
+        assert AiSqlAuditExecutionStatus.PENDING in captured, (
+            f"PENDING should be in transitions: {captured}"
+        )
+        # PENDING 必须出现在 NOT_REQUESTED 之后（不能是首个）
+        pending_idx = captured.index(AiSqlAuditExecutionStatus.PENDING)
+        assert pending_idx > 0, (
+            f"PENDING must be intermediate (idx > 0): {captured}"
+        )
+        # 终态：commit 后是 RUNNING
+        assert result.audit.execution_status == AiSqlAuditExecutionStatus.RUNNING
+
+    def test_state_machine_pending_to_failed_on_launch_error(self, monkeypatch):
+        """完整状态机：not_requested → pending（中间） → failed（终态，AWX 抛错）。"""
+        _patch_settings(monkeypatch)
+        _patch_awx_launch(
+            monkeypatch,
+            raise_exc=AwxServiceError("network timeout"),
+        )
+        _patch_credential_resolver(monkeypatch)
+        _patch_safety(monkeypatch)
+
+        captured: list[str] = []
+        db = _FakeSession()
+        original_flush = db.flush
+
+        def wrapped_flush() -> None:
+            audit_list = db.store.get("AiSqlAudit", [])
+            if audit_list:
+                captured.append(audit_list[0].execution_status)
+            return original_flush()
+
+        db.flush = wrapped_flush  # type: ignore[method-assign]
+
+        snap = _make_snapshot(snapshot_id=1)
+        audit = _make_audit(
+            schema_snapshot_id=1,
+            audit_id=1200,
+            exec_status=AiSqlAuditExecutionStatus.NOT_REQUESTED,
+        )
+        db.store["AiSqlAudit"] = [audit]
+        db.store["AiSchemaSnapshot"] = [snap]
+        _inject_target(db, audit)
+
+        with pytest.raises(AwxLaunchError):
+            AiSqlExecuteService.execute(db, audit_id=audit.id, force=False)
+        # 中间：PENDING（launch 前）
+        assert AiSqlAuditExecutionStatus.PENDING in captured
+        # 终态：FAILED（覆盖 PENDING）
+        assert audit.execution_status == AiSqlAuditExecutionStatus.FAILED

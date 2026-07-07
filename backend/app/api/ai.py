@@ -67,6 +67,7 @@ from app.services.ai.ai_sql_execute_service import (
     AuditAlreadyRunningError,
     AuditNotFoundError,
     AuditNotPassedError,
+    AuditOwnershipError,
     AuditUnsafeOnExecuteError,
     AwxLaunchError as AiSqlAwxLaunchError,
     FeatureDisabledError as AiSqlFeatureDisabledError,
@@ -593,7 +594,8 @@ def execute_sql(
     approved_sql。Callback 通过 ``business_domain='ai_sql'`` 路由到
     ``AiSqlCallbackService`` 落 ai_sql_audit + 写 ai_chat_message(sql_result)。
 
-    错误码（plan §11）：
+    错误码（plan §11 + C16-5 P0-4）：
+    - 403 — AuditOwnershipError（audit.user_id / session.user_id 与 current_user 不匹配）
     - 404 — audit_id 不存在
     - 409 — audit.preview_safety_status != 'passed' / snapshot 不一致 /
       execution_status IN ('pending','running') 且未 force
@@ -610,6 +612,15 @@ def execute_sql(
         )
     except AuditNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except AuditOwnershipError as exc:
+        # 403 — C16-5 P0-4：audit 不属于当前用户
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "audit_ownership_error",
+                "message": str(exc),
+            },
+        )
     except SnapshotPolicyMismatchError as exc:
         # 409 + 结构化 code/reason（前端可分支渲染）
         raise HTTPException(

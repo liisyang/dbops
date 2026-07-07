@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.ai import (
+    AiChatSession,
     AiSchemaSnapshot,
     AiSqlAudit,
     AiSqlAuditExecutionSafety,
@@ -117,6 +118,17 @@ class AwxLaunchError(AiSqlExecuteError):
     """AWX launch 失败（audit 已标记 failed）→ 502。"""
 
 
+class AuditOwnershipError(AiSqlExecuteError):
+    """audit 不属于 requested_by → 403。
+
+    检查两步（plan §21.3 C16-5 P0-4）：
+    1. audit.user_id != requested_by.id
+    2. audit.session.user_id != requested_by.id（当 session 存在时）
+
+    任一不匹配都抛此异常；防止用户在错误上下文里触发别人 audit 的 Execute。
+    """
+
+
 # =============================================================================
 # Service 返回类型
 # =============================================================================
@@ -169,6 +181,7 @@ class AiSqlExecuteService:
 
         Raises:
             AuditNotFoundError: audit_id 不存在 → 404
+            AuditOwnershipError: audit.user_id / session.user_id 与 requested_by 不匹配 → 403
             AuditNotPassedError: preview_safety_status != 'passed' → 409
             SnapshotPolicyMismatchError: snapshot 不一致 → 409
             AuditUnsafeOnExecuteError: AST 二次校验失败 → 422
@@ -191,6 +204,41 @@ class AiSqlExecuteService:
         )
         if audit is None:
             raise AuditNotFoundError(f"ai_sql_audit id={audit_id} not found")
+
+        # step 1.5 — ownership 校验（C16-5 P0-4，plan §21.3）
+        # 防止用户在错误上下文里触发别人 audit 的 Execute；
+        # 当 requested_by 为 None（内部调用）时跳过此校验。
+        # 检查两层：audit.user_id 直接归属 + audit.session.user_id 间接归属
+        # （session 与 audit 同源时可兜底）。
+        if requested_by is not None:
+            requester_id = getattr(requested_by, "id", None)
+            audit_owner_id = getattr(audit, "user_id", None)
+            if (
+                audit_owner_id is not None
+                and requester_id is not None
+                and audit_owner_id != requester_id
+            ):
+                raise AuditOwnershipError(
+                    f"audit {audit_id} user_id={audit_owner_id} != "
+                    f"requester id={requester_id}"
+                )
+            if audit.session_id is not None:
+                chat_session = (
+                    db.query(AiChatSession)
+                    .filter(AiChatSession.id == int(audit.session_id))
+                    .first()
+                )
+                if chat_session is not None:
+                    session_owner_id = getattr(chat_session, "user_id", None)
+                    if (
+                        session_owner_id is not None
+                        and requester_id is not None
+                        and session_owner_id != requester_id
+                    ):
+                        raise AuditOwnershipError(
+                            f"audit {audit_id} session {audit.session_id} "
+                            f"user_id={session_owner_id} != requester id={requester_id}"
+                        )
 
         if audit.preview_safety_status != AiSqlAuditPreviewSafety.PASSED:
             raise AuditNotPassedError(
@@ -408,9 +456,12 @@ class AiSqlExecuteService:
         db.add(run_item)
         db.flush()
 
-        # 5. 条件 UPDATE audit → 'running'（plan §19 P0-6）
+        # 5. 条件 UPDATE audit → 'pending'（C16-5 P0-4，plan §21.4 标准 #5）
+        # PENDING 是 launch 之前的中间态：audit 行已绑定 collector_run，但
+        # AWX 任务尚未启动（或正在启动中）。callback 端用
+        # ``WHERE execution_status IN ('pending','running')`` 兜底匹配。
         now = cls._utcnow()
-        audit.execution_status = AiSqlAuditExecutionStatus.RUNNING
+        audit.execution_status = AiSqlAuditExecutionStatus.PENDING
         audit.collector_run_id = int(run.id)
         audit.collector_run_item_id = int(run_item.id)
         audit.executed_at = now
@@ -466,6 +517,9 @@ class AiSqlExecuteService:
                 # 重试已写入的值（与 DB IS NULL guard 语义对齐）。
                 if audit.awx_job_id is None:
                     audit.awx_job_id = int(awx_job_id)
+            # C16-5 P0-4：launch 成功后升级 PENDING → RUNNING（plan §21.4 标准 #5）。
+            # 在 db.commit() 前显式写回 ORM，确保落库状态为 RUNNING。
+            audit.execution_status = AiSqlAuditExecutionStatus.RUNNING
             db.commit()
         except AwxServiceError as exc:
             logger.warning(
