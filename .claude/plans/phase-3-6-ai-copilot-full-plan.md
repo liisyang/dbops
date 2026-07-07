@@ -879,6 +879,212 @@ psql -h 10.134.185.85 -U dbops -d dbops -f \
 
 ---
 
+## 4B. Schema/Object Snapshot 三方言合并（Phase 3.6B0 C16-F0 增量）
+
+> **设计动机**：C8 Schema Snapshot + C16-F3 Object Metadata Snapshot 首版均仅 PostgreSQL；C16-F0 任务要求扩展到 PostgreSQL + Oracle + SQL Server（MySQL 暂不实现，按 §4.8 范围）。
+> **状态**：C16-F0 commit 1（DDL/Builder/运行时层）已完成并推送；commit 2（测试 + 文档 + 记忆 + 验证）待新会话执行。
+
+### 4B.1 目标
+
+将 Schema Snapshot（C8，4 端点）+ Object Metadata Snapshot（C16-F3，4 端点）的 SQL 模板从 PostgreSQL 扩展到 PG + Oracle + SQL Server 三方言支持，**DDL 不变**（CHECK 约束本就含 4 个方言），仅补 SQL 模板文件 + Builder 分发 + Ansible assertion。
+
+### 4B.2 设计原则
+
+| 原则 | 落地 | 理由 |
+|---|---|---|
+| 后端 Builder 派发 | `_AiSchemaMetadataBuilder` / `_AiObjectMetadataBuilder` 共用 `_SQL_TEMPLATE_MAP` + `_load_sql_template` 统一入口 | 单点维护；新增方言 = 加 SQL 模板文件 + 加 map 项 |
+| SQL 模板内联 | 模板 `app/services/ai/sql_templates/<dialect>/<name>.sql` 物理文件 | 与 C8/C16-F3 一致；ansible-playbooks 端不重复存 SQL |
+| Ansible 端不存 SQL | 模板只由 backend 加载并通过 `rule_config.sql_text` 透传到 EE | EE 端执行与 backend 验证字节一致 |
+| DDL 不变 | `CHECK (db_type_code IN ('POSTGRESQL','ORACLE','MSSQL','MYSQL'))` 已就位 | 不需新迁移；db_type_code 在 builder 入口 normalize 为大写 |
+| db_type_code 接受值 | lowercase：`postgresql`/`postgres`/`oracle`/`mssql`/`sqlserver` | 与 C8 一致（pg → POSTGRESQL） |
+| 不支持的方言 | 422 `UNSUPPORTED_DB_TYPE`（mysql/redis/mongodb/...） | 业务层校验；与 C8/C16-F3 同模式 |
+| 无凭证 | 422 `CREDENTIAL_MISSING` | 与 C8/C16-F3 同模式 |
+| MySQL 暂不实现 | `_SQL_TEMPLATE_MAP` 不含 `mysql` 键 → 直接 422 | 按 plan §4.8 + capabilities `sql_supported_db_types` |
+| Ansible assertion | 5 个 dialect 接受值列表 `['postgresql', 'postgres', 'oracle', 'mssql', 'sqlserver']` | EE 端 pre-flight 校验，fail msg 显式提示 C16-F0 三方言 |
+| 测距目标 | 4 端点 × 3 方言 = 12 happy path，1MB/8000 字符截断边界，UNSUPPORTED_DB_TYPE 错误码 | 84 unit tests（builder 36+36 + 12 边界/parametrize） |
+
+### 4B.3 SQL 模板结构（4 个新模板）
+
+#### 4B.3.1 Oracle Schema Columns（`ora_schema_columns.sql`）
+
+6 列 `table_schema, table_name, column_name, data_type, is_nullable, ordinal_position`，从 `all_tab_columns` 查（information_schema 风格 schema_name 字段名）。系统 schema 黑名单：`SYS/SYSTEM/XDB/CTXSYS/MDSYS/OLAPSYS/ORDDATA/WMSYS/APEX_*` / `FLOWS_*`。`is_nullable` 用 `CASE WHEN nullable='Y' THEN 'YES' ELSE 'NO' END` 转换。
+
+#### 4B.3.2 Oracle Object Metadata（`ora_object_metadata.sql`）
+
+5 列 `object_type, schema_name, object_name, ddl_text, comment` × 6 UNION ALL segment：
+1. **table** — `all_tab_columns` + `XMLAGG` 重建 DDL（避免 `DBMS_METADATA.GET_DDL` 的 `SELECT_CATALOG_ROLE` 依赖）
+2. **view** — `all_views.TEXT`（view DDL 全文）
+3. **materialized_view** — `all_mviews` + `DBMS_METADATA.GET_DDL`（无 `SELECT_CATALOG_ROLE` 也可）
+4. **index** — `all_indexes` + `all_ind_columns`
+5. **function / procedure** — `all_objects` + `all_source.LINE`/`all_source.TEXT` 重构 PL/SQL
+6. **constraint** — `all_constraints` + `all_cons_columns`
+
+每 segment 各自带 `WHERE owner NOT IN (...)` 黑名单。
+
+#### 4B.3.3 SQL Server Schema Columns（`mssql_schema_columns.sql`）
+
+6 列同 PG 模板，从 `sys.columns` + `sys.objects`（type IN 'U','V'）+ `sys.types` 查。`is_nullable` 用 `CASE WHEN c.is_nullable=1 THEN 'YES' ELSE 'NO' END` 转换。schema 过滤：排除 `sys`、`INFORMATION_SCHEMA`、`guest` 三个系统 schema。
+
+#### 4B.3.4 SQL Server Object Metadata（`mssql_object_metadata.sql`）
+
+5 列同 PG 模板 × 9 UNION ALL segment：
+1. **table** — `sys.columns` + `STRING_AGG` 重建 DDL（绕过 TEXT/IMAGE 限制）
+2. **view** — `sys.views` + `OBJECT_DEFINITION()`
+3. **index** — `sys.indexes` + `sys.index_columns`
+4. **function** — `sys.objects` type='FN' + `OBJECT_DEFINITION()`
+5. **procedure** — `sys.objects` type='P' + `OBJECT_DEFINITION()`
+6-9. **4 类 constraint** — `sys.key_constraints` / `sys.foreign_keys` / `sys.check_constraints` / `sys.default_constraints` + `OBJECT_DEFINITION()`
+
+6 处用 `OBJECT_DEFINITION()`，对加密对象（`WITH ENCRYPTION`）/ 无 `VIEW DEFINITION` 返回 NULL → 落 `object_ddl_text=NULL`（callback 标记）。
+
+### 4B.4 Builder 重构（`check_item_builder_registry.py`）
+
+#### 4B.4.1 共用接口
+
+```python
+class _AiSchemaMetadataBuilder / _AiObjectMetadataBuilder:
+    _SUPPORTED_DB_TYPES = frozenset({
+        "postgresql", "postgres", "oracle", "mssql", "sqlserver",
+    })
+    _SQL_TEMPLATE_MAP: dict[str, tuple[str, str]] = {
+        "postgresql": ("postgresql", "pg_schema_columns.sql"),
+        "postgres":   ("postgresql", "pg_schema_columns.sql"),
+        "oracle":     ("oracle",     "ora_schema_columns.sql"),
+        "mssql":      ("mssql",      "mssql_schema_columns.sql"),
+        "sqlserver":  ("mssql",      "mssql_schema_columns.sql"),
+    }
+
+    @classmethod
+    def _load_sql_template(cls, db_type_code: str) -> tuple[str, str]:
+        """返回 (sql_text, source_tag) 供 builder 入口调用"""
+        normalized = db_type_code.strip().lower()
+        if normalized not in cls._SUPPORTED_DB_TYPES:
+            raise UnsupportedDbTypeError(...)
+        if normalized not in cls._SQL_TEMPLATE_MAP:
+            raise UnsupportedDbTypeError(...)  # mysql 暂不实现
+        dialect, filename = cls._SQL_TEMPLATE_MAP[normalized]
+        sql_text = importlib.resources.files("app.services.ai.sql_templates") \
+            .joinpath(dialect, filename).read_text(encoding="utf-8")
+        return sql_text, f"dbops.ai.sql_templates.{dialect}.{filename[:-4]}"
+```
+
+#### 4B.4.2 Builder 入口（伪代码）
+
+```python
+def build(self, db_type_code: str, ...) -> dict:
+    sql_text, source_tag = self._load_sql_template(db_type_code)
+    return {
+        "check_code": "DB_SCHEMA_METADATA_COLLECTION",  # 或 "DB_OBJECT_METADATA"
+        "executor_type": "db_sql_readonly",
+        "rule_config": {
+            "sql_text": sql_text,
+            "timeout_seconds": 60,
+            "max_rows": 10000,
+            "max_bytes": 10485760,  # 10MB schema / 1048576 1MB object
+            "source": source_tag,
+            "phase": "3.6B0.F0",  # 或 "3.6B0.F3"
+        },
+    }
+```
+
+### 4B.5 collector_service 注册修复（C16-F3 漏注册 bug）
+
+`backend/app/services/collector_service.py` 修 C16-F3 漏注册 bug：
+
+```python
+# _check_definition_defaults（line 188-194）
+_DEFAULT_TASK_TYPE_REGISTRY["DB_OBJECT_METADATA"] = TaskType.AI_OBJECT_METADATA
+
+# reachability gating set（line 1671）
+_REACHABILITY_GATED_CHECKS = frozenset({
+    "DB_SCHEMA_METADATA_COLLECTION",
+    "DB_OBJECT_METADATA",  # 修 C16-F3 漏注册
+})
+```
+
+**影响**：C16-F3 commit 2 已合并，但 `_check_definition_defaults` 没注册 → `DB_OBJECT_METADATA` 会 fallthrough 到 `PORT_CHECK` 默认 → collector 跳过 instance-level reachability 检查。本次 commit 修。
+
+### 4B.6 ansible-playbooks 端（2 个 role 同步）
+
+```yaml
+# ansible-playbooks/playbooks/roles/db_schema_metadata_collect/tasks/main.yml
+# ansible-playbooks/playbooks/roles/db_object_metadata_collect/tasks/main.yml
+- name: Validate ... item fields
+  ansible.builtin.assert:
+    that:
+      ...
+      - collector_item.db_type_code is defined
+      - collector_item.db_type_code | lower in ['postgresql', 'postgres', 'oracle', 'mssql', 'sqlserver']
+    fail_msg: "DB_OBJECT_METADATA item missing required fields or invalid values (Phase 3.6B0 §4B C16-F0: only postgresql/oracle/mssql supported)."
+```
+
+### 4B.7 API 端点（8 端点全支持新 3 方言）
+
+| 端点 | 现有支持 | C16-F0 后 |
+|---|---|---|
+| `POST /ai/sql/schema-snapshots/{id}/collect` | PG only | PG + Oracle + MSSQL（`db_type_code` 决定派发） |
+| `GET /ai/sql/schema-snapshots/{id}` | PG only | 同上 |
+| `GET /ai/sql/schema-snapshots/{id}/history` | PG only | 同上 |
+| `GET /ai/sql/schema-snapshots/{id}/context` | PG only | 同上 |
+| `POST /ai/sql/object-metadata/{id}/collect` | PG only（C16-F3） | PG + Oracle + MSSQL |
+| `GET /ai/sql/object-metadata/{id}` | PG only（C16-F3） | 同上 |
+| `GET /ai/sql/object-metadata/{id}/history` | PG only（C16-F3） | 同上 |
+| `GET /ai/sql/object-metadata/{id}/context` | PG only（C16-F3） | 同上 |
+
+异常映射保持不变（与 C8/C16-F3 同模式）：404 / 409 / 422（`UNSUPPORTED_DB_TYPE` / `CREDENTIAL_MISSING`）/ 502 / 503 / 504。
+
+### 4B.8 关键设计决策
+
+| 决策 | 选择 | 理由 |
+|---|---|---|
+| 编号 | docs §7 F-list 追加 **F0**（放在 F13 之后） | F13 编号已被 Object Metadata 首版占用；F0 标记"三方言合并"专项 |
+| 提交方式 | 拆 2 commit（DDL/Builder/Ansible/collector + 测试/文档/记忆） | 避免单 commit ~5000 行风险 |
+| Oracle 系统 schema 黑名单 | `SYS/SYSTEM/XDB/CTXSYS/MDSYS/OLAPSYS/ORDDATA/WMSYS/APEX_*` / `FLOWS_*` | Oracle 12c+ 默认系统 schema；业务 schema 不混 |
+| Oracle table DDL 重建 | `XMLAGG/XMLELEMENT` 而非 `DBMS_METADATA.GET_DDL` | 避免 `SELECT_CATALOG_ROLE` 依赖；app 账号可跑 |
+| MSSQL OBJECT_DEFINITION 加密 NULL | 6 处用 `OBJECT_DEFINITION`；NULL 落 `object_ddl_text=NULL` | 与 PG/Oracle segment 内 NULL 一致；callback 不强制非 NULL |
+| MSSQL schema 过滤 | 排除 `sys`/`INFORMATION_SCHEMA`/`guest` | SQL Server 系统 schema 必排除 |
+| MySQL 暂不实现 | `_SQL_TEMPLATE_MAP` 不含 `mysql` 键 → 422 | 按 plan §4.8 + capabilities `sql_supported_db_types` 显式延后 |
+| 测距 | 84 unit tests：builder 36+36 + 12 边界/parametrize | 覆盖 5 dialect × 2 builder × happy/sad/parametrize |
+| live E2E | dev 库 PG `10.134.185.228` id=965 已就绪；Oracle/MSSQL 待 dev 库注册后跑 | 与 C16-F1 同一 dev 库 PG 实例就绪机制 |
+| DDL 不变 | 不需新迁移 | CHECK 约束本就含 4 个方言 |
+
+### 4B.9 需新增/修改的文件
+
+| 类型 | 路径 | 状态 |
+|---|---|---|
+| NEW | `backend/app/services/ai/sql_templates/oracle/ora_schema_columns.sql` | ✅ |
+| NEW | `backend/app/services/ai/sql_templates/oracle/ora_object_metadata.sql` | ✅ |
+| NEW | `backend/app/services/ai/sql_templates/mssql/mssql_schema_columns.sql` | ✅ |
+| NEW | `backend/app/services/ai/sql_templates/mssql/mssql_object_metadata.sql` | ✅ |
+| MOD | `backend/app/services/check_item_builder_registry.py` | ✅（`_AiSchemaMetadataBuilder` + `_AiObjectMetadataBuilder` 重构） |
+| MOD | `backend/app/services/collector_service.py` | ✅（修 C16-F3 漏注册：`DB_OBJECT_METADATA` 加 `_check_definition_defaults` + reachability gating set） |
+| MOD | `backend/tests/test_ai_schema_metadata_builder.py` | ✅（36+ cases 覆盖 5 dialect） |
+| MOD | `backend/tests/test_ai_object_metadata_builder.py` | ✅（36+ cases 覆盖 5 dialect） |
+| MOD | `ansible-playbooks/playbooks/roles/db_schema_metadata_collect/tasks/main.yml` | ✅（assertion 扩 5 dialect） |
+| MOD | `ansible-playbooks/playbooks/roles/db_object_metadata_collect/tasks/main.yml` | ✅（assertion 扩 5 dialect） |
+| MOD | `docs/40-tech-debt.md` §7 F-list 追加 F0 | ✅（已加 F0 行） |
+| MOD | `docs/10-module-map.md` §2 追加 row | ✅（已加 C16-F0 row） |
+| MOD | `docs/contracts/api-inventory.md` 追加 4 端点 oracle/mssql 支持声明 | ✅（已加三方言支持表 + 说明） |
+| MOD | `docs/30-runbook.md` §8.2/§8.5 补 oracle/mssql 排障段 | ✅（已加 5+5 排障 rows） |
+| MOD | `.claude/plans/phase-3-6-ai-copilot-full-plan.md` §4B | ✅（本节） |
+| NEW | `memory/phase-3-6-c16-f0-completed-2026-07-07.md` | ⏳（commit 3 闭环时写） |
+| MOD | `memory/MEMORY.md` 索引 | ⏳（commit 3 闭环时加） |
+
+### 4B.10 Rollback（按 commit 倒序）
+
+```bash
+# commit 2 失败（仅 docs + tests + memory）
+git revert <commit-2-sha> --no-edit && git push
+
+# commit 1 失败（DDL/Builder/Ansible/collector）
+git revert <commit-1-sha> --no-edit && git push
+# 不需 SQL 回滚（DDL 未变更；仅行为层回退到 PG-only）
+# 但若已注册的 Oracle/MSSQL 实例 snapshot 数据保留（snapshot.db_type_code 仍
+# 是新值，回退后 GET 仍能查；但前端 collect 入口会 422）
+```
+
+---
+
 ## 5. SQL 安全模型
 
 ### 6 层 defense

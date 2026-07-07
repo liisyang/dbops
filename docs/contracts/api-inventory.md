@@ -236,6 +236,21 @@
 | GET | `/api/v1/ai/sql/object-metadata/{instance_id}/history` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:645` |
 | GET | `/api/v1/ai/sql/object-metadata/{instance_id}/context` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:670` |
 
+**Schema Snapshot + Object Metadata Snapshot 三方言支持声明（C16-F0）**：
+
+以上 8 个端点（4 schema-snapshots + 4 object-metadata）现在支持以下 db_type_code 输入值：
+
+| db_type_code | 说明 | 后端 Builder 派发 | SQL 模板路径 |
+|---|---|---|---|
+| `postgresql` / `postgres` | PostgreSQL（首版支持） | `_AiSchemaMetadataBuilder` / `_AiObjectMetadataBuilder` → PG 分支 | `backend/app/services/ai/sql_templates/postgresql/pg_schema_columns.sql` + `pg_object_metadata.sql` |
+| `oracle` | Oracle（C16-F0 新增） | 同上 → Oracle 分支 | `backend/app/services/ai/sql_templates/oracle/ora_schema_columns.sql`（6 列 information_schema 风格查 `all_tab_columns`）+ `ora_object_metadata.sql`（5 列×6 UNION ALL segment：table/view/materialized_view/index/function+procedure/constraint） |
+| `mssql` / `sqlserver` | SQL Server（C16-F0 新增） | 同上 → MSSQL 分支 | `backend/app/services/ai/sql_templates/mssql/mssql_schema_columns.sql`（6 列查 `sys.columns` + `sys.objects`）+ `mssql_object_metadata.sql`（5 列×9 UNION ALL segment：table/view/index/function/procedure/4 类 constraint） |
+
+- DDL `CHECK (db_type_code IN ('POSTGRESQL','ORACLE','MSSQL','MYSQL'))` 在 `ai_schema_snapshot` + `ai_object_metadata_snapshot` 两表都已就位（无需新迁移）
+- MySQL 暂不实现（按 plan §4.8 + capabilities `sql_supported_db_types`），未来扩展时复用同一 `_SQL_TEMPLATE_MAP` 增加 `mysql` 键即可
+- 不支持的 db_type_code（如 `mysql`、`redis`、`mongodb`）→ 端点 422 `UNSUPPORTED_DB_TYPE`（`api/ai.py` 业务层校验）
+- 未传 db_type_code / DB 实例无 db_type → 端点 422 `DB_TYPE_REQUIRED` / `CREDENTIAL_MISSING`
+
 #### 2.16.A Phase 3.6 C14 SQL Execute 端点（C14 新增）
 
 | 方法 | 路径 | 请求体 / 参数 | 响应 | 错误码 |
