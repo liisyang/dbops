@@ -34,6 +34,8 @@ from app.services.ai.ai_sql_execute_service import (
     AuditAlreadyRunningError,
     AuditNotFoundError,
     AuditNotPassedError,
+    AuditOwnershipError,
+    AuditResultNotAvailableError,
     AuditUnsafeOnExecuteError,
     AwxLaunchError,
     FeatureDisabledError,
@@ -314,3 +316,126 @@ class TestUnauthenticated:
         client = TestClient(_make_test_app())
         r = client.get("/api/v1/ai/sql/audit/100/execution")
         assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# C16-5 P0-3: GET /sql/executions/{audit_id}/result — 独立 Result API
+# ---------------------------------------------------------------------------
+class TestExecutionResultNotFound:
+    def test_missing_audit_returns_404(self, monkeypatch):
+        client = _make_client()
+
+        def fake_result(db, *, audit_id, requested_by, limit, offset):
+            raise AuditNotFoundError(f"audit {audit_id} not found")
+
+        monkeypatch.setattr(
+            ai_api.AiSqlExecuteService, "get_execution_result",
+            staticmethod(fake_result),
+        )
+
+        r = client.get("/api/v1/ai/sql/executions/999/result")
+        assert r.status_code == 404
+        assert "999" in r.json()["detail"]
+
+
+class TestExecutionResultOwnership:
+    def test_ownership_mismatch_returns_403(self, monkeypatch):
+        client = _make_client()
+
+        def fake_result(db, *, audit_id, requested_by, limit, offset):
+            raise AuditOwnershipError(
+                f"audit {audit_id} user_id=u-owner != requester id=u-self"
+            )
+
+        monkeypatch.setattr(
+            ai_api.AiSqlExecuteService, "get_execution_result",
+            staticmethod(fake_result),
+        )
+
+        r = client.get("/api/v1/ai/sql/executions/100/result")
+        assert r.status_code == 403
+        body = r.json()["detail"]
+        assert body["code"] == "audit_ownership_error"
+
+
+class TestExecutionResultNotAvailable:
+    def test_not_success_status_returns_409(self, monkeypatch):
+        client = _make_client()
+
+        def fake_result(db, *, audit_id, requested_by, limit, offset):
+            raise AuditResultNotAvailableError(
+                f"audit {audit_id} execution_status='running'; "
+                f"only 'success' audits have queryable result",
+                current_status="running",
+            )
+
+        monkeypatch.setattr(
+            ai_api.AiSqlExecuteService, "get_execution_result",
+            staticmethod(fake_result),
+        )
+
+        r = client.get("/api/v1/ai/sql/executions/100/result")
+        assert r.status_code == 409
+        body = r.json()["detail"]
+        assert body["code"] == "audit_result_not_available"
+        assert body["current_status"] == "running"
+
+
+class TestExecutionResultHappyPath:
+    def test_result_returns_200_with_columns_rows(self, monkeypatch):
+        client = _make_client()
+
+        fake_payload = {
+            "audit_id": 100,
+            "execution_status": "success",
+            "row_count": 2,
+            "duration_ms": 150,
+            "completed_at": datetime.now(tz=timezone.utc),
+            "executed_at": datetime.now(tz=timezone.utc),
+            "error_message": None,
+            "collector_run_id": 555,
+            "awx_job_id": 581,
+            "columns": ["id", "name"],
+            "rows": [[1, "alice"], [2, "bob"]],
+            "returned_rows": 2,
+            "truncated": False,
+            "masked_columns": [],
+        }
+
+        def fake_result(db, *, audit_id, requested_by, limit, offset):
+            return fake_payload
+
+        monkeypatch.setattr(
+            ai_api.AiSqlExecuteService, "get_execution_result",
+            staticmethod(fake_result),
+        )
+
+        r = client.get("/api/v1/ai/sql/executions/100/result?limit=100&offset=0")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["audit_id"] == 100
+        assert body["execution_status"] == "success"
+        assert body["columns"] == ["id", "name"]
+        assert body["rows"] == [[1, "alice"], [2, "bob"]]
+        assert body["returned_rows"] == 2
+        assert body["truncated"] is False
+        assert body["masked_columns"] == []
+
+
+class TestExecutionResultParamValidation:
+    """FastAPI Query ge/le 自动校验：limit 越界 → 422"""
+
+    def test_limit_too_high_returns_422(self):
+        client = _make_client()
+        r = client.get("/api/v1/ai/sql/executions/100/result?limit=500")
+        assert r.status_code == 422
+
+    def test_limit_too_low_returns_422(self):
+        client = _make_client()
+        r = client.get("/api/v1/ai/sql/executions/100/result?limit=0")
+        assert r.status_code == 422
+
+    def test_negative_offset_returns_422(self):
+        client = _make_client()
+        r = client.get("/api/v1/ai/sql/executions/100/result?offset=-1")
+        assert r.status_code == 422

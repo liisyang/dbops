@@ -511,6 +511,54 @@ class AiSqlExecutionStatusResponse(BaseModel):
     created_at: datetime
 
 
+class AiSqlExecutionResultResponse(BaseModel):
+    """GET /v1/ai/sql/executions/{audit_id}/result 响应（C16-5 P0-3 — plan §21.3）。
+
+    独立结果 API：拉取 audit 执行后的 columns + rows（受分页/截断/掩码控制）。
+
+    数据源（service 层 fallback 链）：
+      1. ai_chat_message.content (message_type='sql_result') — callback 规范化
+      2. CollectorRunItem.raw_result — callback 失败/未落 message 的极端 fallback
+
+    关键字段：
+      - columns:        字符串列表（敏感列已保留原名 + masked_columns 标记）
+      - rows:           list[list[Any]]；敏感列 cell 已替换为 "***"
+      - returned_rows:  实际返回行数（受 limit/offset 影响）
+      - row_count:      audit.row_count（callback 报告的总行数）
+      - truncated:      True 表示有更多行未返回（受 limit 限制）
+      - masked_columns: 被掩码的列名列表
+
+    execution_status != 'success' 时返回 409 AuditResultNotAvailableError；前端
+    此时应轮询 /audit/{id}/execution 等待终态。
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    audit_id: int
+    execution_status: Literal[
+        "not_requested", "pending", "running", "success",
+        "failed", "timeout", "cancelled"
+    ] = "not_requested"
+    # 总行数 / 总耗时（与 status response 对齐）
+    row_count: Optional[int] = None
+    duration_ms: Optional[int] = None
+    completed_at: Optional[datetime] = None
+    executed_at: Optional[datetime] = None
+    error_message: Optional[str] = None
+    collector_run_id: Optional[int] = None
+    awx_job_id: Optional[int] = None
+
+    # P0-3 核心：实际数据
+    columns: list[str] = Field(default_factory=list, description="列名列表（保留原名）")
+    rows: list[list[Any]] = Field(
+        default_factory=list,
+        description="行数据（敏感列 cell 已掩码为 '***'）",
+    )
+    returned_rows: int = Field(default=0, description="本次返回的行数")
+    truncated: bool = Field(default=False, description="True = 受 limit 限制有更多行未返回")
+    masked_columns: list[str] = Field(default_factory=list, description="被掩码的列名列表")
+
+
 # =============================================================================
 # C16-F3: Object Metadata Snapshot API
 # =============================================================================

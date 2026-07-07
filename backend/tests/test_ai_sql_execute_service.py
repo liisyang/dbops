@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import Settings
 from app.models.ai import (
+    AiChatMessage,
     AiSchemaSnapshot,
     AiSchemaSnapshotStatus,
     AiSqlAudit,
@@ -49,6 +50,7 @@ from app.services.ai.ai_sql_execute_service import (
     AuditNotFoundError,
     AuditNotPassedError,
     AuditOwnershipError,
+    AuditResultNotAvailableError,
     AuditUnsafeOnExecuteError,
     AwxLaunchError,
     FeatureDisabledError,
@@ -399,6 +401,57 @@ def _inject_target(db: _FakeSession, audit: AiSqlAudit) -> None:
     )
     db.store["Server"] = [server]
     db.store["DbInstance"] = [instance]
+
+
+def _make_chat_message(
+    *,
+    message_id: int = 888,
+    session_id: int = 50,
+    message_type: str = "sql_result",
+    content: Optional[str] = None,
+    user_id: Optional[Any] = None,
+) -> AiChatMessage:
+    """构造 ai_chat_message（用于 Result API 数据源 sql_result 落库）。"""
+    msg = AiChatMessage(
+        session_id=session_id,
+        user_id=user_id,
+        role="assistant",
+        message_type=message_type,
+        status="completed",
+        content=content,
+        parent_message_id=None,
+        metadata_json={},
+        attempt_count=0,
+        created_at=datetime.now(tz=timezone.utc),
+        updated_at=datetime.now(tz=timezone.utc),
+    )
+    msg.id = message_id
+    return msg
+
+
+def _make_run_item(
+    *,
+    run_item_id: int = 777,
+    raw_result: Optional[dict[str, Any]] = None,
+) -> Any:
+    """构造 CollectorRunItem（用于 Result API fallback 数据源 raw_result）。"""
+    from app.models.dbops_assets import CollectorRunItem as _CRI
+
+    item = _CRI(
+        collector_run_id=1,
+        run_id="ai-sql-test",
+        item_key="ai_sql:100:1",
+        check_code="DB_READONLY_SQL_EXEC",
+        target_scope="db_instance",
+        server_id=1,
+        db_instance_id=1,
+        target_host="10.0.0.1",
+        target_port=5432,
+        status="verified",
+        raw_result=raw_result if raw_result is not None else {},
+    )
+    item.id = run_item_id
+    return item
 
 
 # ---------------------------------------------------------------------------
@@ -1046,3 +1099,336 @@ class TestStateMachineTransition:
         assert AiSqlAuditExecutionStatus.PENDING in captured
         # 终态：FAILED（覆盖 PENDING）
         assert audit.execution_status == AiSqlAuditExecutionStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# C16-5 P0-3: get_execution_result — 独立 Result API（plan §21.3）
+# ---------------------------------------------------------------------------
+import json as _json_result  # noqa: E402
+
+
+class TestExecutionResult:
+    """测试 AiSqlExecuteService.get_execution_result（C16-5 P0-3）。
+
+    6 cases：
+      1. 成功读取（chat_message.content 有 JSON）
+      2. 大结果分页（limit/offset + truncated=true）
+      3. 列数校验（rows 列数 < columns → 返回全部 columns + 实际 rows）
+      4. 空 rows（returned_rows=0）
+      5. cell 长度截断（超长 cell → '...'）
+      6. 敏感列掩码（denied_columns → cell='***' + masked_columns）
+    """
+
+    def _setup_success_audit(
+        self,
+        *,
+        user_id: Any = None,
+        session_id: Optional[int] = 50,
+        result_message_id: Optional[int] = 888,
+        schema_snapshot_id: int = 1,
+        denied_columns: Optional[list[str]] = None,
+        row_count: Optional[int] = None,
+        duration_ms: Optional[int] = None,
+        collector_run_id: Optional[int] = 1,
+        collector_run_item_id: Optional[int] = 777,
+    ) -> tuple[_FakeSession, AiSqlAudit]:
+        """构造一个 success audit + 可选 schema_snapshot + chat_message。
+
+        Returns:
+            (db, audit)
+        """
+        db = _FakeSession()
+        audit = _make_audit(
+            audit_id=100,
+            instance_id=1,
+            user_id=user_id,
+            session_id=session_id,
+            schema_snapshot_id=schema_snapshot_id,
+            exec_status=AiSqlAuditExecutionStatus.SUCCESS,
+        )
+        audit.result_message_id = result_message_id
+        audit.row_count = row_count
+        audit.duration_ms = duration_ms
+        audit.collector_run_id = collector_run_id
+        audit.collector_run_item_id = collector_run_item_id
+        audit.completed_at = datetime.now(tz=timezone.utc)
+        audit.executed_at = datetime.now(tz=timezone.utc)
+        db.store["AiSqlAudit"] = [audit]
+        if schema_snapshot_id is not None:
+            snap = _make_snapshot(
+                snapshot_id=schema_snapshot_id,
+                denied_columns=denied_columns,
+            )
+            db.store["AiSchemaSnapshot"] = [snap]
+        return db, audit
+
+    # ----- 1. 成功读取 -----
+    def test_result_success_loads_from_chat_message(self):
+        db, audit = self._setup_success_audit(
+            user_id=_FakeRequester(id="u-1").id,
+            session_id=50,
+            result_message_id=888,
+            row_count=3,
+            duration_ms=120,
+        )
+        payload = _json_result.dumps(
+            {
+                "columns": ["id", "name"],
+                "rows": [[1, "alice"], [2, "bob"], [3, "carol"]],
+                "row_count": 3,
+                "duration_ms": 120,
+                "status": "success",
+                "error_message": None,
+                "executed_at": "2026-07-07T10:00:00Z",
+            },
+            ensure_ascii=False,
+        )
+        chat_msg = _make_chat_message(
+            message_id=888, session_id=50, content=payload,
+        )
+        db.store["AiChatMessage"] = [chat_msg]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-1"),
+        )
+        assert result["audit_id"] == 100
+        assert result["execution_status"] == AiSqlAuditExecutionStatus.SUCCESS
+        assert result["columns"] == ["id", "name"]
+        assert len(result["rows"]) == 3
+        assert result["rows"][0] == [1, "alice"]
+        assert result["returned_rows"] == 3
+        assert result["truncated"] is False
+        assert result["row_count"] == 3
+        assert result["duration_ms"] == 120
+        assert result["masked_columns"] == []
+
+    # ----- 2. 大结果分页 -----
+    def test_result_truncates_when_limit_exceeded(self):
+        db, audit = self._setup_success_audit(
+            user_id=_FakeRequester(id="u-2").id,
+            result_message_id=889,
+            row_count=5,
+        )
+        payload = _json_result.dumps(
+            {
+                "columns": ["id"],
+                "rows": [[1], [2], [3], [4], [5]],
+            }
+        )
+        chat_msg = _make_chat_message(
+            message_id=889, session_id=50, content=payload,
+        )
+        db.store["AiChatMessage"] = [chat_msg]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-2"),
+            limit=2, offset=0,
+        )
+        assert result["returned_rows"] == 2
+        assert result["rows"] == [[1], [2]]
+        assert result["truncated"] is True
+
+        # offset=4 + limit=2 → 只返回 1 行 + truncated
+        result2 = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-2"),
+            limit=2, offset=4,
+        )
+        assert result2["returned_rows"] == 1
+        assert result2["rows"] == [[5]]
+        assert result2["truncated"] is False
+
+    # ----- 3. 列数校验（rows 列数 != columns 长度 → 不强制截断）-----
+    def test_result_passes_through_when_row_width_mismatches(self):
+        """rows[0] 长度 < columns（不常见但真实存在）：
+        service 不强制截断；返回原始 rows（前端负责列对齐）。"""
+        db, audit = self._setup_success_audit(
+            user_id=_FakeRequester(id="u-3").id,
+            result_message_id=890,
+            row_count=2,
+        )
+        payload = _json_result.dumps(
+            {
+                "columns": ["id", "name", "status"],
+                "rows": [[1, "alice"], [2, "bob"]],  # 短 1 列
+            }
+        )
+        chat_msg = _make_chat_message(
+            message_id=890, session_id=50, content=payload,
+        )
+        db.store["AiChatMessage"] = [chat_msg]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-3"),
+        )
+        assert result["columns"] == ["id", "name", "status"]
+        assert len(result["rows"]) == 2
+        assert result["returned_rows"] == 2
+        # rows 保持原始宽度（service 层不强制补 None / 截断）
+        assert result["rows"][0] == [1, "alice"]
+
+    # ----- 4. 空 rows -----
+    def test_result_empty_rows(self):
+        db, audit = self._setup_success_audit(
+            user_id=_FakeRequester(id="u-4").id,
+            result_message_id=891,
+            row_count=0,
+        )
+        payload = _json_result.dumps({"columns": ["id", "name"], "rows": []})
+        chat_msg = _make_chat_message(
+            message_id=891, session_id=50, content=payload,
+        )
+        db.store["AiChatMessage"] = [chat_msg]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-4"),
+        )
+        assert result["columns"] == ["id", "name"]
+        assert result["rows"] == []
+        assert result["returned_rows"] == 0
+        assert result["truncated"] is False
+
+    # ----- 5. cell 长度截断 -----
+    def test_result_truncates_long_cell(self, monkeypatch):
+        """cell > AI_SQL_RESULT_MAX_CELL_CHARS → 截断 + '...'"""
+        # 用 monkeypatch 调小 limit（避免 4000 字符 cell 让测试变慢）
+        _patch_settings(monkeypatch)
+        fake_settings = svc_mod.get_settings()
+
+        class _FakeSettings:
+            def __getattr__(self, name):
+                if name == "AI_SQL_RESULT_MAX_CELL_CHARS":
+                    return 20
+                return getattr(fake_settings, name)
+
+        monkeypatch.setattr(svc_mod, "get_settings", lambda: _FakeSettings())
+
+        db, audit = self._setup_success_audit(
+            user_id=_FakeRequester(id="u-5").id,
+            result_message_id=892,
+            row_count=1,
+        )
+        long_cell = "x" * 100
+        payload = _json_result.dumps(
+            {"columns": ["id", "bio"], "rows": [[1, long_cell]]}
+        )
+        chat_msg = _make_chat_message(
+            message_id=892, session_id=50, content=payload,
+        )
+        db.store["AiChatMessage"] = [chat_msg]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-5"),
+        )
+        assert result["rows"][0][0] == 1
+        bio = result["rows"][0][1]
+        assert isinstance(bio, str)
+        assert len(bio) <= 23  # 20 chars + '...'
+        assert bio.endswith("...")
+
+    # ----- 6. 敏感列掩码 -----
+    def test_result_masks_denied_columns(self):
+        """denied_columns=['password'] → password 列 cell='***' + masked_columns=['password']"""
+        db, audit = self._setup_success_audit(
+            user_id=_FakeRequester(id="u-6").id,
+            result_message_id=893,
+            row_count=2,
+            schema_snapshot_id=2,
+            denied_columns=["password", "secret_token"],
+        )
+        payload = _json_result.dumps(
+            {
+                "columns": ["id", "name", "password", "secret_token"],
+                "rows": [
+                    [1, "alice", "pwd_a", "tok_a"],
+                    [2, "bob", "pwd_b", "tok_b"],
+                ],
+            }
+        )
+        chat_msg = _make_chat_message(
+            message_id=893, session_id=50, content=payload,
+        )
+        db.store["AiChatMessage"] = [chat_msg]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=100, requested_by=_FakeRequester(id="u-6"),
+        )
+        # 保留列名 + 标记掩码
+        assert result["columns"] == ["id", "name", "password", "secret_token"]
+        assert sorted(result["masked_columns"]) == ["password", "secret_token"]
+        # 敏感列 cell 已替换为 '***'
+        assert result["rows"][0] == [1, "alice", "***", "***"]
+        assert result["rows"][1] == [2, "bob", "***", "***"]
+        # 非敏感列保持原值
+        assert result["rows"][0][0] == 1
+        assert result["rows"][0][1] == "alice"
+
+
+class TestExecutionResultStatusGuards:
+    """测试 get_execution_result 状态机守卫（409 + 404 + 403）。"""
+
+    def test_result_404_when_audit_missing(self):
+        db = _FakeSession()
+        with pytest.raises(AuditNotFoundError) as exc_info:
+            AiSqlExecuteService.get_execution_result(
+                db, audit_id=999, requested_by=_FakeRequester(id="u-1"),
+            )
+        assert "999" in str(exc_info.value)
+
+    def test_result_409_when_execution_not_success(self):
+        db = _FakeSession()
+        audit = _make_audit(
+            audit_id=200,
+            exec_status=AiSqlAuditExecutionStatus.RUNNING,
+        )
+        db.store["AiSqlAudit"] = [audit]
+        with pytest.raises(AuditResultNotAvailableError) as exc_info:
+            AiSqlExecuteService.get_execution_result(
+                db, audit_id=200, requested_by=_FakeRequester(id="u-1"),
+            )
+        assert exc_info.value.current_status == AiSqlAuditExecutionStatus.RUNNING
+
+    def test_result_403_when_user_mismatch(self):
+        db = _FakeSession()
+        audit = _make_audit(
+            audit_id=300,
+            user_id="other-user-id",
+            session_id=None,
+            exec_status=AiSqlAuditExecutionStatus.SUCCESS,
+        )
+        audit.result_message_id = None
+        db.store["AiSqlAudit"] = [audit]
+        with pytest.raises(AuditOwnershipError):
+            AiSqlExecuteService.get_execution_result(
+                db, audit_id=300, requested_by=_FakeRequester(id="u-1"),
+            )
+
+    def test_result_fallback_to_collector_run_item(self):
+        """chat_message 缺失时 fallback 到 CollectorRunItem.raw_result。"""
+        db = _FakeSession()
+        audit = _make_audit(
+            audit_id=400,
+            user_id=_FakeRequester(id="u-7").id,
+            session_id=50,
+            exec_status=AiSqlAuditExecutionStatus.SUCCESS,
+        )
+        audit.result_message_id = None  # 无 chat_message
+        audit.collector_run_id = 1
+        audit.collector_run_item_id = 777
+        audit.row_count = 2
+        db.store["AiSqlAudit"] = [audit]
+        run_item = _make_run_item(
+            run_item_id=777,
+            raw_result={
+                "columns": ["id", "val"],
+                "rows": [[10, "x"], [20, "y"]],
+            },
+        )
+        db.store["CollectorRunItem"] = [run_item]
+
+        result = AiSqlExecuteService.get_execution_result(
+            db, audit_id=400, requested_by=_FakeRequester(id="u-7"),
+        )
+        assert result["columns"] == ["id", "val"]
+        assert result["rows"] == [[10, "x"], [20, "y"]]
+        assert result["returned_rows"] == 2
+        assert result["truncated"] is False

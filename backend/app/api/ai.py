@@ -43,6 +43,7 @@ from app.schemas.ai import (
     AiSqlAuditResponse,
     AiSqlExecuteRequest,
     AiSqlExecuteResponse,
+    AiSqlExecutionResultResponse,
     AiSqlExecutionStatusResponse,
     AiSqlPreviewRequest,
     AiSqlPreviewResponse,
@@ -68,6 +69,7 @@ from app.services.ai.ai_sql_execute_service import (
     AuditNotFoundError,
     AuditNotPassedError,
     AuditOwnershipError,
+    AuditResultNotAvailableError,
     AuditUnsafeOnExecuteError,
     AwxLaunchError as AiSqlAwxLaunchError,
     FeatureDisabledError as AiSqlFeatureDisabledError,
@@ -693,6 +695,64 @@ def get_execution_status(
         message_type="sql_result" if audit.result_message_id else None,
         created_at=audit.created_at,
     )
+
+
+# -----------------------------------------------------------------------------
+# C16-5 P0-3: SQL Execute — 独立 Result API（plan §21.3）
+# -----------------------------------------------------------------------------
+@router.get(
+    "/sql/executions/{audit_id}/result",
+    response_model=AiSqlExecutionResultResponse,
+)
+def get_execution_result(
+    audit_id: int,
+    limit: int = Query(default=100, ge=1, le=200, description="最大返回行数"),
+    offset: int = Query(default=0, ge=0, description="分页偏移"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> AiSqlExecutionResultResponse:
+    """独立 Result API：拉取 audit 执行后的 columns + rows（plan §21.3 C16-5 P0-3）。
+
+    与 /audit/{id}/execution 共存：execution 端点返回状态机 + 元数据（轻量），
+    result 端点返回完整 columns + rows（重量，可能 1MB+）。
+
+    错误码：
+      - 403 — audit 不属于当前用户（与 execute 端点共用 AuditOwnershipError）
+      - 404 — audit_id 不存在
+      - 409 — execution_status != 'success'（继续轮询 status 端点）
+      - 422 — limit 越界（FastAPI 自动；Query ge=1, le=200）
+    """
+    try:
+        result = AiSqlExecuteService.get_execution_result(
+            db,
+            audit_id=audit_id,
+            requested_by=current_user,
+            limit=limit,
+            offset=offset,
+        )
+    except AuditNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except AuditOwnershipError as exc:
+        # 403 — C16-5 P0-4：audit 不属于当前用户
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "audit_ownership_error",
+                "message": str(exc),
+            },
+        )
+    except AuditResultNotAvailableError as exc:
+        # 409 — execution_status != 'success'（前端应继续轮询 /audit/{id}/execution）
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "audit_result_not_available",
+                "current_status": exc.current_status,
+                "message": str(exc),
+            },
+        )
+
+    return AiSqlExecutionResultResponse(**result)
 
 
 # -----------------------------------------------------------------------------

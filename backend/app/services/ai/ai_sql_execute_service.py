@@ -55,6 +55,7 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models.ai import (
+    AiChatMessage,
     AiChatSession,
     AiSchemaSnapshot,
     AiSqlAudit,
@@ -127,6 +128,19 @@ class AuditOwnershipError(AiSqlExecuteError):
 
     任一不匹配都抛此异常；防止用户在错误上下文里触发别人 audit 的 Execute。
     """
+
+
+class AuditResultNotAvailableError(AiSqlExecuteError):
+    """audit 终态不是 success，无法返回 result 数据 → 409。
+
+    用于 C16-5 P0-3 独立 Result API：当前端 GET /executions/{id}/result 时
+    若 audit 仍处于 pending / running / failed / timeout / cancelled 状态，
+    应继续轮询 status 端点而非拉结果。
+    """
+
+    def __init__(self, message: str, *, current_status: str) -> None:
+        super().__init__(message)
+        self.current_status = current_status
 
 
 # =============================================================================
@@ -367,12 +381,16 @@ class AiSqlExecuteService:
             check_code="DB_READONLY_SQL_EXEC",
         )
 
-        # 标准化 business_context（plan §6.2）
+        # 标准化 business_context（plan §6.2 + C16-5 P0-4 #5）
+        # 补 schema_policy_hash / approved_sql_hash 让 callback / collector
+        # 端可直接校验一致性，避免透传整张 audit 行。
         business_context = {
             "business_domain": "ai_sql",
             "business_context": {
                 "audit_id": int(audit.id),
                 "session_id": int(audit.session_id) if audit.session_id else None,
+                "schema_policy_hash": audit.schema_policy_hash,
+                "approved_sql_hash": audit.approved_sql_hash,
             },
         }
 
@@ -578,6 +596,253 @@ class AiSqlExecuteService:
         if audit is None:
             raise AuditNotFoundError(f"ai_sql_audit id={audit_id} not found")
         return audit
+
+    # ------------------------------------------------------------------
+    # get_execution_result — 独立结果 API（C16-5 P0-3）
+    # ------------------------------------------------------------------
+    @classmethod
+    def get_execution_result(
+        cls,
+        db: Session,
+        *,
+        audit_id: int,
+        requested_by: Optional[Any] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """拉取 audit 执行后的 columns + rows（plan §21.3 C16-5 P0-3）。
+
+        数据源 fallback 链：
+          1. ai_chat_message.content (message_type='sql_result') — callback 规范化
+          2. CollectorRunItem.raw_result — callback 失败 / 未落 message 的极端 fallback
+
+        处理流程：
+          1. 复用 ownership 校验（与 execute() 一致；plan §21.3 P0-4）
+          2. 校验 audit 存在 (404)
+          3. 校验 execution_status == 'success' (409 AuditResultNotAvailableError)
+          4. 从 schema snapshot 读 denied_columns → 掩码对应 cell 为 '***'
+          5. 应用 limit/offset；超过 AI_SQL_RESULT_MAX_ROWS 标记 truncated
+          6. 应用 AI_SQL_RESULT_MAX_CELL_CHARS 截断单 cell 长度
+
+        Returns:
+            dict 字段：audit_id / execution_status / row_count / duration_ms /
+            completed_at / executed_at / error_message / collector_run_id /
+            awx_job_id / columns / rows / returned_rows / truncated / masked_columns
+
+        Raises:
+            AuditNotFoundError: audit_id 不存在 → 404
+            AuditOwnershipError: audit.user_id / session.user_id 不匹配 → 403
+            AuditResultNotAvailableError: execution_status != 'success' → 409
+        """
+        # 1. 校验 audit 存在（先于 ownership，便于错误码优先级：404 > 403）
+        audit = (
+            db.query(AiSqlAudit)
+            .filter(AiSqlAudit.id == int(audit_id))
+            .first()
+        )
+        if audit is None:
+            raise AuditNotFoundError(f"ai_sql_audit id={audit_id} not found")
+
+        # 2. ownership 校验（与 execute() 一致；plan §21.3 P0-4）
+        if requested_by is not None:
+            requester_id = getattr(requested_by, "id", None)
+            audit_owner_id = getattr(audit, "user_id", None)
+            if (
+                audit_owner_id is not None
+                and requester_id is not None
+                and audit_owner_id != requester_id
+            ):
+                raise AuditOwnershipError(
+                    f"audit {audit_id} user_id={audit_owner_id} != "
+                    f"requester id={requester_id}"
+                )
+            if audit.session_id is not None:
+                chat_session = (
+                    db.query(AiChatSession)
+                    .filter(AiChatSession.id == int(audit.session_id))
+                    .first()
+                )
+                if chat_session is not None:
+                    session_owner_id = getattr(chat_session, "user_id", None)
+                    if (
+                        session_owner_id is not None
+                        and requester_id is not None
+                        and session_owner_id != requester_id
+                    ):
+                        raise AuditOwnershipError(
+                            f"audit {audit_id} session {audit.session_id} "
+                            f"user_id={session_owner_id} != requester id={requester_id}"
+                        )
+
+        # 3. execution_status 必须 success
+        current_status = audit.execution_status or AiSqlAuditExecutionStatus.NOT_REQUESTED
+        if current_status != AiSqlAuditExecutionStatus.SUCCESS:
+            raise AuditResultNotAvailableError(
+                f"audit {audit_id} execution_status={current_status!r}; "
+                f"only 'success' audits have queryable result",
+                current_status=str(current_status),
+            )
+
+        # 4. 读 schema snapshot.denied_columns 用于掩码
+        denied_columns: list[str] = []
+        if audit.schema_snapshot_id is not None:
+            snap = (
+                db.query(AiSchemaSnapshot)
+                .filter(AiSchemaSnapshot.id == int(audit.schema_snapshot_id))
+                .first()
+            )
+            if snap is not None:
+                denied_columns = list(snap.denied_columns or [])
+
+        # 5. 数据源 fallback 链：chat_message sql_result → CollectorRunItem.raw_result
+        columns, rows = cls._load_result_columns_rows(db, audit=audit)
+
+        # 6. 掩码（按列名小写比较，不区分大小写）
+        masked_columns: list[str] = []
+        if denied_columns and columns:
+            denied_lc = {str(c).lower() for c in denied_columns if c}
+            new_cols: list[str] = []
+            masked_set: set[str] = set()
+            for col in columns:
+                if str(col).lower() in denied_lc:
+                    new_cols.append(str(col))
+                    masked_set.add(str(col))
+                else:
+                    new_cols.append(str(col))
+            columns = new_cols
+            masked_columns = sorted(masked_set)
+            if masked_columns and rows:
+                # 找出被掩码的列索引
+                masked_idx_set = {
+                    i for i, c in enumerate(columns) if c in masked_set
+                }
+                new_rows: list[list[Any]] = []
+                for r in rows:
+                    if not isinstance(r, list):
+                        new_rows.append(r)
+                        continue
+                    new_r = list(r)
+                    for idx in masked_idx_set:
+                        if idx < len(new_r):
+                            new_r[idx] = "***"
+                    new_rows.append(new_r)
+                rows = new_rows
+
+        # 7. 单 cell 长度截断（防御超长 cell）
+        settings = get_settings()
+        max_cell_chars = int(
+            getattr(settings, "AI_SQL_RESULT_MAX_CELL_CHARS", 4000)
+        )
+        if max_cell_chars > 0 and rows:
+            truncated_any = False
+            for r in rows:
+                if not isinstance(r, list):
+                    continue
+                for i, cell in enumerate(r):
+                    if isinstance(cell, str) and len(cell) > max_cell_chars:
+                        r[i] = cell[:max_cell_chars] + "..."
+                        truncated_any = True
+            # truncated_any 是 cell 截断标记，与 row 截断分开
+
+        # 8. limit/offset + truncated
+        total = len(rows) if isinstance(rows, list) else 0
+        if limit < 1:
+            limit = 1
+        if offset < 0:
+            offset = 0
+        sliced = rows[offset : offset + limit] if rows else []
+        truncated = (offset + len(sliced)) < total
+
+        return {
+            "audit_id": int(audit.id),
+            "execution_status": current_status,
+            "row_count": int(audit.row_count) if audit.row_count is not None else total,
+            "duration_ms": int(audit.duration_ms) if audit.duration_ms is not None else None,
+            "completed_at": audit.completed_at,
+            "executed_at": audit.executed_at,
+            "error_message": audit.error_message,
+            "collector_run_id": int(audit.collector_run_id) if audit.collector_run_id is not None else None,
+            "awx_job_id": getattr(audit, "awx_job_id", None),
+            "columns": columns or [],
+            "rows": sliced,
+            "returned_rows": len(sliced),
+            "truncated": truncated,
+            "masked_columns": masked_columns,
+        }
+
+    # ------------------------------------------------------------------
+    # _load_result_columns_rows — 数据源 fallback 链（C16-5 P0-3）
+    # ------------------------------------------------------------------
+    @classmethod
+    def _load_result_columns_rows(
+        cls,
+        db: Session,
+        *,
+        audit: AiSqlAudit,
+    ) -> tuple[list[str], list[list[Any]]]:
+        """读 result 数据：优先 sql_result chat_message → fallback CollectorRunItem.raw_result。
+
+        sql_result chat_message.content JSON 形态（C16-F2 callback service 写入）：
+          {
+            "columns": [...],
+            "rows": [...],
+            "row_count": int,
+            "duration_ms": int,
+            "status": "success",
+            "error_message": null,
+            "executed_at": "ISO8601"
+          }
+        """
+        # 优先级 1：ai_chat_message(message_type='sql_result')
+        if audit.result_message_id is not None and audit.session_id is not None:
+            chat_msg = (
+                db.query(AiChatMessage)
+                .filter(
+                    AiChatMessage.id == int(audit.result_message_id),
+                    AiChatMessage.session_id == int(audit.session_id),
+                    AiChatMessage.message_type == "sql_result",
+                )
+                .first()
+            )
+            if chat_msg is not None and chat_msg.content:
+                try:
+                    parsed = json.loads(chat_msg.content)
+                    if isinstance(parsed, dict):
+                        cols = parsed.get("columns")
+                        rows = parsed.get("rows")
+                        if isinstance(cols, list) and isinstance(rows, list):
+                            return list(cols), list(rows)
+                except (json.JSONDecodeError, ValueError, TypeError):
+                    # content 不是合法 JSON → 落到 fallback
+                    pass
+
+        # 优先级 2：CollectorRunItem.raw_result
+        if audit.collector_run_id is not None and audit.collector_run_item_id is not None:
+            run_item = (
+                db.query(CollectorRunItem)
+                .filter(CollectorRunItem.id == int(audit.collector_run_item_id))
+                .first()
+            )
+            if run_item is not None:
+                raw = getattr(run_item, "raw_result", None) or {}
+                if isinstance(raw, dict):
+                    cols = raw.get("columns")
+                    rows = raw.get("rows")
+                    if isinstance(cols, list) and isinstance(rows, list):
+                        return list(cols), list(rows)
+                    # 兼容 list 形态：[{columns: [...], rows: [...]}]
+                    if isinstance(cols, list) is False and isinstance(raw.get("data"), list):
+                        data = raw.get("data")
+                        if data and isinstance(data[0], dict):
+                            keys = list(data[0].keys())
+                            rows_list = [
+                                [row.get(k) for k in keys] for row in data
+                                if isinstance(row, dict)
+                            ]
+                            return keys, rows_list
+
+        # 都没有 → 返回空
+        return [], []
 
     # ------------------------------------------------------------------
     # 内部辅助
