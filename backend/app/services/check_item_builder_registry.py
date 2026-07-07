@@ -964,10 +964,13 @@ CheckItemBuilderRegistry.register("DB_READONLY_SQL_EXEC", _DbReadonlySqlExecBuil
 class _AiSchemaMetadataBuilder(BaseCheckItemBuilder):
     """Generate dispatch items for ``DB_SCHEMA_METADATA_COLLECTION``.
 
-    Phase 3.6B0 (plan §4.4): 首版只支持 PostgreSQL. 非 postgresql 实例
-    生成 skipped item (reason=UNSUPPORTED_DB_TYPE). 模板 SQL 文本 inline
-    进 ``rule_config.sql_text`` — 与 ``DB_READONLY_SQL_EXEC`` 一致,
-    不依赖 collector_client 文件系统访问, EE 端零补丁.
+    Phase 3.6B0 (plan §4.4): 首版只支持 PostgreSQL.
+    Phase 3.6B0 (plan §4B C16-F0): 扩展到 Oracle + SQL Server, 三方言同构.
+
+    非支持方言的实例生成 skipped item (reason=UNSUPPORTED_DB_TYPE).
+    模板 SQL 文本 inline 进 ``rule_config.sql_text`` — 与
+    ``DB_READONLY_SQL_EXEC`` 一致, 不依赖 collector_client 文件系统访问,
+    EE 端零补丁.
 
     AI Schema 采集完成后, callback 通过 ``business_domain='ai_schema'``
     路由到 ``AiSchemaSnapshotCallbackService`` (Phase 3.6 C9),
@@ -976,31 +979,62 @@ class _AiSchemaMetadataBuilder(BaseCheckItemBuilder):
 
     _check_code = "DB_SCHEMA_METADATA_COLLECTION"
 
-    # Phase 3.6B0 §4.8 P1 统一: 首版只支持 PostgreSQL
-    _SUPPORTED_DB_TYPES = frozenset({"postgresql", "postgres"})
+    # Phase 3.6B0 §4B C16-F0: 三方言合并 (PG + Oracle + SQL Server)
+    # db_type_code 全部小写匹配; 由 _resolve_db_type_code 入口统一转换
+    _SUPPORTED_DB_TYPES = frozenset({
+        "postgresql", "postgres",
+        "oracle",
+        "mssql", "sqlserver",
+    })
 
     # Phase 3.6B0 §4.4 P1 完整性保证: Schema 采集独立限制
     _MAX_ROWS = 20000
     _MAX_BYTES = 10485760  # 10MB
 
-    @classmethod
-    def _load_sql_template(cls) -> str:
-        """Load PostgreSQL schema metadata SQL template from disk.
+    # Phase 3.6B0 §4B C16-F0: 三方言模板路径（key 是 lower db_type_code）
+    _SQL_TEMPLATE_MAP = {
+        "postgresql": ("postgresql", "pg_schema_columns.sql"),
+        "postgres":   ("postgresql", "pg_schema_columns.sql"),
+        "oracle":     ("oracle",     "ora_schema_columns.sql"),
+        "mssql":      ("mssql",      "mssql_schema_columns.sql"),
+        "sqlserver":  ("mssql",      "mssql_schema_columns.sql"),
+    }
 
-        Template is the single source of truth (Phase 3.6 C7). Inline into
-        ``rule_config.sql_text`` so the EE collector_client executes the
-        exact bytes the backend validated.
+    @classmethod
+    def _load_sql_template(cls, db_type_code: str) -> tuple[str, str]:
+        """Load schema metadata SQL template based on db_type_code.
+
+        Returns:
+            (sql_text, source_tag) — sql_text 是 EE collector_client 执行的
+            字节；source_tag 是 dbops.ai.sql_templates.<module>.<stem> 形式
+            的可追溯标识（写到 rule_config.source）
+
+        Template is the single source of truth (Phase 3.6 C7 + C16-F0).
+        Inline into ``rule_config.sql_text`` so the EE collector_client
+        executes the exact bytes the backend validated.
         """
         from pathlib import Path
 
+        dialect = (db_type_code or "").lower()
+        mapping = cls._SQL_TEMPLATE_MAP.get(dialect)
+        if mapping is None:
+            raise ValueError(
+                f"_AiSchemaMetadataBuilder._load_sql_template: "
+                f"unsupported db_type_code={db_type_code!r} "
+                f"(expected one of {sorted(cls._SQL_TEMPLATE_MAP)})"
+            )
+        subdir, filename = mapping
         template_path = (
             Path(__file__).parent
             / "ai"
             / "sql_templates"
-            / "postgresql"
-            / "pg_schema_columns.sql"
+            / subdir
+            / filename
         )
-        return template_path.read_text(encoding="utf-8").strip()
+        sql_text = template_path.read_text(encoding="utf-8").strip()
+        stem = Path(filename).stem  # 'pg_schema_columns' / 'ora_schema_columns' / 'mssql_schema_columns'
+        source_tag = f"dbops.ai.sql_templates.{subdir}.{stem}"
+        return sql_text, source_tag
 
     @staticmethod
     def _default_database(db_type_code: str, service_name: str = "") -> str:
@@ -1092,7 +1126,7 @@ class _AiSchemaMetadataBuilder(BaseCheckItemBuilder):
                 )
                 continue
 
-            sql_text = self._load_sql_template()
+            sql_text, source_tag = self._load_sql_template(db_type_code)
 
             item = dict(base_item)
             item["rule_config"] = {
@@ -1100,7 +1134,7 @@ class _AiSchemaMetadataBuilder(BaseCheckItemBuilder):
                 "timeout_seconds": timeout_seconds,
                 "max_rows": self._MAX_ROWS,
                 "max_bytes": self._MAX_BYTES,
-                "source": "dbops.ai.sql_templates.postgresql.pg_schema_columns",
+                "source": source_tag,
                 "phase": "3.6B0",
             }
             item["credential_profile_id"] = credential["credential_profile_id"]
@@ -1120,10 +1154,12 @@ class _AiObjectMetadataBuilder(BaseCheckItemBuilder):
     """Generate dispatch items for ``DB_OBJECT_METADATA`` (Phase 3.6B0 F3 / C16-F3).
 
     镜像 _AiSchemaMetadataBuilder 但采集对象 DDL（table/index/view/function/constraint）。
-    首版只支持 PostgreSQL. 非 postgresql 实例生成 skipped item
-    (reason=UNSUPPORTED_DB_TYPE). 模板 SQL 文本 inline 进
-    ``rule_config.sql_text`` — 与 ``DB_SCHEMA_METADATA_COLLECTION`` 一致,
-    不依赖 collector_client 文件系统访问, EE 端零补丁.
+    Phase 3.6B0 (plan §4B C16-F0): 扩展到 Oracle + SQL Server, 三方言同构.
+
+    非支持方言的实例生成 skipped item (reason=UNSUPPORTED_DB_TYPE).
+    模板 SQL 文本 inline 进 ``rule_config.sql_text`` — 与
+    ``DB_SCHEMA_METADATA_COLLECTION`` 一致, 不依赖 collector_client
+    文件系统访问, EE 端零补丁.
 
     AI Object Metadata 采集完成后, callback 通过
     ``business_domain='ai_object_metadata'`` 路由到
@@ -1133,31 +1169,57 @@ class _AiObjectMetadataBuilder(BaseCheckItemBuilder):
 
     _check_code = "DB_OBJECT_METADATA"
 
-    # Phase 3.6B0 §4.8 P1 统一: 首版只支持 PostgreSQL（与 C8 _AiSchemaMetadataBuilder 一致）
-    _SUPPORTED_DB_TYPES = frozenset({"postgresql", "postgres"})
+    # Phase 3.6B0 §4B C16-F0: 三方言合并 (PG + Oracle + SQL Server)
+    _SUPPORTED_DB_TYPES = frozenset({
+        "postgresql", "postgres",
+        "oracle",
+        "mssql", "sqlserver",
+    })
 
     # Phase 3.6B0 F3: DDL 文本独立 1MB 限制（callback service 兜底截断）
     _MAX_ROWS = 20000
     _MAX_BYTES = 1048576  # 1MB
 
-    @classmethod
-    def _load_sql_template(cls) -> str:
-        """Load PostgreSQL object metadata SQL template from disk.
+    # Phase 3.6B0 §4B C16-F0: 三方言模板路径（key 是 lower db_type_code）
+    _SQL_TEMPLATE_MAP = {
+        "postgresql": ("postgresql", "pg_object_metadata.sql"),
+        "postgres":   ("postgresql", "pg_object_metadata.sql"),
+        "oracle":     ("oracle",     "ora_object_metadata.sql"),
+        "mssql":      ("mssql",      "mssql_object_metadata.sql"),
+        "sqlserver":  ("mssql",      "mssql_object_metadata.sql"),
+    }
 
-        Template is the single source of truth (Phase 3.6 F3). Inline into
-        ``rule_config.sql_text`` so the EE collector_client executes the
-        exact bytes the backend validated.
+    @classmethod
+    def _load_sql_template(cls, db_type_code: str) -> tuple[str, str]:
+        """Load object metadata SQL template based on db_type_code.
+
+        Returns:
+            (sql_text, source_tag) — 详见 _AiSchemaMetadataBuilder 同名方法
+
+        Template is the single source of truth (Phase 3.6 F3 + C16-F0).
         """
         from pathlib import Path
 
+        dialect = (db_type_code or "").lower()
+        mapping = cls._SQL_TEMPLATE_MAP.get(dialect)
+        if mapping is None:
+            raise ValueError(
+                f"_AiObjectMetadataBuilder._load_sql_template: "
+                f"unsupported db_type_code={db_type_code!r} "
+                f"(expected one of {sorted(cls._SQL_TEMPLATE_MAP)})"
+            )
+        subdir, filename = mapping
         template_path = (
             Path(__file__).parent
             / "ai"
             / "sql_templates"
-            / "postgresql"
-            / "pg_object_metadata.sql"
+            / subdir
+            / filename
         )
-        return template_path.read_text(encoding="utf-8").strip()
+        sql_text = template_path.read_text(encoding="utf-8").strip()
+        stem = Path(filename).stem
+        source_tag = f"dbops.ai.sql_templates.{subdir}.{stem}"
+        return sql_text, source_tag
 
     @staticmethod
     def _default_database(db_type_code: str, service_name: str = "") -> str:
@@ -1249,7 +1311,7 @@ class _AiObjectMetadataBuilder(BaseCheckItemBuilder):
                 )
                 continue
 
-            sql_text = self._load_sql_template()
+            sql_text, source_tag = self._load_sql_template(db_type_code)
 
             item = dict(base_item)
             item["rule_config"] = {
@@ -1257,7 +1319,7 @@ class _AiObjectMetadataBuilder(BaseCheckItemBuilder):
                 "timeout_seconds": timeout_seconds,
                 "max_rows": self._MAX_ROWS,
                 "max_bytes": self._MAX_BYTES,
-                "source": "dbops.ai.sql_templates.postgresql.pg_object_metadata",
+                "source": source_tag,
                 "phase": "3.6B0.F3",
             }
             item["credential_profile_id"] = credential["credential_profile_id"]

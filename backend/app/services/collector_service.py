@@ -191,6 +191,14 @@ class CollectorService:
                 "task_type": "DB_SQL_COLLECT",
                 "default_timeout_seconds": 60,
             },
+            "DB_OBJECT_METADATA": {
+                # Phase 3.6B0 (C16-F3): registered alongside DB_SCHEMA_METADATA_COLLECTION.
+                # Phase 3.6B0 (§4B C16-F0): same dispatch for Oracle + SQL Server.
+                "check_name": "DB Object Metadata Collection",
+                "target_scope": "db_instance",
+                "task_type": "DB_SQL_COLLECT",
+                "default_timeout_seconds": 60,
+            },
         }
         return defaults.get(
             check_code,
@@ -1660,6 +1668,7 @@ class CollectorService:
             "DB_ROLE_FACT_COLLECTION",
             "DB_VERSION_FACT_COLLECTION",
             "DB_SCHEMA_METADATA_COLLECTION",
+            "DB_OBJECT_METADATA",
         }:
             if len(reachable) > 1:
                 return SKIP_REASON_PORT_CANDIDATE_CONFLICT
