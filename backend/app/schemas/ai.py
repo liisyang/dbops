@@ -115,7 +115,10 @@ class AiChatMessageResponse(BaseModel):
     user_id: Optional[UUID] = None
     client_request_id: Optional[UUID] = None
     role: Literal["user", "assistant", "system"]
-    message_type: Literal["chat", "sql_preview", "sql_result", "error"]
+    # C14 NEW: 'sql_preview_link'（Chat 流内 SQL Preview 卡片，F2b 落地）
+    # C16-F2c 修：F2b 把 sql_preview_link 落 ai_chat_message 时 Pydantic Literal 漏加，
+    # 会导致 listMessages 触发 500。补齐枚举避免静默回归。
+    message_type: Literal["chat", "sql_preview", "sql_preview_link", "sql_result", "error"]
     status: Literal["pending", "completed", "failed", "stale"]
     content: Optional[str] = None
     parent_message_id: Optional[int] = None

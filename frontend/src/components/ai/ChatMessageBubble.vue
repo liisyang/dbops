@@ -40,9 +40,9 @@
         />
       </div>
 
-      <!-- C14 NEW — sql_preview_link 卡片：SQL 摘要 + 执行入口 -->
+      <!-- C14 NEW + C16-F2c 改 — sql_preview_link 卡片：passed 显示 SQL + 执行入口；rejected 只显示原因 -->
       <div
-        v-else-if="messageType === 'sql_preview_link' && previewLinkMeta"
+        v-else-if="messageType === 'sql_preview_link' && previewLinkMeta && previewLinkMeta.preview_safety_status === 'passed'"
         class="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm"
       >
         <div class="mb-2 flex items-center gap-2 text-xs font-medium text-emerald-300">
@@ -71,6 +71,23 @@
             执行中…
           </span>
         </div>
+      </div>
+
+      <!-- C16-F2c NEW — sql_preview_link rejected 分支：不显示执行按钮，展示拒绝原因 -->
+      <div
+        v-else-if="messageType === 'sql_preview_link' && previewLinkMeta && previewLinkMeta.preview_safety_status === 'rejected'"
+        class="rounded-lg border border-red-500/30 bg-red-500/5 px-4 py-3 text-sm"
+      >
+        <div class="mb-2 flex items-center gap-2 text-xs font-medium text-red-300">
+          <span class="material-symbols-outlined text-[14px]">block</span>
+          <span>SQL Preview 被拒绝（audit #{{ previewLinkMeta.audit_id }}）</span>
+        </div>
+        <p class="text-xs text-red-200/90">
+          {{ previewLinkMeta.reason || '（拒绝原因未提供）' }}
+        </p>
+        <p class="mt-2 text-[10px] text-on-surface-variant">
+          已落 ai_sql_audit（audit #{{ previewLinkMeta.audit_id }}），请调整问题后重新提问。
+        </p>
       </div>
 
       <!-- C14 NEW — sql_result 表格（callback 落库后） -->
@@ -281,16 +298,57 @@ const headerIcon = computed(() => {
 
 const previewLinkMeta = computed<AiSqlPreviewLinkMetadata | null>(() => {
   if (props.messageType !== 'sql_preview_link' || !props.metadataJson) return null
-  const m = props.metadataJson as Partial<AiSqlPreviewLinkMetadata>
-  if (typeof m.audit_id !== 'number' || typeof m.approved_sql !== 'string') return null
+  // C16-F2c 修：F2b 把 preview_payload 写到 content JSON（passed 包含
+  // approved_sql/schema_policy_hash/db_type_code；rejected 包含 reason）。
+  // metadata_json 只放 {audit_id, preview_safety_status}。
+  // 这里合并两个 source：metadata_json 拿 audit_id + status；content JSON 拿 SQL 详情。
+  const m = props.metadataJson as { audit_id?: number; preview_safety_status?: string }
+  const auditId = typeof m.audit_id === 'number' ? m.audit_id : -1
+  const status = m.preview_safety_status === 'rejected' ? 'rejected' : 'passed'
+
+  let contentPayload: Record<string, unknown> = {}
+  if (props.content && typeof props.content === 'string') {
+    try {
+      const parsed = JSON.parse(props.content) as Record<string, unknown>
+      if (parsed && typeof parsed === 'object') contentPayload = parsed
+    } catch {
+      // 非 JSON content（旧数据兼容）— 走空 payload
+    }
+  }
+
+  // passed 时 content 必须含 approved_sql；rejected 时只 audit_id + status
+  if (status === 'passed') {
+    const approvedSql = typeof contentPayload.approved_sql === 'string'
+      ? contentPayload.approved_sql
+      : ''
+    if (!approvedSql) return null
+    return {
+      audit_id: auditId,
+      instance_id: typeof (props.metadataJson as { instance_id?: number }).instance_id === 'number'
+        ? (props.metadataJson as { instance_id?: number }).instance_id!
+        : 0,
+      database_name: null,
+      approved_sql: approvedSql,
+      approved_sql_hash: typeof contentPayload.approved_sql_hash === 'string'
+        ? contentPayload.approved_sql_hash
+        : null,
+      schema_policy_hash: typeof contentPayload.schema_policy_hash === 'string'
+        ? contentPayload.schema_policy_hash
+        : null,
+      preview_safety_status: 'passed',
+      reason: null,
+    }
+  }
+  // rejected
   return {
-    audit_id: m.audit_id,
-    instance_id: typeof m.instance_id === 'number' ? m.instance_id : 0,
-    database_name: m.database_name ?? null,
-    approved_sql: m.approved_sql,
-    approved_sql_hash: m.approved_sql_hash ?? null,
-    schema_policy_hash: m.schema_policy_hash ?? null,
-    preview_safety_status: m.preview_safety_status === 'rejected' ? 'rejected' : 'passed',
+    audit_id: auditId,
+    instance_id: 0,
+    database_name: null,
+    approved_sql: '',
+    approved_sql_hash: null,
+    schema_policy_hash: null,
+    preview_safety_status: 'rejected',
+    reason: typeof contentPayload.reason === 'string' ? contentPayload.reason : '（拒绝原因未提供）',
   }
 })
 

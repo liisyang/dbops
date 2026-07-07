@@ -751,7 +751,32 @@ async function onGenerate() {
   acceptError.value = ''
   copied.value = false
 
+  // C16-F2c 改：F2b 把 session_id + client_request_id 设为必填。
+  // 兼容旧入口（无 Chat session）：先建一个 instance_sql session 再调 sqlPreview。
+  // 注意：commit 2 会把整个 form 模式重定向到 /ai/chat?boundInstanceId=N，此处先临时修通。
+  const clientRequestId = safeUuid()
+  let sessionId: number
+  try {
+    const sess = await aiApi.createSession({
+      mode: 'instance_sql',
+      bound_instance_id: form.instanceId!,
+      source_page: 'sql_preview_legacy',
+    })
+    sessionId = sess.id
+  } catch (sessErr: any) {
+    const detail = sessErr?.response?.data?.detail || sessErr?.message || '未知错误'
+    formError.value = {
+      title: '创建绑定会话失败',
+      detail: typeof detail === 'string' ? detail : JSON.stringify(detail),
+      hint: '检查实例是否可访问（status=active）；F2a 不可变绑定规则。',
+    }
+    generating.value = false
+    return
+  }
+
   const payload: AiSqlPreviewRequest = {
+    session_id: sessionId,
+    client_request_id: clientRequestId,
     instance_id: form.instanceId!,
     database_name: form.databaseName.trim() || null,
     user_question: form.userQuestion.trim(),

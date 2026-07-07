@@ -2,12 +2,17 @@
   <OpsPage>
     <OpsPageHeader
       title="AI Copilot"
-      subtitle="基于 Dify 的智能运维对话（C5 落地交互界面）"
+      :subtitle="boundInstanceId
+        ? '基于 Dify 的智能 SQL Copilot（C16-F2c 实例绑定模式）'
+        : '基于 Dify 的智能运维对话（C5 落地交互界面）'"
     />
 
-    <div class="grid gap-4 lg:grid-cols-[280px_1fr]">
-      <!-- 左侧：会话侧栏 -->
-      <OpsSectionCard class="lg:min-h-[calc(100vh-220px)]">
+    <div :class="boundInstanceId ? '' : 'grid gap-4 lg:grid-cols-[280px_1fr]'">
+      <!-- 左侧：会话侧栏 — 仅 general 模式展示 -->
+      <OpsSectionCard
+        v-if="!boundInstanceId"
+        class="lg:min-h-[calc(100vh-220px)]"
+      >
         <ChatSessionList
           :sessions="sessions"
           :active-id="activeSessionId"
@@ -22,16 +27,54 @@
       <OpsSectionCard class="flex flex-col">
         <template #header>
           <div class="flex items-center justify-between gap-3">
-            <div>
+            <div class="min-w-0">
               <h2 class="text-base font-semibold text-on-surface">
                 {{ activeSessionTitle }}
               </h2>
-              <p class="text-xs text-on-surface-variant">
+              <p class="truncate text-xs text-on-surface-variant">
                 <span v-if="activeSessionId">
                   会话 #{{ activeSessionId }} · {{ activeMessages.length }} 条消息
                 </span>
+                <span v-else-if="boundInstanceId">创建/复用绑定会话中…</span>
                 <span v-else>请选择左侧会话，或点击"新建"开始对话</span>
               </p>
+            </div>
+            <!-- C16-F2c NEW — instance_sql 模式：实例上下文 + 退出按钮 -->
+            <div v-if="boundInstanceId" class="flex shrink-0 items-center gap-2">
+              <span
+                v-if="boundInstanceContext"
+                class="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300"
+                :title="`${boundInstanceContext.instance_name} (${boundInstanceContext.db_type_code || '?'} / ${boundInstanceContext.server_ip || 'no-ip'}:${boundInstanceContext.port || '-'})`"
+              >
+                <span class="material-symbols-outlined text-[12px]">database</span>
+                {{ boundInstanceContext.instance_name }}
+                <span class="text-on-surface-variant/80">
+                  · {{ boundInstanceContext.db_type_code || '?' }}
+                  · {{ boundInstanceContext.server_ip || 'no-ip' }}:{{ boundInstanceContext.port || '-' }}
+                </span>
+              </span>
+              <span
+                v-else-if="boundInstanceLoading"
+                class="inline-flex items-center gap-1 text-[11px] text-on-surface-variant"
+              >
+                <span class="material-symbols-outlined animate-spin text-[12px]">sync</span>
+                加载实例上下文…
+              </span>
+              <span
+                v-else-if="boundInstanceError"
+                class="text-[11px] text-red-300"
+                :title="boundInstanceError"
+              >
+                实例上下文加载失败
+              </span>
+              <button
+                type="button"
+                class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+                @click="exitBoundMode"
+              >
+                <span class="material-symbols-outlined text-[12px]">arrow_back</span>
+                返回通用 Chat
+              </button>
             </div>
           </div>
         </template>
@@ -70,8 +113,8 @@
           <OpsEmptyState
             state="empty"
             icon="forum"
-            title="还没有选中的会话"
-            description="在左侧选择一个历史会话，或点击右上角“新建”开始一段新的对话。"
+            :title="boundInstanceId ? '正在创建绑定会话…' : '还没有选中的会话'"
+            :description="boundInstanceId ? '首次进入实例绑定模式时会自动创建或复用 instance_sql 会话。' : '在左侧选择一个历史会话，或点击右上角“新建”开始一段新的对话。'"
           />
         </div>
 
@@ -84,7 +127,9 @@
             state="empty"
             icon="chat_bubble"
             title="这条会话还没有消息"
-            description="在下方的输入框中输入问题，按 Enter 发送。"
+            :description="boundInstanceId
+              ? '在下方的输入框输入自然语言问题，例如「查询最近 10 条订单」，按 Enter 发送。'
+              : '在下方的输入框中输入问题，按 Enter 发送。'"
           />
         </div>
 
@@ -104,7 +149,10 @@
             :total-tokens="m.total_tokens"
             :metadata-json="m.metadata_json"
             :executing="pendingAuditIds.has(getAuditId(m))"
+            :pending-audit-ids="pendingAuditIds"
             @execute="onExecuteFromBubble"
+            @re-execute="onReExecuteFromResult"
+            @view-detail="onViewDetailFromResult"
           />
           <!-- C14 NEW — execute 错误条（局部，不污染 sendError） -->
           <div
@@ -124,7 +172,7 @@
           </div>
         </div>
 
-        <!-- 输入框（P4：发送中禁用 + 错误条） -->
+        <!-- 输入框（P4：发送中禁用 + 错误条；C16-F2c 改：placeholder 按模式切换） -->
         <div v-if="activeSessionId" class="mt-4 space-y-2 border-t border-outline-variant/30 pt-4">
           <div
             v-if="sendError"
@@ -144,7 +192,7 @@
           <ChatInputBox
             :model-value="draft"
             :disabled="sending"
-            :placeholder="sending ? '正在调用 Dify…请稍候' : '输入消息，Enter 发送，Shift+Enter 换行'"
+            :placeholder="inputPlaceholder"
             @update:model-value="draft = $event"
             @send="onSend"
           />
@@ -156,7 +204,7 @@
 
 <script setup lang="ts">
 /**
- * AI Copilot — 主入口（Phase 3.6 C5-P4）
+ * AI Copilot — 主入口（Phase 3.6 C5-P4 + C16-F2c boundInstanceId 模式分流）
  *
  * P4 进度：接 sendMessage + safeUuid（兼容非 secure context）+ 错误码 409/502/503/504/null 兜底。
  * - 乐观更新：先 append 本地 user 消息（status=pending），响应回来再替换
@@ -168,16 +216,26 @@
  * - assistant_message=null 兜底：UI 提示"助手消息未生成"，不弹错
  * - Pydantic 422 detail 数组 → 提取 .msg 拼成可读字符串
  *
+ * C16-F2c NEW（plan §21.3 C16-4 — 实例绑定 Chat SQL Copilot）：
+ * - 读取 route.query.boundInstanceId：有值 → 进入 instance_sql 模式
+ * - instance_sql 模式：创建/复用绑定 session（F2a partial unique 天然复用）
+ * - onSend 分流：instance_sql → POST /api/v1/ai/sql/preview；
+ *                general     → POST /api/v1/ai/chat/sessions/{id}/messages
+ * - 顶部显示实例上下文（name / db_type / host:port）
+ * - 输入框 placeholder 切换为 SQL 提示
+ *
  * 未做（Phase 3.6B）：FAB 浮窗 + 抽屉（用户已确认双入口策略）
  */
 import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { aiApi } from '@/api/ai'
+import { assetsApi } from '@/api/assets'
 import type {
   AiChatMessage,
   AiChatSession,
   AiSqlPreviewLinkMetadata,
 } from '@/types/ai'
+import type { InstanceDetail } from '@/types/api'
 import { safeUuid } from '@/utils/uuid'
 import {
   ChatMessageBubble,
@@ -215,6 +273,24 @@ let pendingPollTimer: ReturnType<typeof setInterval> | null = null
 // C15 NEW — 路由（C15-B 「查看详情」跳转 /ai/sql/preview?audit_id= 用）
 const router = useRouter()
 
+// C16-F2c NEW — boundInstanceId 模式分流（plan §21.3 C16-4）
+const route = useRoute()
+// 来自 route.query.boundInstanceId；有值 → instance_sql 模式
+const boundInstanceId = ref<number | null>(null)
+// 绑定的实例上下文（仅展示用，无关键行为依赖）
+const boundInstanceContext = ref<InstanceDetail | null>(null)
+const boundInstanceLoading = ref(false)
+const boundInstanceError = ref<string | null>(null)
+
+// 解析 route.query.boundInstanceId 为正整数；非法 → null
+function parseBoundInstanceId(): number | null {
+  const raw = route.query.boundInstanceId
+  if (raw == null) return null
+  const s = Array.isArray(raw) ? String(raw[0] ?? '') : String(raw)
+  const n = Number(s)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
 function getAuditId(msg: AiChatMessage): number {
   const md = msg.metadata_json as { audit_id?: number } | null | undefined
   return typeof md?.audit_id === 'number' ? md.audit_id : -1
@@ -229,6 +305,20 @@ const activeMessages = computed<AiChatMessage[]>(() => {
   const id = activeSessionId.value
   if (id == null) return []
   return messagesBySession.value[id] ?? []
+})
+// C16-F2c NEW — 当前激活 session 是否为 instance_sql 模式（决定 onSend 走 sqlPreview 还是 sendMessage）
+const activeSessionIsInstanceSql = computed<boolean>(() => {
+  if (boundInstanceId.value == null) return false
+  const s = sessions.value.find((x) => x.id === activeSessionId.value)
+  return s?.chat_mode === 'instance_sql' && s?.bound_instance_id === boundInstanceId.value
+})
+// C16-F2c NEW — 输入框 placeholder（按模式切换）
+const inputPlaceholder = computed(() => {
+  if (sending.value) return '正在调用 Dify…请稍候'
+  if (activeSessionIsInstanceSql.value) {
+    return '请输入要查询的数据，例如：查询最近 10 条订单（Enter 发送，Shift+Enter 换行）'
+  }
+  return '输入消息，Enter 发送，Shift+Enter 换行'
 })
 
 // ---- helpers ----
@@ -400,7 +490,80 @@ async function retryLoadMessages() {
   }
 }
 
-/** P4 真实发送 */
+// =============================================================================
+// C16-F2c NEW — boundInstanceId 模式分流（plan §21.3 C16-4）
+// =============================================================================
+
+/** 拉取绑定实例上下文（仅展示用）。失败不阻塞主流程。 */
+async function loadBoundInstanceContext(instanceId: number) {
+  boundInstanceLoading.value = true
+  boundInstanceError.value = null
+  try {
+    boundInstanceContext.value = await assetsApi.getInstance(instanceId, {
+      suppressErrorToast: true,
+    })
+  } catch (err) {
+    boundInstanceError.value = extractDetail(err, '加载实例上下文失败')
+    // eslint-disable-next-line no-console
+    console.error('[Chat] loadBoundInstanceContext failed:', err)
+  } finally {
+    boundInstanceLoading.value = false
+  }
+}
+
+/** 创建/复用 instance_sql 绑定 session（F2a partial unique 天然复用）。 */
+async function createBoundSession(instanceId: number) {
+  creating.value = true
+  try {
+    const sess = await aiApi.createSession({
+      mode: 'instance_sql',
+      bound_instance_id: instanceId,
+      source_page: 'instance_detail',
+    })
+    sessions.value = [sess, ...sessions.value]
+    activeSessionId.value = sess.id
+    messagesBySession.value[sess.id] = []
+    sendError.value = null
+    sessionsError.value = null
+  } catch (err) {
+    sessionsError.value = extractDetail(err, '创建/复用绑定会话失败')
+    // eslint-disable-next-line no-console
+    console.error('[Chat] createBoundSession failed:', err)
+  } finally {
+    creating.value = false
+  }
+}
+
+/** 退出实例绑定模式（去掉 query.boundInstanceId，回到 general 模式）。 */
+function exitBoundMode() {
+  boundInstanceId.value = null
+  boundInstanceContext.value = null
+  activeSessionId.value = null
+  // 用 router.replace 清 query，不留历史
+  router.replace({ name: 'AiChat', query: {} })
+}
+
+/** sqlPreview 错误映射（plan §11 + F2b 5 类新异常）。 */
+function describePreviewError(err: unknown): string {
+  const status = (err as AxiosLikeError | null)?.response?.status
+  const detail = (err as AxiosLikeError | null)?.response?.data?.detail
+  const detailStr =
+    typeof detail === 'string'
+      ? detail
+      : Array.isArray(detail) && detail.length
+        ? detail.map((d: { msg?: string; message?: string }) => d?.msg || d?.message || '').join('；')
+        : null
+  if (status === 403) return `会话无权访问（403）：${detailStr || 'session 不属于当前用户'}`
+  if (status === 404) return `会话或实例不存在（404）：${detailStr || '检查 session_id / instance_id'}`
+  if (status === 409) return `请求冲突（409）：${detailStr || '可能是幂等命中但 audit 缺失，需重新发送'}`
+  if (status === 422) return `参数校验失败（422）：${detailStr || '检查 mode / bound_instance_id / instance_id 一致性'}`
+  if (status === 502) return `Dify 服务不可达（502）：${detailStr || '稍后重试'}`
+  if (status === 503) return `AI SQL Preview 未启用（AI_SQL_PREVIEW_ENABLED=false）`
+  if (status === 504) return `Dify 调用超时（504）：${detailStr || '稍后重试或换更短的问题'}`
+  return extractDetail(err, 'SQL Preview 失败')
+}
+
+/** P4 真实发送（C16-F2c 改：instance_sql 分流到 sqlPreview） */
 async function onSend(value: string) {
   const sessionId = activeSessionId.value
   if (sessionId == null || sending.value) return
@@ -411,6 +574,49 @@ async function onSend(value: string) {
   sendError.value = null
   sending.value = true
 
+  // C16-F2c NEW — instance_sql 模式走 /ai/sql/preview
+  if (activeSessionIsInstanceSql.value && boundInstanceId.value != null) {
+    try {
+      const r = await aiApi.sqlPreview({
+        session_id: sessionId,
+        client_request_id: clientRequestId,
+        instance_id: boundInstanceId.value,
+        user_question: value,
+        current_page: 'instance_detail',
+      })
+      // 把占位 user 消息标记为 completed（id 由后端定；后续拉消息以服务端为准）
+      const completed: AiChatMessage = {
+        ...optimistic,
+        status: 'completed',
+        updated_at: nowIso(),
+      }
+      replaceOptimistic(sessionId, clientRequestId, completed)
+      // 重新拉消息：F2b 双消息事务写入了 user + preview message，
+      // 前端用 listMessages 拿到完整 message row（含真实 id + metadata_json）。
+      await loadMessages(sessionId)
+      // idempotent_replay 提示用户
+      if (r.idempotent_replay) {
+        sendError.value = '（使用缓存结果，未重复调用 Dify）'
+      }
+    } catch (err) {
+      const failed: AiChatMessage = {
+        ...optimistic,
+        status: 'failed',
+        error_code: 'SqlPreviewError',
+        error_message: describePreviewError(err),
+        updated_at: nowIso(),
+      }
+      replaceOptimistic(sessionId, clientRequestId, failed)
+      sendError.value = describePreviewError(err)
+      // eslint-disable-next-line no-console
+      console.error('[Chat] sqlPreview failed:', err)
+    } finally {
+      sending.value = false
+    }
+    return
+  }
+
+  // general 模式 — 维持 C3 sendMessage 行为
   try {
     const resp = await aiApi.sendMessage(sessionId, {
       client_request_id: clientRequestId,
@@ -445,8 +651,24 @@ async function onSend(value: string) {
 }
 
 // ---- lifecycle ----
-onMounted(() => {
-  loadSessions()
+onMounted(async () => {
+  const bid = parseBoundInstanceId()
+  if (bid != null) {
+    // C16-F2c NEW — instance_sql 模式入口
+    boundInstanceId.value = bid
+    // 并行：拉实例上下文 + 创建/复用 session（后者依赖 F2a partial unique 自动复用）
+    await Promise.all([
+      loadBoundInstanceContext(bid),
+      createBoundSession(bid),
+    ])
+    // session 建好后拉历史（普通情况无历史；已复用 session 才有历史）
+    if (activeSessionId.value != null) {
+      await loadMessages(activeSessionId.value)
+    }
+  } else {
+    // general 模式 — 维持 C5 行为
+    await loadSessions()
+  }
   loadPendingExecutions()
 })
 

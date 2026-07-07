@@ -26,6 +26,16 @@
         <span class="material-symbols-outlined text-[18px]">tune</span>
         {{ calibrationLoading ? '提交中...' : '端口校准' }}
       </button>
+      <!-- C16-F2c NEW — 实例绑定 AI 查询入口；跳 Chat.vue(boundInstanceId) → 进入 instance_sql 模式 -->
+      <button
+        type="button"
+        class="ops-secondary-button inline-flex items-center gap-1.5"
+        data-testid="instance-ai-chat-button"
+        @click="gotoAiChat"
+      >
+        <span class="material-symbols-outlined text-[18px]">auto_awesome</span>
+        AI 查询
+      </button>
     </div>
     <div v-if="actionMessage" class="mb-4 flex items-center gap-2 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-200">
       <span class="material-symbols-outlined text-[16px]">check_circle</span>
@@ -434,7 +444,7 @@
 
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { assetsApi } from '@/api/assets'
 import { OpsEmptyState, OpsEntityHeader, OpsModal, OpsPage, OpsSectionCard } from '@/components/ops'
@@ -447,6 +457,13 @@ type DetailField = {
 }
 
 const route = useRoute()
+const router = useRouter()
+
+// C16-F2c NEW — 进入 Chat 流（实例绑定 SQL Copilot 入口）
+function gotoAiChat() {
+  if (!detail.value?.id) return
+  router.push({ name: 'AiChat', query: { boundInstanceId: String(detail.value.id) } })
+}
 const detail = ref<InstanceDetail | null>(null)
 const loading = ref(false)
 const error = ref('')

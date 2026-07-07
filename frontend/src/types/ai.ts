@@ -30,9 +30,20 @@ export interface AiCapabilities {
 // Chat — Session
 // =============================================================================
 
-/** 创建新会话请求（可选 title）。 */
+/**
+ * 创建新会话请求。
+ *
+ * C16-F2a 扩展（plan §21.2 P0-1 不可变绑定）：
+ * - mode:              'general'（普通多轮） / 'instance_sql'（实例绑定 SQL Copilot）
+ * - bound_instance_id: 当 mode='instance_sql' 时必填
+ *                      当 mode='general' 时必须不传（传了 422）
+ * - source_page:       来源页面（落 metadata_json；不影响行为）
+ */
 export interface AiChatSessionCreateRequest {
   title?: string | null
+  mode?: 'general' | 'instance_sql'
+  bound_instance_id?: number | null
+  source_page?: string | null
 }
 
 /** 会话响应。 */
@@ -45,6 +56,9 @@ export interface AiChatSession {
   model_provider: string
   message_count: number
   last_message_at?: string | null
+  // C16-F2a：chat_mode + bound_instance_id 让前端可路由入口（plan §21.2）
+  chat_mode?: 'general' | 'instance_sql'
+  bound_instance_id?: number | null
   created_at: string
   updated_at: string
 }
@@ -120,26 +134,36 @@ export interface AiChatSendResponse {
 // =============================================================================
 
 /**
- * POST /api/v1/ai/sql/preview 请求（plan §5.2 + §5.3）。
+ * POST /api/v1/ai/sql/preview 请求（plan §5.2 + §5.3 + C16-F2b）。
  *
- * 关键字段：
- * - instance_id: 目标实例；后端派生 db_type_code，前端不直接传
- * - database_name: 可选；留空时 service fallback 到 '<default>'
- * - user_question: 用户原始问题，传给 Dify sql-generator workflow
- * - session_id / message_id: 可选；用于关联 ai_chat_session/message
- * - current_page: 白名单页面标识（ai_chat / instance_detail 等）
+ * C16-F2b 字段收紧（plan §21.3 C16-3 — Chat 流强制）：
+ * - session_id:        必填；消费 chat session.id，鉴权 session.user_id + chat_mode='instance_sql'
+ * - client_request_id: 必填；UUID 幂等键（同 session+UUID 重复请求返回原 audit）
+ * - message_id:        移除；由 service 内部生成 user_message 后回填 audit.message_id
+ * - instance_id:       目标实例；后端派生 db_type_code，前端不直接传
+ * - database_name:     可选；留空时 service fallback 到 '<default>'
+ * - user_question:     用户原始问题，传给 Dify sql-generator workflow
+ * - current_page:      白名单页面标识（ai_chat / instance_detail 等）
  */
 export interface AiSqlPreviewRequest {
+  // === C16-F2b 必填 ===
+  session_id: number
+  client_request_id: string
+  // === C12 既有 ===
   instance_id: number
   database_name?: string | null
   user_question: string
-  session_id?: number | null
-  message_id?: number | null
   current_page?: string | null
 }
 
 /**
- * POST /api/v1/ai/sql/preview 响应（plan §5.2 + §5.3 + §19 状态机）。
+ * POST /api/v1/ai/sql/preview 响应（plan §5.2 + §5.3 + §19 状态机 + C16-F2b）。
+ *
+ * C16-F2b 新增字段（plan §21.3 C16-3 — Chat 流耦合）：
+ * - session_id:          chat session.id（与 request 一致）
+ * - user_message_id:     ai_chat_message.id（role='user'，content=user_question）
+ * - preview_message_id:  ai_chat_message.id（role='assistant'，message_type='sql_preview_link'）
+ * - idempotent_replay:   client_request_id 命中已有 user message → 返回原三元组
  *
  * preview_safety_status='passed' 时：
  *   - approved_sql + approved_sql_hash 必填（落 ai_sql_audit）
@@ -151,6 +175,13 @@ export interface AiSqlPreviewRequest {
  *   - audit_id 仍可能返回（rejected 也落库用于审计）
  */
 export interface AiSqlPreviewResponse {
+  // === C16-F2b 新增 ===
+  session_id: number
+  user_message_id: number
+  preview_message_id: number
+  idempotent_replay: boolean
+
+  // 核心结果
   audit_id: number
   preview_safety_status: 'passed' | 'rejected'
 
@@ -284,8 +315,12 @@ export interface AiSqlResultPayload {
 }
 
 /**
- * sql_preview_link chat message 的 metadata_json（preview 阶段写入，
- * Chat 集成时把 approved_sql 卡片挂到 assistant message 上 + 提供执行入口）。
+ * sql_preview_link chat message 解析后的展示数据。
+ *
+ * C16-F2c 调整：F2b 把 preview_payload 写到 content JSON（passed 包含 approved_sql 等；
+ * rejected 包含 reason）。前端从 content + metadata_json 合并解析。
+ *
+ * ChatMessageBubble.vue previewLinkMeta 消费此 interface。
  */
 export interface AiSqlPreviewLinkMetadata {
   audit_id: number
@@ -295,4 +330,6 @@ export interface AiSqlPreviewLinkMetadata {
   approved_sql_hash?: string | null
   schema_policy_hash?: string | null
   preview_safety_status: 'passed' | 'rejected'
+  /** rejected 时显示的拒绝原因（F2b 落地在 content JSON 的 reason 字段） */
+  reason?: string | null
 }
