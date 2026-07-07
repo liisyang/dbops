@@ -688,6 +688,15 @@ const canAccept = computed(
 // 生命周期
 // =============================================================================
 onMounted(async () => {
+  // C16-F2c NEW — 接 query.boundInstanceId（资产详情页「AI 查询」入口）
+  // plan §21.3 C16-4 明确"用户只看到自然语言交互和 SQL 卡片，
+  // 不需要跳转到独立预览页"——SqlPreview.vue 沦为只读 audit 详情页 +
+  // 兼容旧链接。检测到 boundInstanceId 立即 router.replace 跳 Chat.vue。
+  const bid = parseBoundInstanceIdFromQuery()
+  if (bid != null) {
+    router.replace({ name: 'AiChat', query: { boundInstanceId: String(bid) } })
+    return
+  }
   await loadCapabilities()
   await loadInstances()
   // C15 NEW — 接 query.audit_id（Chat 流 sql_result 卡片跳转详情）
@@ -696,6 +705,18 @@ onMounted(async () => {
     await loadAuditDetail(aid)
   }
 })
+
+/**
+ * C16-F2c NEW — 解析 query.boundInstanceId 为正整数；非法 → null。
+ * 与 Chat.vue 的 parseBoundInstanceId 同形态（保持前端统一约定）。
+ */
+function parseBoundInstanceIdFromQuery(): number | null {
+  const raw = route.query.boundInstanceId
+  if (raw == null) return null
+  const s = Array.isArray(raw) ? String(raw[0] ?? '') : String(raw)
+  const n = Number(s)
+  return Number.isFinite(n) && n > 0 ? n : null
+}
 
 async function loadCapabilities() {
   try {
