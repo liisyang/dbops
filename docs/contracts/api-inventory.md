@@ -462,3 +462,35 @@ mode = 'general'       (无 boundInstanceId) → POST /api/v1/ai/chat/sessions/{
 - WebSocket 连接是否需要前端实现实时推送 UI？
 - `logs.ts` vs `logs.js` 哪个是期望的封装？建议删除 `logs.ts`（路径错误）或修正并统一。
 - `OAuth2PasswordBearer(tokenUrl="/api/rbac/login")` 是否故意指向 `/api/rbac/login` 还是历史遗留？
+
+#### 2.16.E C16-F17 跨入口一致性回归（`/ai/sql/preview` form 模式 vs Chat 模式）
+
+> plan §21.3 C16-4 末尾「下轮起手：F17」已闭环；F2a/F2b/F2c 测试覆盖后端跨入口逻辑（前端的 preview_message 渲染完整性由 F17 ChatMessageBubble 6 cases 覆盖）。
+
+两条入口写出的 preview_message 必须经 `ChatMessageBubble.previewLinkMeta` 正确解析：
+
+| 入口 | URL | `source_page` | Chat 流交互 | preview_message 内容来源 |
+|---|---|---|---|---|
+| form 模式 | `/ai/sql/preview?instance_id=N`（无 `boundInstanceId`） | `sql_preview_legacy` | 不写 ai_chat_message（仅 ai_sql_audit）[^form-legacy-note] | 后端 F2b 双消息事务同 session 写 user + preview message（参考 F2c §21.3 行内说明）|
+| Chat 模式 | `/ai/chat?boundInstanceId=N`（来自 `InstanceDetail.vue` 「AI 查询」） | `instance_detail` | 写 ai_chat_message 双消息（user + `sql_preview_link`） | 同上 |
+
+[^form-legacy-note]: form 模式在 Chat 集成之前的快照（C13-C14），通过 `SqlPreview.vue onGenerate` 主动 createSession（`source_page='sql_preview_legacy'`）后调 `/ai/sql/preview`；当前前端两层分支存在（`SqlPreview.vue` 的 `onGenerate` 路径在 `parseBoundInstanceIdFromQuery` 检测为 null 时生效；F2c 重定向让 `?boundInstanceId=N` 直接走 Chat.vue）。
+
+**回归要点**（F17 闭环）：
+
+1. **ChatMessageBubble.previewLinkMeta 5 message_type 分支**（F17 6 vitest cases）：
+   - passed + content 含 approved_sql → 绿框 + 「执行 SQL」按钮 + audit_id 透传
+   - passed + content 缺 approved_sql → previewLinkMeta=null，不渲染卡（脏数据兜底）
+   - rejected + content.reason → 红框 + 「SQL Preview 被拒绝」+ reason + 无执行按钮
+   - rejected + content 缺 reason → 红框 + 兜底文案「（拒绝原因未提供）」
+   - sql_preview_link + 非 JSON content → previewLinkMeta=null（脏数据兜底）
+   - messageType='chat' → 普通气泡 + markdown 渲染
+
+2. **后端跨入口一致性**（由 F2a/F2b/F2c 测试 29 cases 覆盖）：
+   - F2a `test_ai_chat_service_c16_f2a.py`（12 cases）：partial unique 复用 + source_page 不持久化 + immutable binding + 4 步校验 + mode 隔离
+   - F2b `test_ai_sql_preview_c16_f2b.py`（14 cases）：4 步鉴权链 + 幂等（client_request_id 命中已有 user_message）+ 双消息事务 + 5 类新异常
+   - F2c `test_ai_chat_message_response_c16_f2c.py`（3 cases）：AiChatMessageResponse.message_type 5 值 Literal（Pydantic）
+
+**实施位置**：`frontend/src/components/ai/ChatMessageBubble.spec.ts` 末尾追加 1 个 describe 块（1 helper + 6 cases，+168 行）。
+
+**关键文件**：见 `docs/40-tech-debt.md` F17 row + `docs/10-module-map.md` AI Copilot - Chat 跨入口一致性回归行 + `docs/30-runbook.md` §8.9 + `phase-3-6-ai-copilot-full-plan.md` §21.3 F17 实施记录。

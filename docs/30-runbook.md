@@ -383,3 +383,21 @@ curl -s http://127.0.0.1:60801/openapi.json \
 | rejected 卡片没有显示拒绝原因 | `content` JSON 是否包含 `reason` 字段 | F2b P1-3 写入 `content` JSON 的 `reason` 字段；F2c 模板 v-if 渲染 `previewLinkMeta.reason` | 1) 查 `ai_chat_message.content`（应有 `reason` key）；2) 检 F2c 模板红框卡片 `v-if="previewLinkMeta.status === 'rejected'"` | `frontend/src/components/ai/ChatMessageBubble.vue` rejected 分支模板 |
 | `SqlPreview.vue` 带 `?boundInstanceId=X` 直接访问 → 应跳 Chat.vue | `route.query.boundInstanceId` 是否被 `parseBoundInstanceIdFromQuery` 解析 | F2c commit 2 重定向：onMounted 检测 → `router.replace({name: 'AiChat', query: {boundInstanceId}})` | 1) 验 URL query；2) 检 router name 'AiChat' 是否注册；3) 手动访问 `http://host/ai/sql/preview?boundInstanceId=965` 测跳转 | `frontend/src/views/ai/SqlPreview.vue:parseBoundInstanceIdFromQuery` |
 | onSend 在 instance_sql 模式调错端点 | Chat.vue onSend 分流逻辑 | `mode === 'instance_sql'` → `aiApi.sqlPreview`；其他 → `aiApi.sendMessage` | 1) 控制台打印 `activeSessionIsInstanceSql.value`；2) 检 F2c onSend 块 if/else 分支 | `frontend/src/views/ai/Chat.vue:onSend` |
+
+### 8.9 AI Copilot 跨入口一致性回归（C16-F17）
+
+> F2c 实施记录识别回归盲点：form 模式（`SqlPreview.vue` 表单）与 Chat 模式（`InstanceDetail.vue` 「AI 查询」）的 preview_message 渲染完整性未单独测试覆盖。F17 闭环后端 4 步鉴权 / 幂等 / 双消息 / Pydantic Literal 由 F2a/F2b/F2c 三件套 29 cases 兜底；前端 `ChatMessageBubble.previewLinkMeta` 5 message_type 分支由 vitest 6 cases 兜底。
+
+| 现象 | 排查点 | 原因 | 解决方式 | 关键文件 |
+|---|---|---|---|---|
+| Chat 流内 preview_message 显示纯文本气泡（无绿/红框） | `metadata_json.preview_safety_status` 与 `content` JSON 是否同时落 | F2b 把 preview_payload 写在 `content` JSON（不在 `metadata_json`）；`ChatMessageBubble.previewLinkMeta` 合并两个源 | 1) DB 直查 `ai_chat_message.content` 应是 JSON 字符串；2) 检 spec.ts 6 cases 是否仍全过 | `frontend/src/components/ai/ChatMessageBubble.vue:previewLinkMeta` |
+| Chat 流内 rejected 卡片 reason 字段渲染为空 | content JSON 是否有 `reason` key | F2b P1-3 拒绝路径写入 `content.reason`；模板 v-if 渲染 `previewLinkMeta.reason` | 1) 查 DB `ai_chat_message.content` 是否有 `reason`；2) 检 F2c 模板红框卡片的 v-if 条件 `previewLinkMeta.preview_safety_status === 'rejected'` | `frontend/src/components/ai/ChatMessageBubble.vue` rejected 模板分支 |
+| Chat 流内 preview_message 显示 approved_sql 但执行按钮缺失 | `status` 字段是否被前端的 previewLinkMeta 正确归类 | previewLinkMeta 公式：`metadata.preview_safety_status === 'rejected' ? 'rejected' : 'passed'`；落入红/绿分支由 status 字符串决定 | 1) 检 metadata_json.preview_safety_status 值；2) 检 spec.ts case 1 (passed) 与 case 3 (rejected) 是否通过 | `frontend/src/components/ai/ChatMessageBubble.spec.ts` 5 分支回归 |
+| form 模式 SqlPreview.vue 表单提交 → 看不到消息但 db 写了 ai_chat_message | 前端是否调用 `loadMessages` | form 模式（无 `boundInstanceId`）走 `SqlPreview.vue onGenerate`，不显示 chat 流；后端仍走 F2b 双消息事务 | 1) 说明：form 模式产出的 preview_message 仍会出现在 Chat 视图同 session 历史中（partial unique 复用）；2) 切到 `/ai/chat?boundInstanceId=X` 可看到历史 | `frontend/src/views/ai/SqlPreview.vue:onGenerate` + `frontend/src/views/ai/Chat.vue:loadMessages` |
+| 同 instance 的 form + Chat 调用两次 sqlPreview，audit 数量预期多少 | 是否走同一 instance_sql session（F2a partial unique 复用）| partial unique 约束 `(user, bound_instance_id, chat_mode='instance_sql', archived=false)` 仅一行；两次创建返回同 session | 1) DB 直查 `ai_chat_session` WHERE `bound_instance_id=N AND chat_mode='instance_sql'` 应只一行；2) 检 F2a 测试 `test_instance_sql_mode_reuses_existing_session` 与 `test_db_partial_unique_blocks_duplicate_instance_sql` | `backend/tests/test_ai_chat_service_c16_f2a.py` + `backend/db/dbops_phase3_6b2_c16_f2a_chat_mode.sql`（partial unique idx）|
+
+> **回归测试入口**：
+> - 前端：`cd /home/lisiyang/dbops/frontend && npx vitest run src/components/ai/ChatMessageBubble.spec.ts`（应 28 cases passed，含新增 6 cases F17）
+> - 后端：`cd /home/lisiyang/dbops/backend && pytest tests/test_ai_chat_service_c16_f2a.py tests/test_ai_sql_preview_c16_f2b.py tests/test_ai_chat_message_response_c16_f2c.py`（应 29 cases passed）
+> - 完整：`bash scripts/ai/verify.sh`（应 0 failed / 696 passed / 3 skipped）
+

@@ -367,3 +367,171 @@ describe('ChatMessageBubble — render markdown（Refactor）', () => {
     expect(md.html()).toContain('<strong>')
   })
 })
+
+/**
+ * ChatMessageBubble — sql_preview_link previewLinkMeta 5 分支（C16-F2c + F17 跨入口回归）
+ *
+ * 背景（F17 — plan §21.3 C16-4 末尾）：
+ * - form 模式（SqlPreview.vue 表单提交）写 ai_sql_audit + 双消息（user + preview_message）；
+ *   source_page='sql_preview_legacy'，落 message_type='sql_preview_link'
+ * - Chat 模式（InstanceDetail 「AI 查询」→ Chat.vue onSend 分流）走同一 F2b 双消息事务，
+ *   source_page='instance_detail'
+ * - 两条入口的 preview_message 经 listMessages 回到前端，必须被 previewLinkMeta
+ *   正确解析为 passed/rejected 卡片（合并 metadata_json 的 audit_id/status +
+ *   content JSON 的 SQL 详情 / 拒绝原因）
+ *
+ * 5 分支必须全覆盖（C16-F2c 已实现 + F17 补回归）：
+ *  1. passed + content 含 approved_sql            → 绿框卡 + 「执行 SQL」按钮
+ *  2. passed + content 缺 approved_sql（脏数据）   → previewLinkMeta=null，不渲染卡
+ *  3. rejected + content.reason                   → 红框 + 「SQL Preview 被拒绝」+ reason
+ *  4. rejected + content 缺 reason                → 红框 + 「（拒绝原因未提供）」
+ *  5. sql_preview_link + 非 JSON content（历史脏）→ previewLinkMeta=null，不渲染卡
+ *  6. messageType='chat' + 任意 metadata/content   → 普通气泡，不渲染预览卡
+ */
+describe('ChatMessageBubble — sql_preview_link previewLinkMeta（C16-F2c + F17 跨入口一致性回归）', () => {
+  /**
+   * 构造 sql_preview_link 卡片消息 props；metadataJson/content 字段由测试自定义。
+   * preview_safety_status 默认 'passed'，与 F2c metadata_json schema 对齐。
+   */
+  function makeSqlPreviewLinkMessage(opts: {
+    auditId: number
+    status: 'passed' | 'rejected'
+    contentJson: string | null
+    rawContent?: string
+    metadataExtras?: Record<string, unknown>
+  }) {
+    return {
+      role: 'assistant' as const,
+      status: 'completed' as const,
+      messageType: 'sql_preview_link' as const,
+      content:
+        opts.contentJson !== null ? opts.contentJson : opts.rawContent ?? null,
+      metadataJson: {
+        audit_id: opts.auditId,
+        preview_safety_status: opts.status,
+        instance_id: 965,
+        ...(opts.metadataExtras ?? {}),
+      },
+    }
+  }
+
+  // 关键字常量（与 .vue 模板第 50 / 83 行一对一）
+  const PASSED_TITLE_PREFIX = '已通过的 SQL'
+  const REJECTED_TITLE_PREFIX = 'SQL Preview 被拒绝'
+
+  it('case 1 (passed + content 含 approved_sql) → 渲染绿框卡 + 执行按钮 + 透传 audit_id', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeSqlPreviewLinkMessage({
+        auditId: 100,
+        status: 'passed',
+        contentJson: JSON.stringify({
+          approved_sql: 'SELECT id, name FROM users WHERE status = $1',
+          approved_sql_hash: 'sha256:abc',
+          schema_policy_hash: 'sha256:def',
+        }),
+      }),
+    })
+    const txt = wrapper.text()
+    expect(txt).toContain(PASSED_TITLE_PREFIX)
+    expect(txt).toContain('audit #100')
+    // 执行 SQL 按钮（按钮文案：执行 SQL；见模板第 64 行）
+    expect(txt).toContain('执行 SQL')
+    // approved_sql 渲染到 <pre><code>
+    expect(wrapper.find('pre code').text()).toBe(
+      'SELECT id, name FROM users WHERE status = $1',
+    )
+    // rejected 分支不应出现
+    expect(txt).not.toContain(REJECTED_TITLE_PREFIX)
+  })
+
+  it('case 2 (passed + content 缺 approved_sql 脏数据) → previewLinkMeta=null，不渲染预览卡', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeSqlPreviewLinkMessage({
+        auditId: 101,
+        status: 'passed',
+        // 罕见情况：metadata 写 passed 但 content 没有 approved_sql（应为脏数据，
+        // previewLinkMeta computed 会因 approved_sql 缺失返回 null）
+        contentJson: JSON.stringify({ reason: '前端不应到达该分支' }),
+      }),
+    })
+    const txt = wrapper.text()
+    expect(txt).not.toContain(PASSED_TITLE_PREFIX)
+    expect(txt).not.toContain(REJECTED_TITLE_PREFIX)
+    expect(txt).not.toContain('执行 SQL')
+  })
+
+  it('case 3 (rejected + content.reason) → 渲染红框卡 + 「SQL Preview 被拒绝」+ reason + 无执行按钮', () => {
+    const reason = '检测到 DELETE，与「只读」安全策略冲突'
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeSqlPreviewLinkMessage({
+        auditId: 200,
+        status: 'rejected',
+        contentJson: JSON.stringify({
+          reason,
+          // 兼容：rejected 也可能带 generated_sql，但不应渲染
+          approved_sql: 'DELETE FROM users',
+        }),
+      }),
+    })
+    const txt = wrapper.text()
+    expect(txt).toContain(REJECTED_TITLE_PREFIX)
+    expect(txt).toContain('audit #200')
+    expect(txt).toContain(reason)
+    // 无执行按钮（防止 F2b P1-3 rejected 也写 preview_message 后误触 execute）
+    expect(txt).not.toContain('执行 SQL')
+    // 没渲染绿框卡
+    expect(txt).not.toContain(PASSED_TITLE_PREFIX)
+  })
+
+  it('case 4 (rejected + content 缺 reason 兜底) → 红框 + 「（拒绝原因未提供）」', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeSqlPreviewLinkMessage({
+        auditId: 201,
+        status: 'rejected',
+        contentJson: JSON.stringify({}), // 无 reason 字段
+      }),
+    })
+    const txt = wrapper.text()
+    expect(txt).toContain(REJECTED_TITLE_PREFIX)
+    expect(txt).toContain('audit #201')
+    // 兜底文案（previewLinkMeta 计算属性 fallback）
+    expect(txt).toContain('（拒绝原因未提供）')
+    // 仍然无执行按钮
+    expect(txt).not.toContain('执行 SQL')
+  })
+
+  it('case 5 (sql_preview_link + 非 JSON content 历史脏数据) → previewLinkMeta=null，不渲染卡', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeSqlPreviewLinkMessage({
+        auditId: 300,
+        status: 'passed',
+        contentJson: null,
+        rawContent: '历史脏数据：纯文本 SQL（不是 JSON）',
+      }),
+    })
+    const txt = wrapper.text()
+    // 非 JSON content → previewLinkMeta 走空 payload，approved_sql 为空 → 返回 null
+    expect(txt).not.toContain(PASSED_TITLE_PREFIX)
+    expect(txt).not.toContain(REJECTED_TITLE_PREFIX)
+    expect(txt).not.toContain('执行 SQL')
+  })
+
+  it('case 6 (messageType=chat) → 普通气泡，不渲染任何 sql_preview_link 卡', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '你好，我是一个普通的 chat 回复',
+        metadataJson: { foo: 'bar' },
+      },
+    })
+    const txt = wrapper.text()
+    expect(txt).toContain('你好，我是一个普通的 chat 回复')
+    expect(txt).not.toContain(PASSED_TITLE_PREFIX)
+    expect(txt).not.toContain(REJECTED_TITLE_PREFIX)
+    expect(txt).not.toContain('执行 SQL')
+    // chat 走 markdown 渲染
+    expect(wrapper.find('[data-testid="ai-markdown-body"]').exists()).toBe(true)
+  })
+})

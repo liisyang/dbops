@@ -2336,7 +2336,35 @@ Preview 卡片按钮：
 - 现场 live E2E：dev 库 `POST /api/v1/ai/chat/sessions` + `POST /api/v1/ai/sql/preview` 走通 instance_sql 全链路（创建/复用 session + Preview 5 态机 + 双消息写入 + 执行结果回流 Chat）
 - 3 步 commit 都已 push 到 `feature/phase-3-6-ai-copilot` 分支
 
-**下轮起手**：F17 跨入口一致性回归（`/ai/sql/preview` form 模式 vs Chat 模式，前端 form 表单入口已 commit 1 改造 + commit 2 重定向，待补自动化测试覆盖双向一致性）/ Phase 3.7 下一阶段（Inspection AI 集成）。
+**下轮起手**：C16-F2d Chat 流 sql_result 卡片「执行详情」「错误重试」入口 或 C16-5 Execute 按钮和结果卡片闭环（plan §21.3 C16-5）/ Phase 3.7 下一阶段（Inspection AI 集成）。
+
+---
+
+##### C16-4 实施记录 — C16-F17 已闭环（2026-07-07）
+
+F2c 实施后识别回归盲点：F2b 落地 `message_type='sql_preview_link'` 后，前端 listMessages 走 `ChatMessageBubble.previewLinkMeta` 5 message_type 解析分支，但 form 模式（`SqlPreview.vue` 表单入口，`source_page='sql_preview_legacy'`）和 Chat 模式（`InstanceDetail.vue`「AI 查询」入口，`source_page='instance_detail'`）写出的 preview_message 回到前端的卡片渲染完整性未单独测试覆盖。F17 闭环此盲点。
+
+**F17 起手 commit**（单 commit，1 文件改动）：
+
+1. **commit `<sha>`** — ChatMessageBubble previewLinkMeta 5 分支回归
+   - 1 file / +168 行
+   - `frontend/src/components/ai/ChatMessageBubble.spec.ts`：在现有 sql_result 操作按钮 describe 块后追加 1 个新 describe「ChatMessageBubble — sql_preview_link previewLinkMeta（C16-F2c + F17 跨入口一致性回归）」共 6 cases（passed+approved_sql / passed 缺 approved_sql 脏数据 / rejected+content.reason / rejected 缺 reason 兜底 / 非 JSON content 历史脏 / chat 普通气泡）
+
+**后端跨入口一致性**（由 F2a/F2b/F2c 测试 29 cases 覆盖，F17 不新增文件）：
+- F2a `tests/test_ai_chat_service_c16_f2a.py` 12 cases：partial unique 复用 + source_page 不持久化 + immutable binding + 4 步校验 + mode 隔离
+- F2b `tests/test_ai_sql_preview_c16_f2b.py` 14 cases：4 步鉴权链 + 幂等（client_request_id 命中已有 user_message）+ 双消息事务 + 5 类新异常
+- F2c `tests/test_ai_chat_message_response_c16_f2c.py` 3 cases：AiChatMessageResponse.message_type 5 值 Literal（Pydantic）
+
+**验证**：
+- `bash scripts/ai/verify.sh` → 0 failed（3 skipped 历史 C13 sqlglot 环境问题）
+- pytest：696 passed（含 F2a/F2b/F2c 29 cases 无 regression + ChatMessageBubble spec 由 22 → 28 cases）
+- vue-tsc：0 错
+- vitest（`npx vitest run src/components/ai/ChatMessageBubble.spec.ts`）：28 cases passed（189ms）
+- live E2E 验证：dev 库 PG 实例 id=965（admin user）已通过 F2c live 验证（form 模式与 Chat 模式在同一 dev 库上共走通；F17 6 cases 覆盖两者产物的解析分支）
+
+**关联改动**：
+- 4 docs：`docs/40-tech-debt.md` F17 row + F16 sprint 闭环说明 + `docs/10-module-map.md` AI Copilot - Chat 跨入口一致性回归行 + `docs/contracts/api-inventory.md` §2.16.E 跨入口一致性回归 + `docs/30-runbook.md` §8.9 跨入口一致性回归
+- 1 memory：`phase-3-6-c16-f17-completed-2026-07-07.md` + MEMORY.md 指针
 
 ---
 
