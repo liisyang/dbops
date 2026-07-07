@@ -126,4 +126,70 @@
   .preview-muted-card {
     @apply rounded-xl bg-surface-container/50 p-4;
   }
+
+  /* ─── AI Copilot — markdown 渲染（C15+ refactor）─── */
+  /* ChatMessageBubble 内部 v-html 出来的 markdown HTML 使用 .ai-markdown 包裹。 */
+  /* 这里只约束 .ai-markdown 内的标签，避免污染全局 markdown 风格（项目其它位置不渲染 markdown）。 */
+  .ai-markdown {
+    @apply text-sm leading-relaxed;
+  }
+  .ai-markdown > :first-child {
+    @apply mt-0;
+  }
+  .ai-markdown > :last-child {
+    @apply mb-0;
+  }
+  .ai-markdown p {
+    @apply my-2;
+  }
+  .ai-markdown h1,
+  .ai-markdown h2,
+  .ai-markdown h3,
+  .ai-markdown h4 {
+    @apply mt-3 mb-1.5 font-semibold text-on-surface;
+  }
+  .ai-markdown h1 { @apply text-base; }
+  .ai-markdown h2 { @apply text-[15px]; }
+  .ai-markdown h3 { @apply text-sm; }
+  .ai-markdown h4 { @apply text-[13px]; }
+  .ai-markdown ul,
+  .ai-markdown ol {
+    @apply my-2 pl-5;
+  }
+  .ai-markdown ul { list-style: disc; }
+  .ai-markdown ol { list-style: decimal; }
+  .ai-markdown li {
+    @apply my-0.5;
+  }
+  .ai-markdown code {
+    @apply rounded bg-surface-variant/60 px-1 py-0.5 font-mono text-[12px] text-on-surface;
+  }
+  .ai-markdown pre {
+    @apply my-2 overflow-x-auto rounded-lg bg-surface-variant/50 p-2.5;
+  }
+  .ai-markdown pre code {
+    @apply bg-transparent p-0 text-[12px];
+  }
+  .ai-markdown blockquote {
+    @apply my-2 border-l-2 border-outline-variant/60 pl-3 text-on-surface-variant;
+  }
+  .ai-markdown a {
+    @apply text-primary underline decoration-primary/40 underline-offset-2;
+  }
+  .ai-markdown a:hover {
+    @apply decoration-primary;
+  }
+  .ai-markdown hr {
+    @apply my-3 border-outline-variant/30;
+  }
+  .ai-markdown table {
+    @apply my-2 w-full border-collapse text-[12px];
+  }
+  .ai-markdown th,
+  .ai-markdown td {
+    @apply border border-outline-variant/30 px-2 py-1;
+  }
+  .ai-markdown th {
+    @apply bg-surface-variant/40 font-medium;
+  }
 }

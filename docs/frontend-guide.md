@@ -18,6 +18,7 @@
 | 图标 | Google Material Symbols (CDN 字体) | — |
 | 国际化 | vue-i18n | ^11.3 |
 | 时间 | dayjs | ^1.11.20 |
+| Markdown | marked | ^14.1.4 |
 | 测试 | Vitest + @vue/test-utils + happy-dom | ^3.2.4 |
 
 ## 2. 目录约定
@@ -34,7 +35,7 @@ src/
 ├── router/           # 路由配置（index.ts）
 ├── stores/           # Pinia Store
 ├── types/            # TypeScript 类型定义（api.ts）
-├── utils/            # 工具函数（i18n, timezone, uuid, aiText）
+├── utils/            # 工具函数（i18n, timezone, uuid, aiText, markdown）
 └── views/            # 页面组件，按模块分子目录
     ├── audit/        # 审计与安全
     ├── backup/       # 备份与恢复
@@ -139,6 +140,18 @@ src/
 6. `ui-preview` 路由只承载 mock-only 开发预览页，例如 `/ui-preview/assets` 和 `/ui-preview/servers.vue`，页面不得调用真实 API。
 
 **代码依据：** `src/router/index.ts:24-220` (路由定义), `src/router/index.ts:231-239` (路由守卫), `src/router/index.ts:228`。
+
+### 3.11 AI Copilot — markdown 渲染
+
+1. AI 回答（Dify LLM 返回的 `answer`）是 markdown 格式，必须用 `renderMarkdownBlock()`（`src/utils/markdown.ts`）渲染为 HTML 后再用 `v-html` 输出。
+2. **不要**用 `{{ content }}` 直出 — 用户会看到 `**粗体**` / `## 标题` / `` `代码` `` / `- 列表` 等"源码态"，无法阅读。
+3. **不要**自己引入其它 markdown 库（如 `markdown-it` / `remark`）。统一走 `src/utils/markdown.ts`。
+4. 渲染范围仅限 assistant / system 角色的 chat / sql_preview / error 三种 `messageType`；user 角色保持纯文本（用户输入通常不是 markdown，避免误渲染）。
+5. `renderMarkdownBlock` 已做安全过滤：剥除裸 HTML（`<script>` / `<iframe>` 等）、拦截 `javascript:` / `data:` / `vbscript:` 协议（降级为纯文本）、属性值转义。XSS 风险面已收敛，无需在调用方再处理。
+6. `.ai-markdown` 类的样式集中在 `src/assets/styles/main.css` 的 `@layer components` 段；新增 markdown 视觉调整请改那里，不要在组件里写内联样式。
+7. sql_preview_link / sql_result 两种卡片走 metadata 解析，不走 markdown 渲染（结构化卡片，不需要 markdown）。
+
+**代码依据：** `src/utils/markdown.ts:90-150` (`renderMarkdown` / `renderMarkdownBlock`), `src/components/ai/ChatMessageBubble.vue:25-39` (v-html 接入点), `src/assets/styles/main.css:130-200` (.ai-markdown 样式)。
 
 ## 4. 推荐复用清单
 

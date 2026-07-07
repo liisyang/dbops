@@ -231,3 +231,139 @@ describe('ChatMessageBubble — hide 块（Refactor 兜底）', () => {
     expect(wrapper.find('table').exists()).toBe(true)
   })
 })
+
+/* ------------------------------------------------------------------ *
+ * Refactor — render markdown（C15+）：assistant / system 气泡用 v-html
+ * 输出 marked 渲染的 HTML，user 气泡保持纯文本。
+ * ------------------------------------------------------------------ */
+
+describe('ChatMessageBubble — render markdown（Refactor）', () => {
+  it('assistant chat 气泡：H2 渲染为 <h2>', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '## 你好',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    expect(md.exists()).toBe(true)
+    expect(md.html()).toContain('<h2>')
+    expect(md.text()).toContain('你好')
+  })
+
+  it('assistant chat 气泡：**加粗** 渲染为 <strong>', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '这是 **重要** 内容',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    expect(md.html()).toContain('<strong>')
+    expect(md.html()).toContain('重要')
+  })
+
+  it('assistant chat 气泡：- 列表 渲染为 <ul><li>', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '- 项目 A\n- 项目 B',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    expect(md.find('ul').exists()).toBe(true)
+    expect(md.findAll('li').length).toBe(2)
+  })
+
+  it('assistant chat 气泡：```围栏代码块``` 渲染为 <pre><code>', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '```sql\nSELECT *\nFROM t;\n```',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    expect(md.find('pre').exists()).toBe(true)
+    expect(md.find('pre code').exists()).toBe(true)
+    expect(md.text()).toContain('SELECT *')
+  })
+
+  it('assistant chat 气泡：危险链接 javascript: 降级为纯文本', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '[点我](javascript:alert(1))',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    expect(md.find('a').exists()).toBe(false)
+    expect(md.text()).toContain('点我')
+    expect(md.html()).not.toContain('javascript:')
+  })
+
+  it('assistant chat 气泡：合法 http 链接保留 <a href>', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'chat',
+        content: '[官网](https://example.com)',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    const a = md.find('a')
+    expect(a.exists()).toBe(true)
+    expect(a.attributes('href')).toBe('https://example.com')
+    expect(a.text()).toBe('官网')
+  })
+
+  it('user 气泡：保持纯文本（不渲染 markdown）', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'user',
+        status: 'completed',
+        messageType: 'chat',
+        content: '## 这是用户输入',
+      },
+    })
+    // user 气泡不渲染 v-html → 没有 ai-markdown-body testid
+    expect(wrapper.find('[data-testid="ai-markdown-body"]').exists()).toBe(false)
+    // 但纯文本内容应该出现
+    expect(wrapper.text()).toContain('## 这是用户输入')
+  })
+
+  it('sql_result 卡片：不受 markdown 渲染影响（仍走 metadata 解析）', () => {
+    // sql_result 走 v-else-if 分支，不会进入 markdown 渲染逻辑
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('success', 1200),
+    })
+    expect(wrapper.find('[data-testid="ai-markdown-body"]').exists()).toBe(false)
+    expect(wrapper.find('table').exists()).toBe(true)
+  })
+
+  it('error 文案：assistant 气泡也走 markdown 渲染', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'failed',
+        messageType: 'error',
+        errorCode: 'TIMEOUT',
+        errorMessage: '请求 **超时**，请重试',
+        content: '请求 **超时**，请重试',
+      },
+    })
+    const md = wrapper.find('[data-testid="ai-markdown-body"]')
+    expect(md.exists()).toBe(true)
+    expect(md.html()).toContain('<strong>')
+  })
+})

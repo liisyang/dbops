@@ -17,15 +17,27 @@
       <div
         v-if="messageType === 'chat' || messageType === 'sql_preview' || messageType === 'error' || !messageType"
         :class="[
-          'rounded-lg px-4 py-2.5 text-sm leading-relaxed whitespace-pre-wrap break-words',
+          'rounded-lg px-4 py-2.5 text-sm leading-relaxed',
           isUser
-            ? 'bg-sky-500/20 text-on-surface'
+            ? 'bg-sky-500/20 text-on-surface whitespace-pre-wrap break-words'
             : 'bg-surface-container-high text-on-surface',
         ]"
       >
-        <slot>
-          {{ displayContent || '(空)' }}
-        </slot>
+        <!--
+          user 消息保持纯文本（用户输入通常不是 markdown）；
+          assistant / system 消息用 v-html 渲染 markdown（marked 已对危险 HTML / 协议做拦截）。
+        -->
+        <template v-if="isUser">
+          <slot>
+            {{ displayContent || '(空)' }}
+          </slot>
+        </template>
+        <div
+          v-else
+          class="ai-markdown"
+          data-testid="ai-markdown-body"
+          v-html="renderedMarkdown"
+        />
       </div>
 
       <!-- C14 NEW — sql_preview_link 卡片：SQL 摘要 + 执行入口 -->
@@ -207,6 +219,13 @@
  *  - 在 chat 气泡显示前对 content 做兜底剥离（避免历史脏数据 / 其它端点漏剥离时泄露）
  *  - 只影响 chat / sql_preview / error 普通文本气泡，不影响 sql_preview_link / sql_result 卡片
  *  - 后端 DifyService.chat_message 已对 answer 做权威剥离，本处为显示层最后防线
+ *
+ * Refactor — render markdown：
+ *  - assistant / system 气泡的 displayContent 用 marked 渲染为 HTML 后 v-html 输出
+ *  - user 气泡保持纯文本（用户输入通常不是 markdown，避免误渲染）
+ *  - markdown.ts 已做：HTML 标签拦截（剥除裸 <script>/<iframe>）、危险 URL 协议拦截
+ *    （javascript:/data:/vbscript: 降级为纯文本）、属性转义
+ *  - v-html 绑值在 markdown.ts 受控生成，安全
  */
 import { computed } from 'vue'
 import ChatStatusBadge from './ChatStatusBadge.vue'
@@ -216,6 +235,7 @@ import type {
   AiSqlResultPayload,
 } from '@/types/ai'
 import { stripThinkBlocks } from '@/utils/aiText'
+import { renderMarkdownBlock } from '@/utils/markdown'
 
 const props = defineProps<{
   role: 'user' | 'assistant' | 'system'
@@ -347,5 +367,23 @@ const displayContent = computed<string>(() => {
     return props.content ?? ''
   }
   return stripThinkBlocks(props.content)
+})
+
+/**
+ * Refactor — render markdown：
+ * assistant / system 气泡的 markdown 渲染产物。空内容时输出空串。
+ * markdown.ts 已做安全过滤（见该文件头部注释），可直接 v-html。
+ *
+ * 模板里的 `whitespace-pre-wrap` 已经在 v-else 分支移除（className 在父 div），
+ * 由 markdown 自身的 <p>/<br> 标签负责换行。
+ */
+const renderedMarkdown = computed<string>(() => {
+  if (
+    props.messageType === 'sql_preview_link' ||
+    props.messageType === 'sql_result'
+  ) {
+    return ''
+  }
+  return renderMarkdownBlock(displayContent.value)
 })
 </script>
