@@ -231,6 +231,10 @@
 | POST | `/api/v1/ai/sql/preview` | `api/ai.py` | AiSqlPreviewService | JWT | 已实现（Phase 3.6 C12-C13） | `backend/app/api/ai.py:384` |
 | POST | `/api/v1/ai/sql/execute` | `api/ai.py` | AiSqlExecuteService | JWT | 已实现（Phase 3.6 C14） | `backend/app/api/ai.py:481` |
 | GET | `/api/v1/ai/sql/audit/{audit_id}/execution` | `api/ai.py` | AiSqlExecuteService | JWT | 已实现（Phase 3.6 C14） | `backend/app/api/ai.py:552` |
+| POST | `/api/v1/ai/sql/object-metadata/{instance_id}/collect` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:585` |
+| GET | `/api/v1/ai/sql/object-metadata/{instance_id}` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:620` |
+| GET | `/api/v1/ai/sql/object-metadata/{instance_id}/history` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:645` |
+| GET | `/api/v1/ai/sql/object-metadata/{instance_id}/context` | `api/ai.py` | AiObjectMetadataSnapshotService | JWT | 已实现（Phase 3.6 C16-F3） | `backend/app/api/ai.py:670` |
 
 #### 2.16.A Phase 3.6 C14 SQL Execute 端点（C14 新增）
 

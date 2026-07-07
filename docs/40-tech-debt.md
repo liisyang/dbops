@@ -188,6 +188,7 @@
 | F10 | 跨方言 SQL 校验（MySQL/Oracle/MSSQL） | C11 sqlglot 权威层已实现 PostgreSQL 校验；MySQL/Oracle/MSSQL 各自 dialect 的 AST 误报可能未覆盖 | `backend/app/services/sql_safety_service.py` `validate_with_ast` 扩展方言分支 + 测试矩阵 `tests/test_sql_safety_*.py` 28 → 100+ | Medium | C12 已通过 `sql_dialect` 字段为 schema policy 留口；补全需 `capabilities.sql_supported_db_types` 扩展到所有 4 方言 + 各自 sqlglot dialect 测试夹具 | 待处理 |
 | F11 | `db_sql_readonly_collect` role 是否需要为 `ai_sql` 加 special handling | C10 决策：`ai_sql` 复用 inspection 路径（`db_schema_metadata_collect` role），未单独加 `ai_sql` play | `ansible-playbooks/playbooks/dbops_collector_generic.yml` + `ansible-playbooks/playbooks/roles/db_*` | Low | 当前复用无问题（schema_metadata + AWX launch + collector callback 全走通）；若未来 `ai_sql` 需要特殊的 readonly 校验策略（如禁止 pg_dump），可加 `db_sql_readonly_collect` role | 待观察 |
 | F12 | AI Copilot ChatMessageBubble 渲染 Dify markdown 答案时未解析（用户看到 `**粗体**` / `## 标题` / `` `代码` `` 源码态） | C15+ Refactor 2026-06-29：发现 ChatMessageBubble 用 `whitespace-pre-wrap` + `{{ content }}` 直出 Dify LLM 返回的 markdown 文本，无人读懂 | `frontend/src/components/ai/ChatMessageBubble.vue:25-29`（v-if 块） | Medium | ✅ Refactor 已完成：新增 `frontend/src/utils/markdown.ts`（marked + 危险协议拦截 + 裸 HTML 拦截）+ ChatMessageBubble assistant 气泡走 `v-html="renderedMarkdown"`（user 气泡保留纯文本）+ 22 vitest + 535 pytest 全过 + vue-tsc 0 错 + docs/frontend-guide.md 3.11 节新增 markdown 渲染约定 + main.css 新增 `.ai-markdown` 样式 | 已完成 |
+| F13 | AI Copilot Object Metadata Snapshot（DB DDL 快照）补强 | C16-F3 commit `93499a1`+`6e071e9` 已落：DDL/ORM/Builder/Ansible Role/路由 + 运行时层 7 文件，但首版仅支持 PostgreSQL + 1MB DDL 截断（与 C8 schema snapshot 10MB cap 不同），未实现跨方言 | `backend/app/services/ai/ai_object_metadata_callback_service.py` `save_snapshots`（1MB 截断 + 两阶段发布）+ `backend/app/services/ai/ai_object_metadata_snapshot_service.py`（trigger/status/history/published/cleanup） + `backend/app/services/check_item_builder_registry.py:1119-1273`（`_AiObjectMetadataBuilder`） + `ansible-playbooks/playbooks/roles/db_object_metadata_collect/tasks/main.yml` | Medium | ✅ C16-F3 commit 3 已闭环：4 个测试文件 65 cases（builder 15 + callback 21 + snapshot 20 + context_integration 9） + 4 docs 同步 + 1 memory 闭环；live E2E 待 dev 库 PG 实例就绪后跑（已注册 PG `10.134.185.228` id=965 credential=7）；跨方言（MySQL/Oracle/MSSQL）与 C16-F0 合并排期 | 已完成 |
 
 ### 7.1 Phase 3.6 后续 sprint 建议
 
@@ -198,6 +199,7 @@
 5. **F9 SSE 流式**：与产品需求同步，单独 sprint
 6. **F10 跨方言**：C12 已扩展 schema policy 多 dialect 入口，补 sqlglot 测试矩阵
 7. **F11 是否需要 special role**：观察 `ai_sql` 复用 `db_schema_metadata_collect` 的真实使用 1-2 周后决定
+8. **F13 Object Metadata Snapshot**：C16-F3 commit 3 已闭环；live E2E 待 dev 库 PG 实例就绪后跑；跨方言与 C16-F0 合并
 
 ### 7.2 Phase 3.6 范围外但与 AI Copilot 相关
 

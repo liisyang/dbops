@@ -257,9 +257,9 @@ curl -s http://127.0.0.1:60801/openapi.json \
 
 ## 8. Phase 3.6 AI Copilot 排障入口
 
-> 本节为 Phase 3.6（AI Copilot）上线后排障入口；按子阶段（A / B0 / B / C）分组。
-> 当前已完成子阶段：3.6A Chat（C1–C5 + BE-bug1 + crypto.randomUUID hotfix）+ 3.6B0 Schema Snapshot（C6–C10）。
-> 计划中：3.6B SQL Audit（C11 sqlglot + SqlSafetyService 起手）+ 3.6C Inspection AI Analysis。
+> 本节为 Phase 3.6（AI Copilot）上线后排障入口；按子阶段（A / B0 / B1 / C）分组。
+> 当前已完成子阶段：3.6A Chat（C1–C5 + BE-bug1 + crypto.randomUUID hotfix）+ 3.6B0 Schema Snapshot（C6–C10）+ 3.6B0 Object Metadata Snapshot（C16-F3，PostgreSQL only）+ 3.6B1 SQL Audit & Execute（C11–C14 + C16-F1/F2 收尾）。
+> 计划中：3.6C Inspection AI Analysis。
 
 ### 8.1 Chat（Dify #1 `dbops-general-chat`）
 
@@ -310,3 +310,23 @@ curl -s http://127.0.0.1:60801/openapi.json \
 
 > 本节为占位；3.6C 起手后追加具体排障条目。
 | v5.2 回滚 | `idx_inspection_item_inspection_type` 索引是否存在 | IF EXISTS 防护 | 直接执行 `backend/db/rollback_inspection_v5_2_inspection_type.sql` | `backend/db/rollback_inspection_v5_2_inspection_type.sql` |
+
+### 8.5 Object Metadata Snapshot（C16-F3，AWX 异步采集 DDL）
+
+> 3.6B0 增量能力。PostgreSQL only（首版）；C16-F0 三方言合并时再扩。复用
+> `AI_SQL_PREVIEW_ENABLED` capability gate，不新增 flag。
+
+| 现象 | 优先检查 | 常见根因 | 修复入口 | 代码依据 |
+|---|---|---|---|---|
+| `POST /api/v1/ai/sql/object-metadata/{id}/collect` 返回 404 | `db_instance` 表是否有该 `instance_id`；是否已被删除 | `InstanceNotFoundError`：instance 不存在或已软删 | 重新加载实例列表核对；确认目标 instance 未被删除 | `backend/app/api/ai.py:637-638` + `backend/app/services/ai/ai_object_metadata_snapshot_service.py:53` |
+| 同 `(instance_id, schema_name)` 并发 collect 返回 409 | 该 (instance, schema) 是否已有 `pending`/`running` snapshot | `AiObjectMetadataAlreadyRunning`：DB partial unique `uq_ai_object_metadata_snapshot_running` 约束生效 | 等 callback 完成（pending/running → 终态）；或 10 min 后 `cleanup_running_timeouts` 兜底 | `backend/app/services/ai/ai_object_metadata_snapshot_service.py` + `backend/db/dbops_phase3_6b0_ai_object_metadata.sql` (partial unique) |
+| collect 返回 422 | `dbops_capabilities.sql_supported_db_types` 是否包含该 instance 的 `db_type_code`；当前是否 PostgreSQL | `UnsupportedDbTypeError`：`_AiObjectMetadataBuilder._SUPPORTED_DB_TYPES` 守卫（首版仅 PG） | 改用 PG 实例；或等 C16-F0 三方言合并（MySQL/SQL Server 同步扩展） | `backend/app/api/ai.py:641-642` + `backend/app/services/check_item_builder_registry.py:1119-1273` |
+| collect 返回 502 | AWX job template 10 是否可达；ansible-playbooks 端 `db_object_metadata_collect` role 是否已 push | `AwxLaunchError`：AWX HTTP 失败（凭证 / 网络 / Project 8 未同步） | 1) `curl $AWX_URL/api/v2/job_templates/10/launch/` 试 launch；2) 检查 `ansible-playbooks/playbooks/roles/db_object_metadata_collect/tasks/main.yml` 与 `dbops_collector_generic.yml` 路由块；3) 检查 `.env` `COLLECTOR_CALLBACK_URL` | `backend/app/api/ai.py:643-644` + `ansible-playbooks/playbooks/roles/db_object_metadata_collect/` |
+| collect 返回 503 | `.env` `AI_SQL_PREVIEW_ENABLED` | `FeatureDisabledError`：capability gate 关闭 | `.env` 设 `AI_SQL_PREVIEW_ENABLED=true` 后重启后端 | `backend/app/api/ai.py:639-640` + `backend/app/services/ai/ai_object_metadata_snapshot_service.py:57` |
+| snapshot 一直 `running` 不变 | 后端 callback 路由 `/api/v1/collector/callback` 是否收到 `business_domain=ai_object_metadata` 包；AWX Job stdout 是否成功 | 1) AWX Job 跑飞但 callback 网络断；2) callback 落到 `ai_object_metadata_snapshot` 时 `is_current=true` 已存在其他行，事务回滚 | 1) 看后端 stdout `ai_object_metadata snapshot save` 日志；2) 看 `ai_object_metadata_snapshot.status` 状态机；3) 等 startup `cleanup_running_timeouts` 兜底（10 min 默认） | `backend/app/services/collector_service.py` (handle_callback ai_object_metadata 分支) + `backend/app/services/ai/ai_object_metadata_snapshot_service.py:333-369` |
+| snapshot `error_code='RESULT_TRUNCATED'` | callback 写入时 DDL 文本是否超 1MB | callback `save_snapshots` 检测 `len(raw_ddl_bytes) > _MAX_BYTES` (1MB = 1048576)；snapshot 仍 `status=success` 但 `error_code='RESULT_TRUNCATED'`，`is_current=true`（截断本身不破坏 DDL 内容） | 前端 SqlPreview 集成侧看 `result_truncated=True`；是否走 schema 端 `/ai/sql/schema-snapshots/{id}/context` 兜底 | `backend/app/services/ai/ai_object_metadata_callback_service.py:114-128` (max_bytes=1048576) + 165 (TRUNCATED label) |
+| snapshot `error_code='TRUNCATED'` | 看 `error_message` 完整内容 | 内部行级 DDL（单行 `object_ddl_text` 字段）触发 1MB 截断；与 `RESULT_TRUNCATED` 共存但语义不同 | 看 callback 日志确认是 DDL 整体超 1MB 还是单行超；前端按 `error_code` 渲染 warning | `backend/app/services/ai/ai_object_metadata_callback_service.py:163-166` |
+| snapshot `error_code='NO_OBJECTS'` | 该 schema 是否确实无 table/view/index/function | callback 检测 `len(rows) == 0` 且 `status=success` → 标记 `failed` + `NO_OBJECTS` | 1) 确认 schema 名拼写正确；2) 用 `psql` 直连目标 DB 跑 `pg_tables WHERE schemaname='<schema>'` 验证；3) 若 DB 真的空，属正常现象 | `backend/app/services/ai/ai_object_metadata_callback_service.py:138-141` |
+| `GET /ai/sql/object-metadata/{id}/context` 返回 `available=false` | snapshot 是否 `is_current=true` + `status=success` + 未过期 | `reason` ∈ {`no_snapshot`, `snapshot_not_current`, `snapshot_expired`, `snapshot_not_success`} | 看 `reason` 字段定位：未采集 → `POST collect`；已采集但非 current → 等 callback 推进 / 重新触发；已过期（TTL 24h） → 重新采集 | `backend/app/api/ai.py:734-762` + `backend/app/services/ai/ai_object_metadata_snapshot_service.py:get_published_object_metadata` |
+| `/ai/sql/schema-snapshots/{id}/context` 缺 `object_metadata` 键 | 1) 该 instance 是否已有 published object metadata snapshot；2) snapshot 是否过期 | `_build_object_metadata_field` lazy import + try/except 兜底：缺 snapshot 时返回 `{"available": False}` 而非抛异常；Dify inputs 注入 `object_ddl_text_preview` 限 8000 字符 | 1) 先调 `/ai/sql/object-metadata/{id}/context` 看 `available` 与 `reason`；2) 未采集则 `POST collect`；3) 已过期则重新采集 | `backend/app/services/ai/ai_schema_context_service.py:350-401` (`_build_object_metadata_field` + `ddl_text[:8000]`) |
+| staging snapshot 永久卡住 | 启动后是否调用过 `cleanup_running_timeouts`；running 行 `started_at` 是否 > 10 min 前 | startup lifespan hook 兜底：标记 `running` → `failed` + `error_code='TIMEOUT'` | 1) 确认 `backend/app/main.py` startup hook 已注册；2) 看后端 stdout `cleanup_running_timeouts: marked %s snapshots failed`；3) 超时阈值由 `AI_OBJECT_METADATA_TIMEOUT_MINUTES`（默认 10）控制 | `backend/app/main.py` (startup hook) + `backend/app/services/ai/ai_object_metadata_snapshot_service.py:333-369` |
