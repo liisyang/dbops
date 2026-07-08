@@ -1377,3 +1377,47 @@ C8 schema snapshot + C11-C12 sqlglot + C16-F0 三方言 SQL 模板（PG/Oracle/M
 | 2026-07-08 | ai_sql_audit 卡 running 收尾策略 | **UPDATE → timeout 而不是 DELETE** | 保留执行历史可审计；timeout 是合法终态（CHECK 约束 7 个 enum 之一） |
 
 - **状态**：✅ C16-5 Commit 5 已闭环：1 commit dbops sql_supported_db_types（1 file / +2 −1）+ 3 tests 通过 + dev 库 ai_object_metadata_snapshot 表 CREATE 成功 + credential_binding id=15 INSERT + ai_sql_audit id=4 UPDATE 1 row → timeout。
+
+## 9. Phase 3.6B0 C16-5 Commit 6 — dev 库 PG 965 `dbops_readonly` 最小权限闭环 + AWX readonly 凭证 + binding 切换
+
+### 9.1 治理背景
+
+Commit 5 落 `bind-db-postgresql-inst-965` → `profile_id=4` `cred-db-postgresql-ro-prod`（AWX id=7，username=`gdmms`，已被 collector 复用），让 SQL Copilot end-user 与 collector 共享同一 AWX 凭证；缺专属命名 + 缺最小权限粒度。计划 §6 假设 PG 965 上有 `dbops` schema，实测 PG 965 (10.134.185.228:5432 superuser=`postgres/root123`) 是多 schema 测试实例，仅 `benchdb/jemdb/postgres` 三库 + `public/sbtest/app/oggadm` 5 用户 schema，需要按实测范围调整 GRANT。
+
+### 9.2 C16-5 Commit 6 落地变更
+
+| 时间 | 变更 | 落地位置 | 影响 |
+|---|---|---|---|
+| 2026-07-08 | dev 库 PG 965 CREATE ROLE `dbops_readonly` LOGIN PASSWORD `readonly2026@readonly`（`rolcanlogin=t rolsuper=f rolcreatedb=f rolcreaterole=f`）| PG 965 (10.134.185.228:5432) | 最小权限 login role；与 `gdmms` collector readonly 解耦 |
+| 2026-07-08 | dev 库 PG 965 3 库 CONNECT + 5 schema SELECT + 9 条 ALTER DEFAULT PRIVILEGES | `/tmp/commit6_grant_readonly.sql`（PG 965 server-side） | `benchdb.public / benchdb.sbtest (benchuser) / jemdb.public / postgres.app / postgres.oggadm` 全部可读；未来 postgres / benchuser / app / oggadm owner 新建表自动可读 |
+| 2026-07-08 | AWX REST POST `/api/v2/credentials/` 新建 cred id=10 `cred-db-postgresql-ro-prod-readonly`（credential_type=32 organization=1） | AWX (`http://10.134.185.85:30080`) | inputs.username=`dbops_readonly` inputs.password=`readonly2026@readonly`（密码 AWX 加密 `$encrypted$`） |
+| 2026-07-08 | dbops DB INSERT `credential_profile id=12`（`profile_code='cred-db-postgresql-ro-prod-readonly' awx_credential_id=10 binding_role='db_readonly' db_type_code='postgresql' is_enabled=true environment='dev'`）| dbops DB | 逻辑 profile 指向物理 AWX cred id=10 |
+| 2026-07-08 | dbops DB UPDATE `credential_binding id=15` `credential_profile_id` 4→12 + remark 追加 "C16-5 Commit 6 切换到 cred-db-postgresql-ro-prod-readonly (AWX id=10...)" | dbops DB | SQL Copilot end-user binding 解析从 profile 4 (gdmms) 切到 profile 12 (dbops_readonly) |
+
+### 9.3 冒烟验证（dev 库 PG 965）
+
+```bash
+PGPASSWORD='readonly2026@readonly' psql -h 10.134.185.228 -U dbops_readonly -d <db> -t -c "<SQL>"
+
+# 正向（5 全过）：
+benchdb.public.pgbench_accounts  → 1000000
+benchdb.sbtest.sbtest1           → 1000000
+jemdb.public (count tables)      → 1
+postgres.app (count tables)      → 1
+postgres.oggadm (count tables)   → 0
+
+# 反向（2 全拒绝）：
+CREATE TABLE _t_should_fail (id int)                       → permission denied for schema public
+UPDATE pgbench_accounts SET bid=0 WHERE aid=1              → permission denied for table pgbench_accounts
+```
+
+### 9.4 治理决策记录
+
+| 时间 | 决策点 | 选择 | 理由 |
+|---|---|---|---|
+| 2026-07-08 | 复用 AWX cred id=7 vs 新建 AWX cred id=10 | **新建 AWX cred id=10 `cred-db-postgresql-ro-prod-readonly`** | cred id=7 gdmms 已被 `db_fact_collect`/`db_sql_readonly_collect` collector 路径占用；修改 cred id=7 密码会破坏 collect E2E（critical-path），新建 cred 隔离 SQL Copilot end-user 链路 |
+| 2026-07-08 | PG role `rolsuper` / `rolcreaterole` 倾向 | **`rolsuper=f rolcreatedb=f rolcreaterole=f` 全 false** | 最小权限原则；end-user preview→execute 不需要 superuser / DDL；AWX collector 路径单独使用 cred id=7 gdmms |
+| 2026-07-08 | GRANT 范围（plan §6 假设 `dbops` schema vs 实测 5 schema）| **按实测调整到 `benchdb/jemdb/postgres` 3 库 + `public/sbtest/app/oggadm` 5 schema** | 实测 PG 965 无 dbops schema/db；plan §6 premise 错，按真实列表（pgbench_* / sbtest* / app / oggadm）覆盖所有用户数据表 |
+| 2026-07-08 | `ALTER DEFAULT PRIVILEGES FOR ROLE` 是否需要 | **为 benchuser/app/oggadm 显式声明 `FOR ROLE` 四条** | postgres-owned `public` schema 已有默认 IN SCHEMA 覆盖；benchuser/app/oggadm 各自 schema 下 ALTER DEFAULT PRIVILEGES 默认只能作用于 CURRENT_USER（即本会话的 postgres superuser），必须 FOR ROLE 才能对未来 owner 新建表自动 SELECT 授权 |
+
+- **状态**：✅ C16-5 Commit 6 已闭环：PG 965 server-side 1 file `/tmp/commit6_grant_readonly.sql`（3 库 GRANT block + 9 条 ALTER DEFAULT PRIVILEGES）+ AWX cred id=10 via REST + dbops DB `credential_profile id=12 INSERT` + `credential_binding id=15 profile_id 4→12 UPDATE` + 5 冒烟正 / 2 冒烟负全过。注：本 commit 数据库变更未落 `backend/db/dbops_phase3_6b0_*.sql` 版本文件（dev 库 PG 965 是测试实例，变更不入版本控制；prod 落地需 DBA 现场评估按 §9.2 表全套 DDL 顺序）。
