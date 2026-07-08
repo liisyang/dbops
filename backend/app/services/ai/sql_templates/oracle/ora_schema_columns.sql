@@ -40,4 +40,4 @@ WHERE owner NOT IN (
     )
   AND owner NOT LIKE 'APEX\_%' ESCAPE '\'
   AND owner NOT LIKE 'FLOWS\_%' ESCAPE '\'
-ORDER BY table_schema, table_name, ordinal_position;
+ORDER BY table_schema, table_name, ordinal_position

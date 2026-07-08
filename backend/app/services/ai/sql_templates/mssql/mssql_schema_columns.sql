@@ -38,4 +38,4 @@ JOIN sys.objects o ON c.object_id = o.object_id
 JOIN sys.types ty ON c.user_type_id = ty.user_type_id
 WHERE o.type IN ('U', 'V')  -- U = User Table, V = View
   AND SCHEMA_NAME(o.schema_id) NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
-ORDER BY table_schema, table_name, ordinal_position;
+ORDER BY table_schema, table_name, ordinal_position

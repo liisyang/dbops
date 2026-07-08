@@ -71,6 +71,7 @@ from app.models.dbops_assets import (
 )
 from app.services.awx_service import AwxService, AwxServiceError
 from app.services.credential_resolver_service import CredentialResolverService
+from app.services.ai.ai_schema_context_service import AiSchemaContextService
 from app.services.sql_safety_service import SqlSafetyService
 
 logger = logging.getLogger(__name__)
@@ -302,15 +303,27 @@ class AiSqlExecuteService:
                 f"expires_at={snap.expires_at})",
                 reason="snapshot_not_usable",
             )
-        if snap.snapshot_hash and (
-            str(audit.schema_policy_hash or "") != str(snap.snapshot_hash or "")
-        ):
-            raise SnapshotPolicyMismatchError(
-                f"audit.schema_policy_hash ({audit.schema_policy_hash}) "
-                f"!= snapshot.snapshot_hash ({snap.snapshot_hash}); "
-                f"re-preview required",
-                reason="policy_hash_mismatch",
+        # C16-5+ bug-fix: audit.schema_policy_hash 是由
+        # AiSchemaContextService._compute_schema_policy_hash 计算的策略哈希
+        # （包含 snapshot_hash + allowed_schemas/tables/columns + policy_version），
+        # 而不是 raw snapshot_hash。比较时必须重新计算当前 snapshot 的
+        # schema_policy_hash 再与 audit.schema_policy_hash 比较。
+        if snap.snapshot_hash:
+            current_policy_hash = AiSchemaContextService._compute_schema_policy_hash(
+                snapshot_hash=str(snap.snapshot_hash or ""),
+                allowed_schemas=list(snap.allowed_schemas or []),
+                allowed_tables=list(snap.allowed_tables or []),
+                allowed_columns=dict(snap.allowed_columns or {}),
+                denied_columns=list(snap.denied_columns or []),
+                policy_version=cls.SAFETY_POLICY_VERSION,
             )
+            if str(audit.schema_policy_hash or "") != current_policy_hash:
+                raise SnapshotPolicyMismatchError(
+                    f"audit.schema_policy_hash ({audit.schema_policy_hash}) "
+                    f"!= recomputed schema_policy_hash ({current_policy_hash}); "
+                    f"re-preview required",
+                    reason="policy_hash_mismatch",
+                )
 
         # 4. AST 二次校验（防御 preview 后 audit 行被人工修改 / DB 触发器
         # 等场景；保证 Execute 时 SQL 仍满足只读约束）

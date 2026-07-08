@@ -125,7 +125,7 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
         or error_code
     )[:4000]
 
-    if result_status in ("ok", "success", "verified") and item_status in (
+    if result_status in ("ok", "success", "verified", "normal") and item_status in (
         "verified", "success", "collected", "ok"
     ):
         new_status = AiSqlAuditExecutionStatus.SUCCESS

@@ -217,4 +217,4 @@ WHERE c.owner NOT IN (
   AND c.constraint_type IN ('P', 'U', 'R', 'C')
   AND c.generated = 'USER NAME'  -- 排除系统生成的约束（如 NOT NULL 隐式约束）
 
-ORDER BY object_type, schema_name, object_name;
+ORDER BY object_type, schema_name, object_name

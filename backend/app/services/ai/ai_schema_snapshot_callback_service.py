@@ -140,12 +140,15 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
         snap_error_message = None
 
     # ---- 解析 allowed_schemas / allowed_tables / allowed_columns ----
-    allowed_schemas, allowed_tables, allowed_columns = _aggregate_whitelist(rows)
+    # C16-5+ bug-fix: collector_client 返回 rows 为 list-of-lists 格式（非 dict），
+    # 需要用 columns 名映射为 dict 再传给 _aggregate_whitelist。
+    dict_rows = _rows_to_dicts(rows, columns)
+    allowed_schemas, allowed_tables, allowed_columns = _aggregate_whitelist(dict_rows)
 
     # ---- 解析 schema_name ----
     schema_name: Optional[str] = None
-    if rows and isinstance(rows[0], dict):
-        first = rows[0].get("table_schema") if hasattr(rows[0], "get") else None
+    if dict_rows:
+        first = dict_rows[0].get("table_schema")
         if isinstance(first, str) and first:
             schema_name = first[:200]
 
@@ -159,7 +162,7 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
         snapshot_hash = None
 
     total_tables = len(allowed_tables)
-    total_columns = len(rows)
+    total_columns = len(dict_rows)
 
     # ---- expires_at（仅 success 时设置）----
     settings = get_settings()
@@ -269,6 +272,30 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _rows_to_dicts(rows: list[Any], columns: list[str]) -> list[dict[str, Any]]:
+    """Convert list-of-lists rows to list-of-dicts using column names as keys.
+
+    collector_client returns rows as ``[[val1, val2, ...], ...]``. The callback
+    needs dict rows (keyed by column name) for ``_aggregate_whitelist``.
+    """
+    if not rows or not columns:
+        return []
+    # If rows are already dicts, pass through
+    if isinstance(rows[0], dict):
+        return rows
+    result: list[dict[str, Any]] = []
+    ncols = len(columns)
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            continue
+        d: dict[str, Any] = {}
+        for i, val in enumerate(row):
+            if i < ncols:
+                d[columns[i].lower()] = val
+        result.append(d)
+    return result
+
+
 def _aggregate_whitelist(rows: list[Any]) -> tuple[list[str], list[str], dict[str, list[str]]]:
     """Group raw rows into allowed_schemas / allowed_tables / allowed_columns."""
     schemas: set[str] = set()
@@ -340,7 +367,11 @@ def _resolve_db_type_code(db: Session, instance_id: int) -> str:
         code = getattr(db_type, "type_code", None)
         if not code:
             return "POSTGRESQL"
-        return str(code).upper()
+        code_upper = str(code).upper()
+        # Normalize dialect variants to CHECK-compatible codes
+        if code_upper in ("SQLSERVER", "SQL SERVER"):
+            return "MSSQL"
+        return code_upper
     except Exception:
         logger.exception("db_type_code lookup failed for instance_id=%s", instance_id)
         return "POSTGRESQL"
