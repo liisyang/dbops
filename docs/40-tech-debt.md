@@ -1,8 +1,8 @@
 # 技术债 Backlog
 
 > 文档状态：已校准
-> 最近校准：2026-06-29
-> 依据来源：真实代码 + PR 评审批 0/1/2/3/4 + Phase 3.6 C1-C15 真实实施反馈
+> 最近校准：2026-07-08
+> 依据来源：真实代码 + PR 评审批 0/1/2/3/4 + Phase 3.6 C1-C16-5-Commit 1-4 真实实施反馈
 
 ## 1. 维护定位
 
@@ -15,7 +15,7 @@
 | 等级 | 数量 | 说明 |
 |---|---:|---|
 | High | 0 | 已全部修复（2026-06-16 批 0/1/2/3/4 收尾） |
-| Medium | 10 | 重复实现、不一致、性能隐患（4 项已修复） |
+| Medium | 11 | 重复实现、不一致、性能隐患（4 项已修复；新增 F18 collector PG connector psycopg v3 alias 闭环） |
 | Low | 6 | 清理项、渐进优化（3 项已修复：timezone.js / i18n.js / user.js 全删） |
 
 > 最近校准：2026-06-16 15:00 — 批 4 v2 加固完成：C1v2 pg_try_advisory_lock + C2 cancel race + C3+I5 partial unique index + C4/C5 .js 删除 + I1 admin gate + I2 rate limit + I3 timeout re-read + I4 lock release + A2 DISPATCH_TERMINAL_STATUSES + I6 AWX sanitize + I7 callback replay + I8 AbortController + I9 formatTime + I10 TERMINAL_BATCH_STATUS_SET。全 111 测试 + frontend build 绿。
@@ -195,6 +195,7 @@
 | F16 | AI Copilot Chat.vue boundInstanceId 模式分流 + SqlPreview.vue 重构（C16-F2b 遗留 Pydantic Literal 漏 'sql_preview_link' 修） | C16-F2b 把 `'sql_preview_link'` 写入 ai_chat_message 后，前端 listMessages 触发 Pydantic 500（`AiChatMessageResponse.message_type` Literal 漏加）；同时 C16-F2c 任务要求 Chat.vue 走 `route.query.boundInstanceId` → `mode='instance_sql'` + 创建/复用绑定实例 session + 顶部实例上下文 header + 输入框 placeholder 切换 + onSend 分流（instance_sql→POST /ai/sql/preview, general→POST /chat/sessions/{id}/messages）；SqlPreview.vue boundInstanceId 模式重定向 Chat.vue | `backend/app/schemas/ai.py` `AiChatMessageResponse.message_type` Literal 加 `'sql_preview_link'`（F2b 漏修）+ 3 回归测试 `tests/test_ai_chat_message_response_c16_f2c.py`（接受 sql_preview_link / 5 枚举全过 / 拒绝 unknown）+ `frontend/src/types/ai.ts` `AiChatSessionCreateRequest` 加 `mode?/bound_instance_id?/source_page?` + `AiChatSession` 加 `chat_mode?/bound_instance_id?` + `AiSqlPreviewRequest` `session_id` 必填 + `client_request_id` 必填（移除 `message_id`）+ `AiSqlPreviewResponse` 加 4 字段 + `AiSqlPreviewLinkMetadata` 加 `reason?` + `frontend/src/views/ai/Chat.vue` `parseBoundInstanceId` + `loadBoundInstanceContext` + `createBoundSession` + `exitBoundMode` + `activeSessionIsInstanceSql` computed + `inputPlaceholder` computed + `describePreviewError` helper + onSend 分流（`aiApi.sqlPreview` 走 instance_sql；调用后 `loadMessages` 同步后端实际状态）+ onMounted `Promise.all([loadBoundInstanceContext, createBoundSession])` + 模板：bound 模式隐藏会话侧栏、显示实例上下文 header（`instance_name / db_type_code / server_ip:port`）、「返回通用 Chat」按钮、placeholder 切换 + `frontend/src/views/InstanceDetail.vue` `useRouter` + `gotoAiChat` + 「AI 查询」按钮（`auto_awesome` 图标 + `data-testid="instance-ai-chat-button"`） + `frontend/src/components/ai/ChatMessageBubble.vue` 重写 `previewLinkMeta` computed（合并 `metadata_json` audit_id/status + `content` JSON approved_sql/schema_policy_hash/reason）+ rejected 分支模板（红框 + 「SQL Preview 被拒绝（audit #N）」+ reason 显示 + 无执行按钮） + `frontend/src/views/ai/SqlPreview.vue` `parseBoundInstanceIdFromQuery` + onMounted 检测 `boundInstanceId` → `router.replace({name: 'AiChat', query: {boundInstanceId}})`（commit 2 重定向） | Medium | ✅ C16-F2c 已闭环：3 commit (`387ad97` Chat.vue+F2b 漏修 / `209bff7` SqlPreview.vue 重定向 / commit 3 测试+docs+memory) + 3 回归测试 + verify.sh 0 failed + 693 pytest + vue-tsc 0 错 + dev 库 `POST /ai/chat/sessions` + `POST /ai/sql/preview` 走通 instance_sql 流；下轮起手 F17 跨入口一致性回归（`/ai/sql/preview` form 模式 vs Chat 模式）/ Phase 3.7 下一阶段 | 已完成 |
 
 | F17 | AI Copilot /ai/sql/preview Chat 流入口与 form 入口跨入口一致性回归（F2a/F2b/F2c 测试补强） | F2c 实施记录末尾已识别回归盲点：F2b 落地 `message_type='sql_preview_link'` 后，前端 listMessages 走 ChatMessageBubble.previewLinkMeta 5 message_type 解析分支（F2a 不可变绑定 + F2b 双消息 + F2c Pydantic Literal 修复已闭环），但 form 模式（SqlPreview.vue 旧表单入口，保留 `source_page='sql_preview_legacy'`）和 Chat 模式（InstanceDetail 「AI 查询」入口，`source_page='instance_detail'`）写出的 preview_message 回到前端的卡片渲染完整性未单独回归覆盖 | `frontend/src/components/ai/ChatMessageBubble.spec.ts` 追加 1 个 describe 块「ChatMessageBubble — sql_preview_link previewLinkMeta（C16-F2c + F17 跨入口一致性回归）」共 6 cases：case 1 passed + content 含 approved_sql（绿框 + 执行按钮 + audit_id 透传）/ case 2 passed + content 缺 approved_sql 脏数据（previewLinkMeta=null，不渲染卡）/ case 3 rejected + content.reason（红框 + 拒绝原因 + 无执行按钮）/ case 4 rejected + content 缺 reason（红框 + 兜底文案）/ case 5 sql_preview_link + 非 JSON content 历史脏（不渲染卡）/ case 6 messageType='chat'（普通气泡，markdown 渲染）；后端不新增测试文件（跨入口一致性回归由 F2a `tests/test_ai_chat_service_c16_f2a.py`（partial unique 复用 + source_page 不持久化 + immutable binding + 4 步校验 + mode 隔离）/ F2b `tests/test_ai_sql_preview_c16_f2b.py`（4 步鉴权链 + 幂等 + 双消息事务 + 5 类新异常）/ F2c `tests/test_ai_chat_message_response_c16_f2c.py`（AiChatMessageResponse.message_type 5 值 Literal）共 12+14+3=29 cases 覆盖） | Medium | ✅ C16-F17 已闭环：1 commit ChatMessageBubble 5 分支回归 + verify.sh 0 failed (696 passed / 3 skipped 历史 C13 sqlglot) + 28 vitest cases (含新增 6) + vue-tsc 0 错；下轮起手 Phase 3.7 下一阶段（Inspection AI 集成）/ dev 库 ORACLE/MSSQL 实例 live E2E 补跨方言 | 已完成 |
+| F18 | collector_client PG connector psycopg2 → psycopg v3 alias（C16-5 Commit 4） | DBOPS Collector EE 镜像 `awx-ee-dbops:24.6.1` 只预装 psycopg v3 (3.2.13)，不含 psycopg2；老 `postgresql.py` `import psycopg2` 在 EE 容器中 ModuleNotFoundError，阻塞 `db_sql_readonly_collect` role + `db_fact_collect` role 跑 PG 实例 | `ansible-playbooks/files/collector_client/db_connectors/postgresql.py` `_connect()` 改 `import psycopg as psycopg2`（psycopg v3 API 兼容 alias；`connect() / cursor() 默认 tuple row factory / execute() / fetchone() / fetchmany() / description / SET LOCAL` 全兼容）+ `ansible-playbooks/files/collector_client/requirements.txt` `psycopg2-binary>=2.9` → `psycopg[binary]>=3.1`（与 EE 实际一致） | Medium | ✅ C16-5 Commit 4 已闭环：ansible-playbooks commit `0bffbda`（2 files / +21 −9）推送 `4932140..0bffbda` + EE 容器实测 collect_basic_facts 返回 `version_label=PostgreSQL 17.9 / database_name=dbops / current_user=dbops` + execute_readonly_sql('SELECT now(), 1+1') 返回 columns=['ts','sum'] + rows + `timeout_enforced=True`；下轮起手 Commit 5（backend capabilities 三方言解锁 + dev 库 PG credential binding + ai_sql_audit 卡 running cleanup）/ Commit 6（dev 库 PG 965 dbops_readonly role + GRANT）/ Commit 7（PG 965 live E2E 8 端点） | 已完成 |
 
 ### 7.1 Phase 3.6 后续 sprint 建议
 
@@ -210,6 +211,7 @@
 10. **F15 SQL Preview Chat 流入口**：C16-F2b commit 3 已闭环（4 步鉴权 + 幂等 + 双消息写入 + 5 类新异常 + 14 测试）
 11. **F16 Chat 前端 boundInstanceId 模式分流**：C16-F2c commit 3 已闭环（3 commit：Chat.vue+F2b Literal 漏修 / SqlPreview.vue 重定向 / 本次测试+docs+memory）；F2b 残留 Pydantic Literal 漏 `'sql_preview_link'` 已修（listMessages 500 bug 修复）
 12. **F17 跨入口一致性回归**：C16-F17 已闭环（1 commit：ChatMessageBubble previewLinkMeta 5 分支 6 cases 回归）；form 模式（SqlPreview.vue 旧表单，`source_page='sql_preview_legacy'`）和 Chat 模式（InstanceDetail 「AI 查询」，`source_page='instance_detail'`）的 preview_message 渲染完整性已由 vitest 覆盖；后端 4 步鉴权 / 幂等 / 双消息 / Pydantic Literal 由 F2a/F2b/F2c 三件套 29 cases 覆盖；下轮 Phase 3.7 下一阶段（Inspection AI 集成）/ dev 库 ORACLE/MSSQL 实例 live E2E 补跨方言
+13. **F18 collector PG connector psycopg v3 alias**：C16-5 Commit 4 ansible-playbooks `0bffbda` 已闭环（2 files / +21 −9）；EE 容器实测 collect_basic_facts + execute_readonly_sql 兼容 v3 API；下轮 Commit 5-6（capabilities 三方言解锁 + dev 库 PG 凭证 + dbops_readonly role）/ Commit 7（PG 965 live E2E 8 端点）
 
 ### 7.2 Phase 3.6 范围外但与 AI Copilot 相关
 

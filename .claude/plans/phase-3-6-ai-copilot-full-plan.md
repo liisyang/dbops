@@ -2405,6 +2405,26 @@ C16-5 后端 + 前端完整闭环分 3 commit 推到 `feature/phase-3.6-ai-copil
 - Commit 8 — Oracle 961 + MSSQL 963/964 live E2E 跨方言
 - Commit 9 — 文档同步（5 docs）+ plan §21.3 实施记录收尾
 
+**Commit 4（ansible-playbooks `0bffbda` / 2026-07-08）** — PG connector psycopg2 → psycopg v3 alias：
+
+根因：DBOPS Collector EE 镜像 `awx-ee-dbops:24.6.1`（podman 实测 `pip list`）只预装 `psycopg 3.2.13 + psycopg-binary 3.2.13`，**不含 psycopg2**；老 `postgresql.py` `import psycopg2` 在 EE 容器 `python3 -m collector_client.cli` 时立即 `ModuleNotFoundError`，阻塞 `db_sql_readonly_collect` role（Phase 3.6 C14 ai_sql）与 `db_fact_collect` role 跑 PG 实例。
+
+修复（2 files / +21 −9）：
+- `ansible-playbooks/files/collector_client/db_connectors/postgresql.py` `_connect()`：`import psycopg2` → `import psycopg as psycopg2`（psycopg v3 API 兼容 alias）。v3 在 `connect() / cursor() 默认 tuple row factory / execute() / fetchone() / fetchmany() / description / SET LOCAL statement_timeout` 全部与 v2 兼容，无需其他调用点改动。
+- `ansible-playbooks/files/collector_client/requirements.txt`：`psycopg2-binary>=2.9` → `psycopg[binary]>=3.1`（与 EE 实际一致；加注释说明本 commit 切换原因）。
+
+Live 验证（podman 跑 `awx-ee-dbops:24.6.1` 容器，挂载新文件，对 dev PG `10.134.185.85:5432 / dbops / root123`）：
+- `collect_basic_facts()`：`version_label=PostgreSQL 17.9 / database_name=dbops / current_user=dbops`
+- `execute_readonly_sql("SELECT now() as ts, 1+1 as sum", timeout_seconds=5, max_rows=10)`：`columns=['ts', 'sum'] / rows=[['2026-07-08T08:42:01.663880+08:00', 2]] / error=None / timeout_enforced=True`
+- 推送 `4932140..0bffbda main -> main`
+
+本 commit **未涉及**：
+- backend（Commit 5 capabilities 解锁 + dev 库 PG 凭证 binding + ai_sql_audit 卡 running cleanup 待起手）
+- dev 库（Commit 6 dbops_readonly role + GRANT 待起手；本次用 dev PG `dbops` superuser 验证 v3 alias 兼容性已足够）
+- ansible-playbooks role assertion（`db_sql_readonly_collect/tasks/main.yml` 校验列表不变，PG collector 已兼容 v3 后跑通无障碍）
+
+下轮起手：**Commit 5 — backend `app/config.py:209` sql_supported_db_types 解锁三方言 + dev 库 credential_binding INSERT + ai_sql_audit 卡 running cleanup**。
+
 ---
 
 #### C16-5：Execute 按钮和结果卡片闭环（NEW）
