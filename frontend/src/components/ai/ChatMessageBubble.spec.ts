@@ -58,10 +58,10 @@ describe('ChatMessageBubble — sql_result 操作按钮（C15）', () => {
     const txt = actionsText(wrapper)
     expect(txt).toContain('已完成')
     expect(txt).not.toContain('重新执行')
-    // 查看详情按钮始终可见
+    // 执行详情按钮始终可见（C16-5：原"查看详情" →"执行详情"以与 plan §21.3 命名统一）
     const buttons = wrapper.findAll('[data-testid="sql-result-actions"] button')
-    const viewBtn = buttons.find((b) => b.text().includes('查看详情'))
-    expect(viewBtn, '查看详情 button must exist').toBeDefined()
+    const viewBtn = buttons.find((b) => b.text().includes('执行详情'))
+    expect(viewBtn, '执行详情 button must exist').toBeDefined()
   })
 
   it('failed 终态 → 「重新执行」按钮可见，点击 emit re-execute with audit_id', async () => {
@@ -125,13 +125,13 @@ describe('ChatMessageBubble — sql_result 操作按钮（C15）', () => {
     expect(txt).not.toContain('已完成')
   })
 
-  it('查看详情按钮 → 点击 emit view-detail with audit_id', async () => {
+  it('执行详情按钮 → 点击 emit view-detail with audit_id', async () => {
     const wrapper = mount(ChatMessageBubble, {
       props: makeResultMessage('success', 800),
     })
     const viewBtn = wrapper
       .findAll('[data-testid="sql-result-actions"] button')
-      .find((b) => b.text().includes('查看详情'))!
+      .find((b) => b.text().includes('执行详情'))!
     await viewBtn.trigger('click')
 
     const events = wrapper.emitted('view-detail')
@@ -533,5 +533,114 @@ describe('ChatMessageBubble — sql_preview_link previewLinkMeta（C16-F2c + F17
     expect(txt).not.toContain('执行 SQL')
     // chat 走 markdown 渲染
     expect(wrapper.find('[data-testid="ai-markdown-body"]').exists()).toBe(true)
+  })
+})
+
+/* ------------------------------------------------------------------ *
+ * C16-5 — sql_result 状态配色 + 按钮命名统一 + 幂等渲染兜底
+ *
+ * 背景：
+ * - 配色（C16-5 P0-4）：cancelled 终态独立配 zinc-500/15（与 SqlPreview.vue:913 对齐），
+ *   之前 fallback sky-500/15 会让 cancelled 与 pending/running 视觉混淆
+ * - 命名（C16-5 P0-4）：sql_result 卡片「查看详情」 →「执行详情」，与 plan §21.3 C16-5 命名统一
+ * - 幂等（plan §4 risk #1）：callback 端在 ai_sql_audit 已为 success 时，
+ *   不会重复落 sql_result message（后端 partial unique 兜底），但前端必须正确
+ *   渲染所有 sql_result message（同 audit_id 出现两次时各渲染一张卡）
+ * - Fallback（plan §6.5）：metadata_json 缺 execution_status 时，sqlResultPayload 应
+ *   优先从 content JSON 解出 status，再回退到 metadata.execution_status
+ * ------------------------------------------------------------------ */
+describe('ChatMessageBubble — sql_result 状态配色（C16-5）', () => {
+  /** 提取 sql_result 卡片右上角状态徽章（与 ChatStatusBadge 隔离）。 */
+  function statusBadge(wrapper: ReturnType<typeof mount>): string {
+    // sql_result 卡片的状态徽章 template line 103-105 使用 `text-[10px]`；
+    // ChatStatusBadge 用 `text-[11px]`，靠字体大小区分避免误抓
+    const card = wrapper.find('[data-testid="sql-result-actions"]')
+    if (!card.exists()) return ''
+    const scope = card.element.closest('.rounded-lg.border') ?? wrapper.element
+    const badges = scope.querySelectorAll('span.rounded-full')
+    for (const b of Array.from(badges) as HTMLElement[]) {
+      if (b.className.includes('text-[10px]')) return b.className
+    }
+    return ''
+  }
+
+  it('cancelled → zinc-500/15 配色（不再 fallback sky）', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('cancelled', 1100),
+    })
+    const badge = statusBadge(wrapper)
+    expect(badge).toContain('zinc-500/15')
+    expect(badge).toContain('text-zinc-300')
+    expect(badge).not.toContain('sky-500/15')
+    expect(badge).not.toContain('text-sky-300')
+  })
+
+  it('success → emerald-500/15 配色', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('success', 1200),
+    })
+    const badge = statusBadge(wrapper)
+    expect(badge).toContain('emerald-500/15')
+    expect(badge).toContain('text-emerald-300')
+  })
+
+  it('failed → red-500/15 配色', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('failed', 1300),
+    })
+    const badge = statusBadge(wrapper)
+    expect(badge).toContain('red-500/15')
+    expect(badge).toContain('text-red-300')
+  })
+
+  it('timeout → amber-500/15 配色', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('timeout', 1400),
+    })
+    const badge = statusBadge(wrapper)
+    expect(badge).toContain('amber-500/15')
+    expect(badge).toContain('text-amber-300')
+  })
+
+  it('按钮命名统一：sql_result 卡片显示「执行详情」（plan §21.3 C16-5）', () => {
+    const wrapper = mount(ChatMessageBubble, {
+      props: makeResultMessage('success', 1500),
+    })
+    // 新增 data-testid 用于精准断言
+    const viewBtn = wrapper.find('[data-testid="sql-result-view-detail"]')
+    expect(viewBtn.exists(), '执行详情按钮必须存在').toBe(true)
+    expect(viewBtn.text()).toContain('执行详情')
+    expect(viewBtn.text()).not.toContain('查看详情')
+  })
+
+  it('callback 幂等兜底：metadata_json 缺 execution_status → 仍从 content JSON 解 status', () => {
+    // 极端场景：callback 端序列化时 metadata_json 漏写 execution_status（脏数据），
+    // sqlResultPayload 应回退到 content JSON 的 status 字段，保证操作按钮区可见
+    const wrapper = mount(ChatMessageBubble, {
+      props: {
+        role: 'assistant',
+        status: 'completed',
+        messageType: 'sql_result',
+        content: JSON.stringify({
+          columns: ['id'],
+          rows: [[1]],
+          row_count: 1,
+          duration_ms: 10,
+          status: 'failed',
+          error_message: '超时',
+        }),
+        metadataJson: {
+          audit_id: 1600,
+          // 故意省略 execution_status — content JSON 兜底
+          row_count: 1,
+          duration_ms: 10,
+        },
+      },
+    })
+    const txt = wrapper.text()
+    // 「重新执行」按钮因 status='failed' 应可见（content JSON 解析生效）
+    expect(txt).toContain('重新执行')
+    // 卡片渲染（columns + rows）
+    expect(wrapper.find('table').exists()).toBe(true)
   })
 })

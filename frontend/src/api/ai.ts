@@ -10,6 +10,7 @@
  * - POST /v1/ai/sql/preview — SQL Preview（C13 NEW）
  * - POST /v1/ai/sql/execute — SQL Execute（C14 NEW）
  * - GET  /v1/ai/sql/audit/{audit_id}/execution — 状态查询（C14 NEW）
+ * - GET  /v1/ai/sql/executions/{audit_id}/result — 独立 Result API（C16-5 NEW）
  *
  * C4 范围仅 Chat；后续 commit 追加 SQL Preview / Execute / Inspection AI 等。
  */
@@ -22,6 +23,8 @@ import type {
   AiChatSession,
   AiChatSessionCreateRequest,
   AiChatSessionListResponse,
+  AiSqlExecutionResultParams,
+  AiSqlExecutionResultResponse,
   AiSqlExecutionStatusResponse,
   AiSqlExecuteRequest,
   AiSqlExecuteResponse,
@@ -135,6 +138,29 @@ export const aiApi = {
     auditId: number | string,
   ): Promise<AiSqlExecutionStatusResponse> =>
     request.get(`/v1/ai/sql/audit/${auditId}/execution`),
+
+  /**
+   * 独立 Result API（C16-5 NEW P0-3 — plan §21.3）。
+   *
+   * 拉取 audit 执行后的完整 columns + rows（重量，可能 1MB+）。
+   * 与 /audit/{id}/execution 共存：execution 端点返回状态机（轻量，轮询用），
+   * result 端点返回完整数据（重量，按需拉取）。
+   *
+   * 分页参数：
+   *   - limit:  最大返回行数（后端 ge=1, le=200；默认 100）
+   *   - offset: 分页偏移（后端 ge=0；默认 0）
+   *
+   * 错误码（plan §11）：
+   *   403 AuditOwnershipError — audit 不属于当前用户
+   *   404 AuditNotFoundError — audit_id 不存在
+   *   409 AuditResultNotAvailableError — execution_status != 'success'，继续轮询 /execution
+   *   422 limit/offset 越界（FastAPI 自动）
+   */
+  getExecutionResult: (
+    auditId: number | string,
+    params?: AiSqlExecutionResultParams,
+  ): Promise<AiSqlExecutionResultResponse> =>
+    request.get(`/v1/ai/sql/executions/${auditId}/result`, { params }),
 }
 
 // =============================================================================

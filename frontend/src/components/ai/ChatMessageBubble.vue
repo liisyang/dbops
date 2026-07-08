@@ -185,10 +185,11 @@
           <button
             type="button"
             class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+            data-testid="sql-result-view-detail"
             @click="$emit('view-detail', resultAuditId)"
           >
             <span class="material-symbols-outlined text-[12px]">open_in_new</span>
-            查看详情
+            执行详情
           </button>
         </div>
       </div>
@@ -408,6 +409,9 @@ const resultStatusClass = computed(() => {
   if (status === 'success') return 'inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] text-emerald-300'
   if (status === 'failed') return 'inline-flex items-center gap-1 rounded-full bg-red-500/15 px-2 py-0.5 text-[10px] text-red-300'
   if (status === 'timeout') return 'inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] text-amber-300'
+  // C16-5 P0-4 — cancelled 单独配 zinc-500/15（与 SqlPreview.vue:913 executionBadgeClass 对齐）
+  // 之前 fallback sky 会让 cancelled 与 pending/running 视觉混淆
+  if (status === 'cancelled') return 'inline-flex items-center gap-1 rounded-full bg-zinc-500/15 px-2 py-0.5 text-[10px] text-zinc-300'
   return 'inline-flex items-center gap-1 rounded-full bg-sky-500/15 px-2 py-0.5 text-[10px] text-sky-300'
 })
 

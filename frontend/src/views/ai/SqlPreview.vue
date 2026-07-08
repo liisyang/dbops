@@ -534,6 +534,150 @@
         >
           加载中…
         </p>
+
+        <!-- C16-5 P0-3 NEW — 完整执行结果（columns + rows） -->
+        <!-- 仅 audit 详情模式 + execution_status='success' 时渲染 -->
+        <div
+          v-if="execution && execution.execution_status === 'success'"
+          class="mt-4 border-t border-surface-variant/30 pt-4"
+          data-testid="audit-execution-result"
+        >
+          <div class="mb-2 flex items-center justify-between gap-2 text-xs">
+            <div class="flex items-center gap-2 font-medium text-on-surface">
+              <span class="material-symbols-outlined text-[14px]">table_chart</span>
+              <span>完整结果</span>
+              <span
+                v-if="executionResult"
+                class="text-[10px] text-on-surface-variant"
+              >
+                返回 {{ executionResult.returned_rows }} 行
+                <span v-if="executionResult.row_count != null">
+                  / 共 {{ executionResult.row_count }} 行
+                </span>
+                <span v-if="executionResult.truncated" class="text-amber-400">
+                  · 还有更多（受 limit 限制）
+                </span>
+              </span>
+            </div>
+            <button
+              v-if="!executionResult && !executionResultError"
+              type="button"
+              class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+              @click="resultRetry"
+            >
+              <span class="material-symbols-outlined text-[12px]">refresh</span>
+              拉取结果
+            </button>
+          </div>
+
+          <!-- 敏感列掩码提示 -->
+          <p
+            v-if="executionResult && executionResult.masked_columns.length"
+            class="mb-2 rounded border border-amber-500/30 bg-amber-500/5 px-2 py-1 text-[11px] text-amber-300"
+          >
+            <span class="material-symbols-outlined mr-1 align-middle text-[12px]">visibility_off</span>
+            以下列已脱敏（cell 已替换为 ***）：
+            <code class="ml-1 rounded bg-amber-500/15 px-1 font-mono">{{ executionResult.masked_columns.join(', ') }}</code>
+          </p>
+
+          <!-- 加载错误 -->
+          <div
+            v-if="executionResultError"
+            class="mb-2 rounded border border-red-500/30 bg-red-500/5 px-2 py-1 text-[11px] text-red-300"
+            data-testid="audit-execution-result-error"
+          >
+            <div class="flex items-center justify-between gap-2">
+              <span>{{ executionResultError }}</span>
+              <button
+                type="button"
+                class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[10px]"
+                @click="resultRetry"
+              >
+                <span class="material-symbols-outlined text-[11px]">refresh</span>
+                重试
+              </button>
+            </div>
+          </div>
+
+          <!-- 表格 -->
+          <div
+            v-if="executionResult && executionResult.columns.length && executionResult.rows.length"
+            class="overflow-x-auto rounded bg-surface-variant/20"
+          >
+            <table class="w-full text-[11px]">
+              <thead class="bg-surface-variant/40 text-on-surface-variant">
+                <tr>
+                  <th
+                    v-for="col in executionResult.columns"
+                    :key="col"
+                    class="border-b border-surface-variant/30 px-2 py-1 text-left font-medium"
+                  >
+                    {{ col }}
+                    <span
+                      v-if="executionResult.masked_columns.includes(col)"
+                      class="ml-1 inline-flex items-center rounded bg-amber-500/20 px-1 text-[9px] text-amber-300"
+                      title="该列已脱敏"
+                    >masked</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr
+                  v-for="(row, ri) in executionResult.rows"
+                  :key="ri"
+                  class="odd:bg-surface-variant/10"
+                >
+                  <td
+                    v-for="(cell, ci) in row"
+                    :key="ci"
+                    class="border-b border-surface-variant/20 px-2 py-1 font-mono text-on-surface/90"
+                  >
+                    {{ cell === null || cell === undefined ? '∅' : String(cell) }}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p
+            v-else-if="executionResult && !executionResult.rows.length"
+            class="text-xs text-on-surface-variant"
+          >
+            （无返回行）
+          </p>
+
+          <!-- 分页 -->
+          <div
+            v-if="executionResult && executionResult.columns.length"
+            class="mt-2 flex items-center justify-between gap-2 text-[11px] text-on-surface-variant"
+          >
+            <div>
+              第 {{ resultOffset + 1 }} – {{ resultOffset + executionResult.returned_rows }} 行
+              <span v-if="executionResult.row_count != null">
+                · 共 {{ executionResult.row_count }} 行
+              </span>
+            </div>
+            <div class="flex items-center gap-1">
+              <button
+                type="button"
+                class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+                :disabled="resultOffset === 0"
+                @click="resultPrevPage"
+              >
+                <span class="material-symbols-outlined text-[12px]">chevron_left</span>
+                上一页
+              </button>
+              <button
+                type="button"
+                class="ops-secondary-button inline-flex items-center gap-1 px-2 py-0.5 text-[11px]"
+                :disabled="!executionResult.truncated && executionResult.returned_rows < resultLimit"
+                @click="resultNextPage"
+              >
+                下一页
+                <span class="material-symbols-outlined text-[12px]">chevron_right</span>
+              </button>
+            </div>
+          </div>
+        </div>
       </OpsSectionCard>
     </div>
   </OpsPage>
@@ -548,6 +692,8 @@ import type { InstanceRow } from '@/types/api'
 import type {
   AiCapabilities,
   AiChatSessionCreateRequest,
+  AiSqlExecutionResultParams,
+  AiSqlExecutionResultResponse,
   AiSqlExecutionStatusResponse,
   AiSqlExecuteRequest,
   AiSqlPreviewRequest,
@@ -596,13 +742,84 @@ async function loadAuditDetail(auditId: number) {
   auditDetailError.value = null
   executionError.value = ''
   execution.value = null
+  executionResult.value = null
+  executionResultError.value = ''
+  resultOffset.value = 0  // C16-5 P0-3：进入详情时回到第一页
   try {
     const r = await aiApi.getExecutionStatus(auditId)
     execution.value = r
+    // C16-5 P0-3 NEW — 状态为 success 时拉独立 Result API 拿 columns + rows
+    // 状态非 success 时不拉（避免 409）；用户在状态推进到 success 后点「拉取结果」
+    if (r.execution_status === 'success') {
+      await loadExecutionResult(auditId)
+    }
   } catch (err: any) {
     auditDetailError.value =
       err?.response?.data?.detail || err?.message || '加载 audit 详情失败'
   }
+}
+
+/**
+ * C16-5 P0-3 NEW — 拉取完整 result（columns + rows）。
+ *
+ * 与 /audit/{id}/execution 共存：execution 端点返回状态机（轻量），result 端点
+ * 返回完整数据（重量）。仅在 execution_status='success' 时调，否则会返 409。
+ *
+ * - 拉取失败（404/403/409 等）显示在 executionResultError，由用户手动重试
+ * - limit/offset 由 resultLimit / resultOffset ref 控制
+ * - returned_rows / truncated / masked_columns 用于 UI 提示
+ */
+async function loadExecutionResult(auditId: number, opts?: { silent?: boolean }) {
+  executionResultError.value = ''
+  const params: AiSqlExecutionResultParams = {
+    limit: resultLimit.value,
+    offset: resultOffset.value,
+  }
+  try {
+    const r = await aiApi.getExecutionResult(auditId, params)
+    executionResult.value = r
+  } catch (err: any) {
+    // silent=true 时仅在 executionResultError 落文案，不弹 toast
+    const status = err?.response?.status
+    const detail = err?.response?.data?.detail || err?.message || '未知错误'
+    let hint = ''
+    if (status === 409) hint = 'execution_status 非 success，请稍候重试或继续轮询状态'
+    else if (status === 403) hint = '该 audit 不属于当前用户'
+    else if (status === 422) hint = 'limit/offset 越界'
+    executionResultError.value = `加载执行结果失败（HTTP ${status || '网络错误'}）：${
+      typeof detail === 'string' ? detail : JSON.stringify(detail)
+    }${hint ? ' — ' + hint : ''}`
+    if (!opts?.silent) {
+      // 首次加载失败时清空 result，避免显示陈旧数据
+      executionResult.value = null
+    }
+  }
+}
+
+/**
+ * C16-5 P0-3 NEW — 分页：下一页（offset += limit）。
+ * 终态条件：truncated=false 或 returned_rows < limit。
+ */
+function resultNextPage() {
+  if (!executionResult.value || !execution.value) return
+  if (!executionResult.value.truncated) return
+  if (executionResult.value.returned_rows < resultLimit.value) return
+  resultOffset.value += resultLimit.value
+  loadExecutionResult(execution.value.audit_id, { silent: true })
+}
+
+/** C16-5 P0-3 NEW — 分页：上一页（offset -= limit；最低 0）。 */
+function resultPrevPage() {
+  if (!execution.value) return
+  if (resultOffset.value <= 0) return
+  resultOffset.value = Math.max(0, resultOffset.value - resultLimit.value)
+  loadExecutionResult(execution.value.audit_id, { silent: true })
+}
+
+/** C16-5 P0-3 NEW — 手动重试拉取（用户从 409 推进到 success 后点按钮）。 */
+function resultRetry() {
+  if (!execution.value || execution.value.audit_id == null) return
+  loadExecutionResult(execution.value.audit_id)
 }
 
 /** C15 NEW — 退出 audit 详情模式：清状态 + URL query，回到按问题生成。 */
@@ -612,6 +829,10 @@ function exitAuditDetailMode() {
   auditDetailError.value = null
   execution.value = null
   executionError.value = ''
+  // C16-5 P0-3 NEW — 清 result 状态 + 分页
+  executionResult.value = null
+  executionResultError.value = ''
+  resultOffset.value = 0
   // URL 也清掉 query.audit_id，避免刷新页面再次回到详情模式
   if (route.query.audit_id != null) {
     router.replace({ path: '/ai/sql/preview', query: {} })
@@ -893,6 +1114,14 @@ const execution = ref<AiSqlExecutionStatusResponse | null>(null)
 const executionError = ref('')
 let pollTimer: ReturnType<typeof setInterval> | null = null
 const polling = ref(false)
+
+// C16-5 P0-3 NEW — 独立 Result API 状态
+// 与 execution 元数据（status / row_count）解耦：execution 走 /audit/{id}/execution，
+// executionResult 走 /executions/{id}/result 拉完整 columns + rows。
+const executionResult = ref<AiSqlExecutionResultResponse | null>(null)
+const executionResultError = ref('')
+const resultLimit = ref(100)  // 与后端默认对齐
+const resultOffset = ref(0)
 
 // 是否启用执行按钮：passed + capabilities + 不在终态
 const canExecute = computed(

@@ -279,6 +279,68 @@ export interface AiSqlExecutionStatusResponse {
 }
 
 // =============================================================================
+// SQL Result 独立 API（C16-5 P0-3 — plan §21.3）
+// =============================================================================
+
+/**
+ * GET /api/v1/ai/sql/executions/{audit_id}/result 响应（plan §21.3 C16-5）。
+ *
+ * 与 /audit/{id}/execution 的区别：
+ *   - /execution 返回状态机 + 元数据（轻量，前端轮询用）
+ *   - /result 返回完整 columns + rows（重量，可能 1MB+）
+ *
+ * 数据源（service 层 fallback 链）：
+ *   1. ai_chat_message.content (message_type='sql_result') — callback 规范化
+ *   2. CollectorRunItem.raw_result — callback 失败/未落 message 的极端 fallback
+ *
+ * 关键字段：
+ *   - columns:        字符串列表（敏感列保留原名 + masked_columns 标记）
+ *   - rows:           list[list[Any]]；敏感列 cell 已替换为 "***"
+ *   - returned_rows:  实际返回行数（受 limit/offset 影响）
+ *   - row_count:      audit.row_count（callback 报告的总行数）
+ *   - truncated:      true 表示还有更多行未返回（受 limit 限制）
+ *   - masked_columns: 被掩码的列名列表
+ */
+export interface AiSqlExecutionResultResponse {
+  audit_id: number
+  execution_status:
+    | 'not_requested'
+    | 'pending'
+    | 'running'
+    | 'success'
+    | 'failed'
+    | 'timeout'
+    | 'cancelled'
+  row_count?: number | null
+  duration_ms?: number | null
+  completed_at?: string | null
+  executed_at?: string | null
+  error_message?: string | null
+  collector_run_id?: number | null
+  awx_job_id?: number | null
+
+  // P0-3 核心：实际数据
+  columns: string[]
+  rows: Array<Array<string | number | boolean | null>>
+  returned_rows: number
+  truncated: boolean
+  masked_columns: string[]
+}
+
+/**
+ * GET /api/v1/ai/sql/executions/{audit_id}/result 查询参数。
+ *
+ * - limit:  最大返回行数（后端 ge=1, le=200；默认 100）
+ * - offset: 分页偏移（后端 ge=0；默认 0）
+ *
+ * 注：前端仅透传给 query string；后端做边界校验，越界返 422。
+ */
+export interface AiSqlExecutionResultParams {
+  limit?: number
+  offset?: number
+}
+
+// =============================================================================
 // SQL Result 渲染（C14 Chat 集成）
 // =============================================================================
 
