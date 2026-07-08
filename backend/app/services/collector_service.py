@@ -48,6 +48,7 @@ from app.services.awx_service import AwxService, AwxServiceError
 from app.services.batch_collector_service import BatchCollectorService
 from app.services.port_calibration_service import PortCalibrationService
 from app.services.inspection_service import InspectionService
+from app.services.check_item_builder_registry import CheckItemBuilderRegistry
 
 
 logger = logging.getLogger(__name__)
@@ -296,6 +297,21 @@ class CollectorService:
                 related_db_instance_id = int(instance.id)
                 related_server_id = int(server.id)
                 asset_type = "server"
+            elif check_code in ("DB_SCHEMA_METADATA_COLLECTION", "DB_OBJECT_METADATA"):
+                # Phase 3.6B0 C8/C16-F3/C16-F0: AI Copilot schema/object metadata
+                # snapshot. Builder 由 CheckItemBuilderRegistry 提供 (_AiSchemaMetadataBuilder
+                # / _AiObjectMetadataBuilder), 派生 item dict 携带 sql_text/credential/
+                # business_domain 等 AI 专属字段, 通过 extra_vars 透传给 AWX EE。
+                return CollectorService._build_ai_db_instance_item(
+                    db,
+                    run_id=run_id,
+                    instance=instance,
+                    server=server,
+                    db_type=db_type,
+                    check_code=check_code,
+                    options=options,
+                    timeout_seconds=timeout_seconds,
+                )
             else:
                 raise ValueError(f"不支持的 check_code: {check_code}")
 
@@ -332,6 +348,114 @@ class CollectorService:
                 "is_required": item.is_required,
             }
             return item, extra
+
+    @staticmethod
+    def _build_ai_db_instance_item(
+        db: Session,
+        *,
+        run_id: str,
+        instance: DbInstance,
+        server: Server,
+        db_type: DbType,
+        check_code: str,
+        options: dict[str, Any],
+        timeout_seconds: int,
+    ) -> tuple[CollectorRunItem, dict[str, Any]]:
+        """Phase 3.6B0 C8/C16-F3/C16-F0: AI schema/object metadata dispatch.
+
+        Delegates item construction to ``CheckItemBuilderRegistry`` AI builders
+        (``_AiSchemaMetadataBuilder`` / ``_AiObjectMetadataBuilder``). The builder
+        emits a dict that already carries AI-specific fields (``rule_config``,
+        ``executor_type``, ``business_domain``, ``credential_*``). We materialise
+        that dict into a ``CollectorRunItem`` + AWX ``extra_vars`` entry.
+
+        Raises:
+            ValueError: builder not registered, builder produced no items, or
+                item validation fails (target_port range, missing instance).
+
+        Returns:
+            (CollectorRunItem, extra_vars_dict) — same shape as the hardcoded
+            DB_PORT_REACHABILITY / SSH_PORT_REACHABILITY branches above so
+            ``launch_collector_run`` can append to ``items`` / ``extra_items``
+            uniformly.
+        """
+        builder = CheckItemBuilderRegistry._builders.get(check_code)
+        if builder is None:
+            raise ValueError(
+                f"不支持的 check_code: {check_code} (no CheckItemBuilderRegistry entry)"
+            )
+
+        # Builder 接受 assets=[{"target_scope": ..., "id": ...}] 列表.
+        # 仅处理单一 instance 维度 (scope_target == 'db_instance').
+        assets = [{"target_scope": "db_instance", "id": int(instance.id)}]
+        built_items = builder.build(db, assets=assets, options=options)
+        if not built_items:
+            raise ValueError(
+                f"AI builder for {check_code} produced no items "
+                f"(instance={instance.id} db_type={db_type.type_code})"
+            )
+
+        # Builder 可能返回 1 条 (skipped UNSUPPORTED_DB_TYPE/CREDENTIAL_MISSING)
+        # 或 N 条 (reserved for future multi-database dispatch). 复用第 1 条作为
+        # 主 item, 其余跳过 — 与硬编码 DB_PORT_REACHABILITY 行为一致 (1 instance 1 item).
+        # 若想 N 条全 dispatch, 需扩展 _build_item 返回 list[tuple], 留作后续 commit.
+        primary = built_items[0]
+
+        target_host = str(primary.get("target_host") or server.ip_address)
+        target_port = int(primary.get("target_port") or instance.port or 0)
+        if target_port < 1 or target_port > 65535:
+            raise ValueError(
+                f"{check_code} builder returned invalid target_port={target_port} "
+                f"for instance={instance.id}"
+            )
+
+        item_key = CollectorService._make_item_key(
+            "db_instance", int(instance.id), check_code, target_host, target_port
+        )
+        item = CollectorRunItem(
+            run_id=run_id,
+            item_key=item_key,
+            check_code=check_code,
+            target_scope="db_instance",
+            db_instance_id=int(instance.id),
+            server_id=int(server.id),
+            target_host=target_host,
+            target_port=target_port,
+            endpoint_type=str(primary.get("endpoint_type") or "DB_SERVICE_PORT"),
+            port_source=str(primary.get("port_source") or "db_instance_port"),
+            is_required=bool(primary.get("is_required", True)),
+            timeout_seconds=timeout_seconds,
+            status="pending",
+        )
+        extra = {
+            "item_key": item_key,
+            "check_code": check_code,
+            "task_type": CollectorService._get_check_definition(db, check_code).get("task_type") or "DB_SQL_COLLECT",
+            "target_scope": "db_instance",
+            "asset_id": int(instance.id),
+            "asset_name": instance.instance_name or str(instance.id),
+            "db_type": db_type.type_code,
+            "target_host": target_host,
+            "target_port": target_port,
+            "timeout_seconds": timeout_seconds,
+            "protocol": "tcp",
+            "endpoint_type": item.endpoint_type,
+            "port_source": item.port_source,
+            "is_required": item.is_required,
+            # AI 专属字段透传给 AWX EE db_sql_readonly 执行器
+            "executor_type": primary.get("executor_type", "db_sql_readonly"),
+            "business_domain": primary.get("business_domain"),
+            "rule_config": primary.get("rule_config"),
+            "credential_profile_id": primary.get("credential_profile_id"),
+            "credential_code": primary.get("credential_code"),
+            "awx_credential_id": primary.get("awx_credential_id"),
+            "credential_role": primary.get("credential_role"),
+            "credential_type": primary.get("credential_type"),
+            "database_name": primary.get("database_name"),
+            "db_type_code": primary.get("db_type_code"),
+            "service_name": primary.get("service_name"),
+        }
+        return item, extra
 
         if scope_target == "server":
             server = CollectorService._get_server(db, asset_id)
