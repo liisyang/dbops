@@ -107,7 +107,9 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
 
     columns = raw.get("columns") if isinstance(raw.get("columns"), list) else []
     rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
-    result_status = (raw.get("result_status") or "").lower()
+    result_status = (
+        (getattr(cb, "result_status", None) or raw.get("result_status") or raw.get("rc") or "")
+    ).lower()
     error_code = (raw.get("error_code") if isinstance(raw.get("error_code"), str) else "") or ""
     duration_ms = _to_int(raw.get("duration_ms"))
     if duration_ms == 0:

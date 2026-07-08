@@ -407,7 +407,7 @@ class AiSqlExecuteService:
             "target_host": target_host,
             "target_port": target_port,
             "db_type_code": str(audit.db_type_code or "POSTGRESQL").lower(),
-            "database_name": getattr(instance, "database_name", None) or "<default>",
+            "database_name": getattr(instance, "database_name", None) or (snap.database_name if snap else None) or "<default>",
             "service_name": getattr(instance, "service_name", None),
             "timeout_seconds": int(cls.DEFAULT_TIMEOUT_SECONDS),
             "rule_config": {

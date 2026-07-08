@@ -430,7 +430,7 @@ def test_sql_supported_db_types_postgres_only_when_sql_preview_enabled():
         DIFY_BASE_URL="http://d",
         DIFY_SQL_WORKFLOW_KEY="sk",
     )
-    assert s.sql_supported_db_types == ["POSTGRESQL", "ORACLE", "MSSQL"]
+    assert s.sql_supported_db_types == ["POSTGRESQL", "ORACLE", "MSSQL", "SQLSERVER"]
 
 
 def test_sql_supported_db_types_includes_when_execution_enabled():
@@ -439,7 +439,7 @@ def test_sql_supported_db_types_includes_when_execution_enabled():
         DIFY_BASE_URL="http://d",
         DIFY_SQL_WORKFLOW_KEY="sk",
     )
-    assert s.sql_supported_db_types == ["POSTGRESQL", "ORACLE", "MSSQL"]
+    assert s.sql_supported_db_types == ["POSTGRESQL", "ORACLE", "MSSQL", "SQLSERVER"]
 
 
 def test_sql_supported_db_types_three_dialects_order_stable():

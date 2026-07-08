@@ -206,7 +206,7 @@ class Settings(BaseSettings):
         """
         if not (self.AI_SQL_PREVIEW_ENABLED or self.AI_SQL_EXECUTION_ENABLED):
             return []
-        return ["POSTGRESQL", "ORACLE", "MSSQL"]
+        return ["POSTGRESQL", "ORACLE", "MSSQL", "SQLSERVER"]
 
 
 @lru_cache
