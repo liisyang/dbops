@@ -430,7 +430,7 @@ def test_sql_supported_db_types_postgres_only_when_sql_preview_enabled():
         DIFY_BASE_URL="http://d",
         DIFY_SQL_WORKFLOW_KEY="sk",
     )
-    assert s.sql_supported_db_types == ["POSTGRESQL"]
+    assert s.sql_supported_db_types == ["POSTGRESQL", "ORACLE", "MSSQL"]
 
 
 def test_sql_supported_db_types_includes_when_execution_enabled():
@@ -439,4 +439,19 @@ def test_sql_supported_db_types_includes_when_execution_enabled():
         DIFY_BASE_URL="http://d",
         DIFY_SQL_WORKFLOW_KEY="sk",
     )
-    assert s.sql_supported_db_types == ["POSTGRESQL"]
+    assert s.sql_supported_db_types == ["POSTGRESQL", "ORACLE", "MSSQL"]
+
+
+def test_sql_supported_db_types_three_dialects_order_stable():
+    """C16-5：方言语义稳定（首项必须为 POSTGRESQL，ORACLE 在 MSSQL 前，MySQL 延后）。"""
+    s = _make_settings(
+        AI_SQL_PREVIEW_ENABLED=True,
+        AI_SQL_EXECUTION_ENABLED=True,
+        DIFY_BASE_URL="http://d",
+        DIFY_SQL_WORKFLOW_KEY="sk",
+    )
+    dialects = s.sql_supported_db_types
+    assert dialects[0] == "POSTGRESQL"
+    assert "ORACLE" in dialects
+    assert "MSSQL" in dialects
+    assert "MYSQL" not in dialects  # plan §4.8: MySQL 延后

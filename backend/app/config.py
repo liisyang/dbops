@@ -201,11 +201,12 @@ class Settings(BaseSettings):
     def sql_supported_db_types(self) -> list[str]:
         """当前 SQL Preview/Execute 支持的 db_type 列表。
 
-        首版仅 PostgreSQL（plan §4.8）。其他方言 AST 框架保留但测试不要求通过。
+        C16-5 落地后已解锁三方言（PostgreSQL / Oracle / SQL Server）。MySQL 延后。
+        MySQL 单独迭代再加入（plan §4.8）。
         """
         if not (self.AI_SQL_PREVIEW_ENABLED or self.AI_SQL_EXECUTION_ENABLED):
             return []
-        return ["POSTGRESQL"]
+        return ["POSTGRESQL", "ORACLE", "MSSQL"]
 
 
 @lru_cache
