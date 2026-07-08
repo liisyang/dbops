@@ -1352,3 +1352,28 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_ai_chat_message_sql_result_audit
 | 2026-06-29 | 索引表达式 vs metadata_json 触发器 | **表达式索引** | PostgreSQL 原生支持 `((metadata->>'audit_id'))` 表达式索引；触发器方案更重且与现有 ORM 写入路径不兼容 |
 
 - **状态**：✅ C14 DDL 已在 dev 库（10.134.185.85:5432/dbops）跑 2 次幂等验证，5 场景 CHECK 全过；prod 应用待 DBA 现场评估。
+
+## 8. Phase 3.6B0 C16-5 Commit 5 — backend capabilities 三方言解锁 + dev 库凭证/审计/对象元数据
+
+### 8.1 治理背景
+
+C8 schema snapshot + C11-C12 sqlglot + C16-F0 三方言 SQL 模板（PG/Oracle/MSSQL builder + 5 dialect）已闭环，但 dev 库未落 `ai_object_metadata_snapshot` 表，触发 Object Metadata 端点直接 table-not-exist；dev 库仅 profile 6 个 id 9-14 凭证绑定，缺 PG instance 965 专属凭证（仅走 global priority=200 默认），SQL Copilot binding 解析时全 fallback 到 global；ai_sql_audit 自 2026-07-06 起 id=4 卡 `execution_status='running'` 未结，AWX launch 时序漏 callback 路径。
+
+### 8.2 C16-5 Commit 5 落地变更
+
+| 时间 | 变更 | 文件 | 影响 |
+|---|---|---|---|
+| 2026-07-08 | `sql_supported_db_types` 三方言解锁（`backend/app/config.py:200-211`） | `backend/app/config.py` | `["POSTGRESQL"]` → `["POSTGRESQL", "ORACLE", "MSSQL"]`；MySQL 仍按 plan §4.8 延后 |
+| 2026-07-08 | dev 库落 `ai_object_metadata_snapshot` 表（21 字段/4 CHECK/5 索引） | `backend/db/dbops_phase3_6b0_ai_object_metadata.sql` | ObjectMetadata 触发 / 状态 / 历史 / 上下文 4 端点可工作 |
+| 2026-07-08 | dev 库 INSERT `credential_binding id=15`（PG instance 965 专属凭证） | dev library SQL | `bind-db-postgresql-inst-965` profile_id=4 priority=10，SQL Preview/Execute binding 解析走专属 |
+| 2026-07-08 | dev 库 `ai_sql_audit id=4` 卡 `running` → `timeout` 收尾 | dev library SQL | execution_status='timeout' + completed_at=NOW() + error_message=C16-5 cleanup 标记 |
+
+### 8.3 治理决策记录
+
+| 时间 | 决策点 | 选择 | 理由 |
+|---|---|---|---|
+| 2026-07-08 | capabilities 三方言解锁 vs 全 4 方言解锁 | **首版三方言（PG+Oracle+MSSQL），MySQL 延后** | C16-F0 三方言 builder + SQL 模板就绪（plan §4.8）；MySQL 单独迭代，capabilities 默认不暴露 |
+| 2026-07-08 | dev 库 PG 965 凭证 binding 优先级 | **priority=10 专属绑定 + 保留 global priority=200 兜底** | CredentialResolverService 按 priority 升序匹配；专属最高优先级即可覆盖 global 默认 |
+| 2026-07-08 | ai_sql_audit 卡 running 收尾策略 | **UPDATE → timeout 而不是 DELETE** | 保留执行历史可审计；timeout 是合法终态（CHECK 约束 7 个 enum 之一） |
+
+- **状态**：✅ C16-5 Commit 5 已闭环：1 commit dbops sql_supported_db_types（1 file / +2 −1）+ 3 tests 通过 + dev 库 ai_object_metadata_snapshot 表 CREATE 成功 + credential_binding id=15 INSERT + ai_sql_audit id=4 UPDATE 1 row → timeout。
