@@ -2368,6 +2368,45 @@ F2c 实施后识别回归盲点：F2b 落地 `message_type='sql_preview_link'` �
 
 ---
 
+##### C16-5 实施记录 — Commit 1/2/3 已闭环（2026-07-07 → 2026-07-08）
+
+C16-5 后端 + 前端完整闭环分 3 commit 推到 `feature/phase-3.6-ai-copilot` 分支，对应 `piped-marinating-panda.md` Sprint 1。
+
+**Commit 1（`e0fd882` / 2026-07-07）** — P0-4 pending 中间态 + ownership 校验：
+- `backend/app/services/ai/ai_sql_execute_service.py` line 413 拆 PENDING → RUNNING；新增 `AuditOwnershipError` + step 1.5 两层 ownership 校验
+- `backend/app/api/ai.py` 加 403 映射
+- `backend/tests/test_ai_sql_execute_service.py` 17→26 cases（TestAuditOwnership 3 + TestPendingState 3 + TestStateMachineTransition 2）
+
+**Commit 2（`849c809` / 2026-07-07）** — P0-3 独立 Result API `GET /executions/{id}/result`：
+- `backend/app/schemas/ai.py` 新增 `AiSqlExecutionResultResponse`（columns/rows/returned_rows/truncated/masked_columns + 元数据）
+- `backend/app/services/ai/ai_sql_execute_service.py` 新增 `get_execution_result()` + 数据源 fallback chain（chat_message sql_result → CollectorRunItem.raw_result）+ denied_columns 掩码 + limit/offset + cell 截断
+- `backend/app/api/ai.py` 新增 `GET /sql/executions/{audit_id}/result` + 403/404/409/422 异常映射
+- `execute()` business_context 补 hash（plan §21.3 通过标准 #5）
+- 5 文件 +887/−3；tests 26→57 cases（service 10 + API 7 + 14 Query 边界）
+
+**Commit 3（`32924c2` / 2026-07-08）** — 前端 SqlPreview 完整 rows + cancelled 配色：
+- `frontend/src/types/ai.ts` 新增 `AiSqlExecutionResultResponse` + `AiSqlExecutionResultParams`（对齐 backend schema）
+- `frontend/src/api/ai.ts` 新增 `aiApi.getExecutionResult(auditId, params?)` + 错误码注释 403/404/409/422
+- `frontend/src/views/ai/SqlPreview.vue` audit 详情模式新增 4 ref + 4 函数（`loadExecutionResult` / `resultNextPage` / `resultPrevPage` / `resultRetry`）+ Template「完整结果」section（masked_columns 黄条 + columns/rows 表格 + masked 列徽章 + 分页 + 错误状态 + 重试）；`data-testid="audit-execution-result"` + `audit-execution-result-error`
+- `frontend/src/components/ai/ChatMessageBubble.vue` `resultStatusClass` cancelled 分支 `bg-zinc-500/15 text-zinc-300`（与 SqlPreview.vue:913 `executionBadgeClass` 对齐）；按钮「查看详情」→「执行详情」+ `data-testid="sql-result-view-detail"`
+- `frontend/src/components/ai/ChatMessageBubble.spec.ts` 28→34 cases（新增 6：C16-5 状态配色 4 + 命名 1 + callback 幂等兜底 1）；`statusBadge` helper 用 `text-[10px]` vs `text-[11px]` 过滤区分 sql_result 徽章 vs ChatStatusBadge
+- 5 文件 +436/−6；vue-tsc 0 错 + vitest 34/0 + verify.sh 721/3/0
+
+**关联改动**：
+- 3 memory：`phase-3-6-c16-5-commit-1-completed-2026-07-07.md` + `phase-3-6-c16-5-commit-2-completed-2026-07-07.md` + `phase-3-6-c16-5-commit-3-completed-2026-07-08.md` + MEMORY.md 索引 3 行
+- 1 handoff：`.claude/plans/phase-3-6-c16-5-and-live-e2e-handoff-2026-07-07.md`（合并 sprint plan）
+- 3 progress：`.claude/plans/phase-3-6-progress-2026-07-07-c16-5-commit-{1,2,3}.md`
+
+**剩余 commit 边界**（Sprint 2 + 3 共 6 commits）：
+- Commit 4 — ansible-playbooks PG psycopg2 → psycopg v3 alias
+- Commit 5 — backend 三方言 capabilities 解锁 + dev 库 PG 凭证 binding + ai_sql_audit 卡 running cleanup
+- Commit 6 — dev 库 PG 965 dbops_readonly role + GRANT 验证
+- Commit 7 — PG 965 live E2E 8 端点验证
+- Commit 8 — Oracle 961 + MSSQL 963/964 live E2E 跨方言
+- Commit 9 — 文档同步（5 docs）+ plan §21.3 实施记录收尾
+
+---
+
 #### C16-5：Execute 按钮和结果卡片闭环（NEW）
 
 目标：用户点击 Preview 卡片上的"执行"后，异步等待 AWX callback，最终在 Chat 内出现结果卡片。
