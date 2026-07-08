@@ -143,7 +143,9 @@ def test_builder_class_attrs():
     assert b._SUPPORTED_DB_TYPES == frozenset({
         "postgresql", "postgres", "oracle", "mssql", "sqlserver",
     })
-    assert b._MAX_ROWS == 20000
+    # Commit 8: _MAX_ROWS lowered 20000 → 1000 (EE pydantic DbReadonlySqlRuleConfig
+    # le=1000 hard cap; 20000 caused EE to reject rule_config with 422).
+    assert b._MAX_ROWS == 1000
     assert b._MAX_BYTES == 10485760
     assert issubclass(_AiSchemaMetadataBuilder, BaseCheckItemBuilder)
 
@@ -410,7 +412,7 @@ def test_build_postgresql_with_credential_returns_normal_item():
     rc = it["rule_config"]
     assert "sql_text" in rc and rc["sql_text"]
     assert "information_schema.columns" in rc["sql_text"]
-    assert rc["max_rows"] == 20000
+    assert rc["max_rows"] == 1000
     assert rc["max_bytes"] == 10485760
     assert rc["timeout_seconds"] == 45
     assert rc["source"] == "dbops.ai.sql_templates.postgresql.pg_schema_columns"

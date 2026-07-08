@@ -613,6 +613,11 @@ def test_stats_group_by_provider_returns_counts():
 class _CollectorSettings:
     def __init__(self, callback_url: str):
         self.COLLECTOR_CALLBACK_URL = callback_url
+        # C16-5+ Commit 8: collector_service.launch_collector_run now reads
+        # AWX_PREBOUND_CREDENTIAL_IDS to merge callback token (id=4) into
+        # the launch credentials list (otherwise AWX rejects with
+        # "Removing DBOPS Collector Callback Token credential …").
+        self.AWX_PREBOUND_CREDENTIAL_IDS = ""
 
 
 def test_launch_asset_verify_uses_request_base_url_when_callback_url_missing(monkeypatch):
@@ -622,7 +627,7 @@ def test_launch_asset_verify_uses_request_base_url_when_callback_url_missing(mon
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 123,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/123",
             "awx_job_template_id": 456,
@@ -657,7 +662,7 @@ def test_launch_asset_verify_prefers_configured_callback_url(monkeypatch):
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 123,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/123",
             "awx_job_template_id": 456,
@@ -684,7 +689,7 @@ def test_launch_collector_run_builds_multiple_items(monkeypatch):
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 321,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/321",
             "awx_job_template_id": 456,
@@ -877,7 +882,7 @@ def test_launch_collector_run_port_calibration_builds_candidate_items(monkeypatc
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 777,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/777",
             "awx_job_template_id": 456,
@@ -935,7 +940,7 @@ def test_launch_collector_run_infers_port_calibration_from_candidate_check_code(
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 778,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/778",
             "awx_job_template_id": 456,
@@ -984,7 +989,7 @@ def test_port_calibration_candidate_failure_does_not_mark_instance_missing(monke
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 779,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/779",
             "awx_job_template_id": 456,
@@ -1059,7 +1064,7 @@ def test_port_calibration_creates_drift_proposal_for_changed_port(monkeypatch):
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 780,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/780",
             "awx_job_template_id": 456,
@@ -1189,7 +1194,7 @@ def test_port_calibration_callback_prefers_exact_asset_endpoint_identity(monkeyp
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 781,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/781",
             "awx_job_template_id": 456,
@@ -1445,7 +1450,7 @@ def test_port_calibration_creates_drift_proposal_when_current_port_not_a_service
     monkeypatch.setattr(
         collector_service_module.AwxService,
         "launch_job",
-        lambda extra_vars: {
+        lambda extra_vars, credentials=None: {
             "awx_job_id": 782,
             "awx_job_url": "https://awx.example.com/#/jobs/playbook/782",
             "awx_job_template_id": 456,

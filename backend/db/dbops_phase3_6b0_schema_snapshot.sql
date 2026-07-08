@@ -189,6 +189,49 @@ CREATE INDEX IF NOT EXISTS idx_ai_sql_schema_snapshot_expires_at
     ON dbops.ai_sql_schema_snapshot(expires_at)
     WHERE status = 'success';
 
+-- ============================================================================
+-- 2. collector_check_definition — AI Schema/Object metadata check_code 种子
+-- ============================================================================
+-- Phase 3.6B0 C8/C16-F3/C16-F0 + C16-5+ Commit 7: 这两条 check_code 由
+-- CheckItemBuilderRegistry 动态 dispatch 到 _AiSchemaMetadataBuilder /
+-- _AiObjectMetadataBuilder（不需要硬编码），但 collector_check_definition 表
+-- 也需要 seed 两条记录，否则某些流程（如资产校验按 check_code 查元数据）
+-- 会找不到行。
+--
+-- ON CONFLICT (check_code) DO UPDATE 保证迁移可重复执行：fresh DB 插入，
+-- 已有 DB 刷新 description / updated_at。配置（awx_role、config）保持空 —
+-- Builder registry 是动态 dispatch 的唯一来源。
+INSERT INTO dbops.collector_check_definition (
+    check_code, check_name, target_scope, task_type,
+    default_timeout_seconds, enabled, config, description
+) VALUES
+    (
+        'DB_SCHEMA_METADATA_COLLECTION',
+        'DB Schema Metadata Collection',
+        'db_instance', 'DB_SQL_COLLECT',
+        60, true, '{}'::jsonb,
+        'AI Copilot: 采集 instance+database 维度的 schema/table/column 元数据快照，'
+        '供 /ai/sql/preview 提供 allowed_tables/columns 上下文。'
+        '由 CheckItemBuilderRegistry._AiSchemaMetadataBuilder 动态 dispatch。'
+    ),
+    (
+        'DB_OBJECT_METADATA',
+        'DB Object Metadata Collection',
+        'db_instance', 'DB_SQL_COLLECT',
+        60, true, '{}'::jsonb,
+        'AI Copilot: 采集 instance+database 维度的 DDL 元数据快照（columns/types/'
+        'indexes），三方言（PG/Oracle/MSSQL）。由 CheckItemBuilderRegistry'
+        '._AiObjectMetadataBuilder 动态 dispatch。'
+    )
+ON CONFLICT (check_code) DO UPDATE SET
+    check_name = EXCLUDED.check_name,
+    target_scope = EXCLUDED.target_scope,
+    task_type = EXCLUDED.task_type,
+    default_timeout_seconds = EXCLUDED.default_timeout_seconds,
+    enabled = EXCLUDED.enabled,
+    description = EXCLUDED.description,
+    updated_at = now();
+
 COMMIT;
 
 -- 验证

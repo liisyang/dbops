@@ -105,6 +105,12 @@ class _FakeQueryResult:
                 return item
         return None
 
+    def one_or_none(self) -> Optional[Any]:
+        """C16-5+ Commit 8: ai_sql_preview_service.run_preview uses .one_or_none()
+        for DbInstance lookup. Mirror first() (single-item store; multi-row
+        match would be a test design bug)."""
+        return self.first()
+
     def all(self) -> list[Any]:
         return [i for i in self.items if self._matches(i)]
 

@@ -617,8 +617,40 @@ class CollectorService:
         db.commit()
         db.refresh(run)
 
+        # C16-5+ Commit 8 fix: pass AWX credential IDs from extra_items so AWX
+        # injects the DB credentials (e.g. DBOPS_DB_USERNAME / DBOPS_DB_PASSWORD)
+        # into the job environment. Without this, AI Schema/Object collectors
+        # fall back to AUTHENTICATION_FAILED because the EE collector_client
+        # cannot read env vars that AWX never set.
+        # De-duplicate: a single run may include both DB_PORT_REACHABILITY and
+        # an AI check_code item, both with the same awx_credential_id.
+        #
+        # Also merge AWX_PREBOUND_CREDENTIAL_IDS (e.g. callback token id=4) so
+        # AWX does not reject the launch with "Removing DBOPS Collector Callback
+        # Token credential at launch time without replacement is not supported".
+        # The AWX launch API REPLACES the JT's default credentials when you pass
+        # a `credentials` list, so we must include every required credential.
+        launch_credentials: list[int] = []
+        settings = get_settings()
+        prebound_str = (settings.AWX_PREBOUND_CREDENTIAL_IDS or "").strip()
+        if prebound_str:
+            for p in prebound_str.split(","):
+                try:
+                    pid = int(p.strip())
+                    if pid > 0 and pid not in launch_credentials:
+                        launch_credentials.append(pid)
+                except ValueError:
+                    pass
+        for extra_item in extra_items:
+            cred_id = extra_item.get("awx_credential_id")
+            if isinstance(cred_id, int) and cred_id > 0 and cred_id not in launch_credentials:
+                launch_credentials.append(int(cred_id))
+
         try:
-            launch_result = AwxService.launch_job(extra_vars=run.extra_vars)
+            launch_result = AwxService.launch_job(
+                extra_vars=run.extra_vars,
+                credentials=launch_credentials or None,
+            )
         except AwxServiceError as exc:
             run.status = "failed"
             run.error_message = str(exc)

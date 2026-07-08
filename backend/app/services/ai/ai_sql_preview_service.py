@@ -433,18 +433,46 @@ class AiSqlPreviewService:
         #   role/locale     → 来自 user 对象（不由前端传）
         #   current_page    → 白名单校验
         #   schema_context  → 实时计算，禁止存 DB（plan §4.6）
+        #
+        # C16-5+ Commit 8 fix: Dify dbops-sql-generator workflow (aiplan yml)
+        # expects paragraph (string) inputs:
+        #   - allowed_tables        (JSON-encoded list string)
+        #   - allowed_columns_json  (JSON-encoded dict string)
+        #   - denied_columns_json   (JSON-encoded list string)
+        # Plus the required instance_id / target_ip / target_port. The old
+        # payload passed Python list/dict objects, triggering "must be a
+        # string" 400 errors from Dify.
+        instance = (
+            db.query(DbInstance)
+            .filter(DbInstance.id == instance_id)
+            .one_or_none()
+        )
+        # DbInstance has no `host` column — host lives on the joined Server row.
+        target_ip = (instance.server.ip_address if instance and instance.server else "") or ""
+        target_port = int(instance.port or 0) if instance and instance.port else 0
         inputs: dict[str, Any] = {
             "db_type_code": db_type_code.upper(),
             "sql_dialect": sql_dialect or "",
+            "user_question": user_question,
             "schema_context": schema_context_text,
-            "allowed_schemas": list(ctx.get("allowed_schemas") or []),
-            "allowed_tables": allowed_tables,
-            "allowed_columns": allowed_columns,
-            "denied_columns": denied_columns,
+            "allowed_schemas": json.dumps(list(ctx.get("allowed_schemas") or []), ensure_ascii=False),
+            "allowed_tables": json.dumps(allowed_tables, ensure_ascii=False),
+            "allowed_columns_json": json.dumps(allowed_columns, ensure_ascii=False),
+            "denied_columns_json": json.dumps(denied_columns, ensure_ascii=False),
+            "instance_id": str(instance_id),
+            "database_name": database_name or "<default>",
+            "max_rows": str(cls.DEFAULT_MAX_ROWS),
+            "target_ip": target_ip,
+            "target_port": str(target_port),
             "current_page": cls._normalize_current_page(current_page),
         }
 
         # 5. 调 DifyWorkflow（捕获异常 → rejected audit 落库）
+        logger.info(
+            "ai_sql preview Dify inputs dump instance_id=%s keys=%s allowed_tables=%s",
+            instance_id, list(inputs.keys()),
+            inputs.get("allowed_tables"),
+        )
         try:
             dify_response = DifyService.run_sql_workflow(
                 inputs=inputs,
@@ -483,6 +511,14 @@ class AiSqlPreviewService:
         except (DifyConfigurationError, DifyConnectionError) as exc:
             raise DifyUnavailableError(f"Dify unavailable: {exc}") from exc
         except (DifyHttpError, DifyResponseFormatError) as exc:
+            # C16-5+ Commit 8: surface Dify's body for debugging
+            body = ""
+            if isinstance(exc, DifyHttpError):
+                body = (exc.payload or {}).get("body", "") or ""
+            logger.error(
+                "ai_sql preview Dify HTTP/format error: instance_id=%s body=%s",
+                instance_id, body[:1500],
+            )
             raise DifyUnavailableError(f"Dify error: {exc}") from exc
         except DifyWorkflowFailedError as exc:
             # Workflow 自身 failed → 502（与 plan §11 一致）
@@ -842,7 +878,15 @@ class AiSqlPreviewService:
         if not isinstance(dify_response, dict):
             return result
 
+        # C16-5+ Commit 8: Dify workflow run returns
+        #   {"task_id":..., "workflow_run_id":..., "data": {"outputs": {...}, ...}, ...}
+        # The parser must unwrap `data.outputs` and map field names
+        #   sql_text  → generated_sql
+        #   explain   → explanation
+        #   risk_level, need_execute  → caller reads from outputs directly
         outputs_raw = dify_response.get("outputs")
+        if outputs_raw is None and isinstance(dify_response.get("data"), dict):
+            outputs_raw = dify_response["data"].get("outputs")
         result["raw_outputs"] = outputs_raw
 
         # 1. outputs 是 str → 尝试 json.loads（仅当形如 JSON 对象）
@@ -864,8 +908,11 @@ class AiSqlPreviewService:
 
         # 2. outputs 是 dict → 取结构化字段
         if isinstance(outputs_raw, dict):
-            # generated_sql
+            # generated_sql — backend expects "generated_sql"; Dify workflow
+            # uses "sql_text". Map both for forward/backward compat.
             sql_val = outputs_raw.get("generated_sql")
+            if not sql_val:
+                sql_val = outputs_raw.get("sql_text")
             if isinstance(sql_val, str) and sql_val.strip():
                 result["generated_sql"] = sql_val.strip()
             elif isinstance(sql_val, dict):
@@ -891,8 +938,10 @@ class AiSqlPreviewService:
             if isinstance(refs_val, list):
                 result["table_refs"] = [str(t) for t in refs_val if t is not None]
 
-            # explanation
+            # explanation — backend expects "explanation"; Dify uses "explain"
             expl_val = outputs_raw.get("explanation")
+            if not expl_val:
+                expl_val = outputs_raw.get("explain")
             if isinstance(expl_val, str) and expl_val.strip():
                 result["explanation"] = expl_val.strip()
 

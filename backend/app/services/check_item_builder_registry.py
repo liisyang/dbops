@@ -988,7 +988,11 @@ class _AiSchemaMetadataBuilder(BaseCheckItemBuilder):
     })
 
     # Phase 3.6B0 §4.4 P1 完整性保证: Schema 采集独立限制
-    _MAX_ROWS = 20000
+    # C16-5+ Commit 8 fix: lowered from 20000 to 1000 to comply with
+    # collector_client.schemas.DbReadonlySqlRuleConfig.max_rows le=1000
+    # hard cap on the EE side. Higher values trigger pydantic validation
+    # failure → empty collector_results → backend CALLBACK_RESULT_MISSING.
+    _MAX_ROWS = 1000
     _MAX_BYTES = 10485760  # 10MB
 
     # Phase 3.6B0 §4B C16-F0: 三方言模板路径（key 是 lower db_type_code）
@@ -1177,7 +1181,10 @@ class _AiObjectMetadataBuilder(BaseCheckItemBuilder):
     })
 
     # Phase 3.6B0 F3: DDL 文本独立 1MB 限制（callback service 兜底截断）
-    _MAX_ROWS = 20000
+    # C16-5+ Commit 8 fix: lowered from 20000 to 1000 to comply with
+    # collector_client.schemas.DbReadonlySqlRuleConfig.max_rows le=1000
+    # hard cap on the EE side. See _AiSchemaMetadataBuilder above for context.
+    _MAX_ROWS = 1000
     _MAX_BYTES = 1048576  # 1MB
 
     # Phase 3.6B0 §4B C16-F0: 三方言模板路径（key 是 lower db_type_code）
