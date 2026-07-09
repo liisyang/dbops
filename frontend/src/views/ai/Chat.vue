@@ -303,7 +303,8 @@ const activeSessionTitle = computed(() => {
 })
 
 // C16-F2c1 NEW — 页面标题 + 浏览器标签标题（instance_sql 模式下展示
-// "AI Copilot · 10.134.181.168:1521 (oracle)" 模式，便于 DBA 区分多实例窗口）
+// "AI Copilot · 业务系统名 · 10.134.181.168:1521 (oracle)" 模式，
+// 便于 DBA 区分多实例窗口 + 一眼看到业务归属）
 const DEFAULT_PAGE_TITLE = 'AI Copilot'
 const pageTitle = computed(() => {
   if (boundInstanceId.value == null) return DEFAULT_PAGE_TITLE
@@ -314,7 +315,11 @@ const pageTitle = computed(() => {
   const dbType = (ctx.db_type_code || '?').toLowerCase()
   const ip = ctx.server_ip || 'no-ip'
   const port = ctx.port ?? '-'
-  return `${DEFAULT_PAGE_TITLE} · ${ip}:${port} (${dbType})`
+  const biz = ctx.system_name || ''
+  // 业务系统名 → IP:端口 (db_type)；无业务系统名时回退到原版
+  return biz
+    ? `${DEFAULT_PAGE_TITLE} · ${biz} · ${ip}:${port} (${dbType})`
+    : `${DEFAULT_PAGE_TITLE} · ${ip}:${port} (${dbType})`
 })
 
 // 同步 document.title — 多 Tab 切换时浏览器标签可一眼区分
