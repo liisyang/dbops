@@ -830,3 +830,101 @@ class AiSqlAudit(DbopsAssetBase):
             f"db_type={self.db_type_code} preview={self.preview_safety_status} "
             f"execution={self.execution_status}>"
         )
+
+
+# =============================================================================
+# C16-F2d: AI System View Policy（Phase 3.6B2 F2d）
+# =============================================================================
+class AiSystemViewPolicy(DbopsAssetBase):
+    """AI Copilot 系统视图白名单（per-instance 显式 allowlist）。
+
+    背景（plan §21.4 / commit handoff 2026-07-09）：
+    - 当前 SQL Preview 走 ai_sql_schema_snapshot.allowed_tables 白名单（业务表 +
+      模板层一刀切排除系统 schema）
+    - DBA 运维场景（查锁 / 查慢 SQL / 查 session）需要访问 §4.1 列出的 DBA
+      系统视图（V$LOCK / sys.dm_exec_sessions / pg_stat_activity 等）
+    - 本表为 per-instance 显式白名单：默认 enabled=false，DBA 显式开启后才允许
+      AI 在该 instance 上查询 policy.allowlist 列出的系统视图
+
+    关键设计：
+    1. 每个 instance 一行（UNIQUE instance_id 约束）
+    2. 默认 disable（enabled=false）→ 灰度开关
+    3. allowlist 显式列出允许访问的系统视图（与 §4.1 baseline 对齐）
+    4. denylist 强于 allowlist（防御 §5 黑名单：sys.sql_logins / pg_authid 等）
+    5. policy_version 配套 §4.1 baseline；后续扩 §4.2 时升 v2 + 增量
+
+    集成点（commit 2/3 实施）：
+    - ai_schema_snapshot_callback_service: snapshot 采集时若 policy 启用，
+      给 allowed_tables 追加 policy.allowlist（force-include）
+    - ai_sql_preview_service: Layer 3 AST 校验前加 is_allowed() 闸门
+    - ai_schema_context_service: policy 启用时 schema_context 合并
+
+    命名规范（dialect-specific）：
+    - Oracle: 大写无前缀（DBA_OBJECTS, V$LOCK, USER_TABLES, ALL_INDEXES）
+    - MSSQL: 小写带 schema（sys.databases, sys.dm_tran_locks, msdb.dbo.backupset）
+    - PG: 带 pg_catalog. / information_schema. 前缀（pg_catalog.pg_class,
+          information_schema.tables）
+    """
+
+    __tablename__ = "ai_system_view_policy"
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    instance_id = Column(
+        BigInteger,
+        ForeignKey("dbops.db_instance.id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    db_type_code = Column(String(32), nullable=False)
+    policy_version = Column(String(32), nullable=False)
+    # allowlist JSONB：dialect-specific 命名的系统视图列表
+    allowlist = Column(JSONB, nullable=False)
+    # denylist JSONB：防御性黑名单，强于 allowlist
+    denylist = Column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # 灰度开关：默认 false；DBA 显式 enable 后才生效
+    enabled = Column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    updated_by = Column(
+        UUID(as_uuid=True),
+        ForeignKey("dbops.users.id", ondelete="SET NULL", use_alter=True, name="fk_ai_system_view_policy_updated_by"),
+        nullable=True,
+    )
+    updated_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    created_at = Column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    # CHECK 约束（与 DDL 对齐；元素级 trim 校验改用 trigger，PG 不允许 CHECK 内 subquery）
+    __table_args__ = (
+        CheckConstraint(
+            "db_type_code IN ('POSTGRESQL', 'ORACLE', 'MSSQL')",
+            name="chk_ai_system_view_policy_db_type",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(allowlist) = 'array' "
+            "AND jsonb_array_length(allowlist) > 0",
+            name="chk_ai_system_view_policy_allowlist_nonempty",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(denylist) = 'array'",
+            name="chk_ai_system_view_policy_denylist_array",
+        ),
+        # 辅助索引
+        Index(
+            "idx_ai_system_view_policy_db_type",
+            "db_type_code",
+        ),
+        {"schema": "dbops"},
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<AiSystemViewPolicy id={self.id} instance_id={self.instance_id} "
+            f"db_type={self.db_type_code} version={self.policy_version} "
+            f"enabled={self.enabled} allowlist_size={len(self.allowlist or [])}>"
+        )
