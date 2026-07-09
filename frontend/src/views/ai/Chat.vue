@@ -1,7 +1,7 @@
 <template>
   <OpsPage>
     <OpsPageHeader
-      title="AI Copilot"
+      :title="pageTitle"
       :subtitle="boundInstanceId
         ? '基于 Dify 的智能 SQL Copilot（C16-F2c 实例绑定模式）'
         : '基于 Dify 的智能运维对话（C5 落地交互界面）'"
@@ -226,7 +226,7 @@
  *
  * 未做（Phase 3.6B）：FAB 浮窗 + 抽屉（用户已确认双入口策略）
  */
-import { ref, computed, onMounted, onBeforeUnmount } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { aiApi } from '@/api/ai'
 import { assetsApi } from '@/api/assets'
@@ -301,6 +301,33 @@ const activeSessionTitle = computed(() => {
   const s = sessions.value.find((x) => x.id === activeSessionId.value)
   return s?.title ?? 'AI Copilot'
 })
+
+// C16-F2c1 NEW — 页面标题 + 浏览器标签标题（instance_sql 模式下展示
+// "AI Copilot · 10.134.181.168:1521 (oracle)" 模式，便于 DBA 区分多实例窗口）
+const DEFAULT_PAGE_TITLE = 'AI Copilot'
+const pageTitle = computed(() => {
+  if (boundInstanceId.value == null) return DEFAULT_PAGE_TITLE
+  const ctx = boundInstanceContext.value
+  if (!ctx) {
+    return `${DEFAULT_PAGE_TITLE} · 实例 #${boundInstanceId.value} (加载中…)`
+  }
+  const dbType = (ctx.db_type_code || '?').toLowerCase()
+  const ip = ctx.server_ip || 'no-ip'
+  const port = ctx.port ?? '-'
+  return `${DEFAULT_PAGE_TITLE} · ${ip}:${port} (${dbType})`
+})
+
+// 同步 document.title — 多 Tab 切换时浏览器标签可一眼区分
+// 进入实例绑定模式时：标签显示 "AI Copilot · 10.134.181.168:1521 (oracle)"
+// 离开时：还原为 "AI Copilot"
+const ORIGINAL_DOC_TITLE = typeof document !== 'undefined' ? document.title : DEFAULT_PAGE_TITLE
+watch(
+  pageTitle,
+  (t) => {
+    if (typeof document !== 'undefined') document.title = t
+  },
+  { immediate: true },
+)
 const activeMessages = computed<AiChatMessage[]>(() => {
   const id = activeSessionId.value
   if (id == null) return []
@@ -543,23 +570,43 @@ function exitBoundMode() {
   router.replace({ name: 'AiChat', query: {} })
 }
 
-/** sqlPreview 错误映射（plan §11 + F2b 5 类新异常）。 */
+/** sqlPreview 错误映射（plan §11 + F2b 5 类新异常 + C16-F2c1 解析 detail.code）。 */
 function describePreviewError(err: unknown): string {
-  const status = (err as AxiosLikeError | null)?.response?.status
-  const detail = (err as AxiosLikeError | null)?.response?.data?.detail
+  const ax = err as AxiosLikeError | null
+  const status = ax?.response?.status
+  const detail = ax?.response?.data?.detail
   const detailStr =
     typeof detail === 'string'
       ? detail
       : Array.isArray(detail) && detail.length
         ? detail.map((d: { msg?: string; message?: string }) => d?.msg || d?.message || '').join('；')
         : null
-  if (status === 403) return `会话无权访问（403）：${detailStr || 'session 不属于当前用户'}`
-  if (status === 404) return `会话或实例不存在（404）：${detailStr || '检查 session_id / instance_id'}`
-  if (status === 409) return `请求冲突（409）：${detailStr || '可能是幂等命中但 audit 缺失，需重新发送'}`
-  if (status === 422) return `参数校验失败（422）：${detailStr || '检查 mode / bound_instance_id / instance_id 一致性'}`
-  if (status === 502) return `Dify 服务不可达（502）：${detailStr || '稍后重试'}`
+  // C16-F2c1 NEW: 后端 detail 可能是对象 {code, message, ...}，提取更具体的提示
+  const detailObj = (detail && typeof detail === 'object' && !Array.isArray(detail)
+    ? (detail as { code?: string; message?: string; reason?: string; user_message_id?: number })
+    : null)
+  const codeMsg = detailObj?.message || null
+  const code = detailObj?.code || null
+  if (status === 403) return `会话无权访问（403）：${codeMsg || detailStr || 'session 不属于当前用户'}`
+  if (status === 404) return `会话或实例不存在（404）：${codeMsg || detailStr || '检查 session_id / instance_id'}`
+  if (status === 409) {
+    if (code === 'preview_incomplete_retry_required') {
+      // 旧请求事务中断 (user_message 落库但 audit 缺失)；前端 onSend
+      // 每次用新 UUID，新请求会走完整流程。所以这里直接告诉用户「重发即可」
+      const umid = detailObj?.user_message_id
+      return umid
+        ? `上次请求未完成（user_message #${umid} 已被记录但 audit 未落库）。请直接按 Enter 重发，前端会用新 client_request_id 走完整流程。`
+        : '上次请求未完成（事务中断）。请直接按 Enter 重发。'
+    }
+    if (code === 'snapshot_unavailable') {
+      return `Schema 快照不可用（409 ${detailObj?.reason || 'unknown'}）：请先在实例详情页触发 Schema 采集。`
+    }
+    return `请求冲突（409）：${codeMsg || detailStr || '稍后重试'}`
+  }
+  if (status === 422) return `参数校验失败（422）：${codeMsg || detailStr || '检查 mode / bound_instance_id / instance_id 一致性'}`
+  if (status === 502) return `Dify 服务不可达（502）：${codeMsg || detailStr || '稍后重试'}`
   if (status === 503) return `AI SQL Preview 未启用（AI_SQL_PREVIEW_ENABLED=false）`
-  if (status === 504) return `Dify 调用超时（504）：${detailStr || '稍后重试或换更短的问题'}`
+  if (status === 504) return `Dify 调用超时（504）：${codeMsg || detailStr || '稍后重试或换更短的问题'}`
   return extractDetail(err, 'SQL Preview 失败')
 }
 
@@ -674,6 +721,10 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopPendingPolling()
+  // C16-F2c1 NEW: 离开页面还原 document.title（避免 SPA 路由切换后残留旧 title）
+  if (typeof document !== 'undefined') {
+    document.title = ORIGINAL_DOC_TITLE
+  }
 })
 
 // =============================================================================
