@@ -2698,6 +2698,51 @@ WHERE session_id = <SESSION_ID>
 ORDER BY id;
 ```
 
+---
+
+#### C16 第二部分全部闭环记录（2026-07-07 → 2026-07-09）
+
+> 本节补登 §21.3 之前未展开的 commit 闭环。格式：`SHA | 一句话核心改动 | 关联 memory`。
+> 「未 commit」项为 working tree 已有改动但尚未 git commit 的修复，需现场确认后单独闭环。
+
+##### 已 commit（按时间顺序）
+
+| # | SHA | 标题 | 一句话核心改动 | 关联 memory |
+|---|---|---|---|---|
+| 5 | `edacdfc` | C16-5 commit 5 | backend `sql_supported_db_types` 解锁三方言（POSTGRESQL/ORACLE/MSSQL） | [[phase-3-6-c16-5-commit-5-completed-2026-07-08]] |
+| 6 | `6f48eb9` | C16-5 Commit 5 实施记录 docs | 三方言 capabilities 解锁 + dev 库凭证 binding + ai_sql_audit 卡 running cleanup 实施记录收尾 | 同上 |
+| 7 | `6714b1e` | C16-5 commit 6 | dev 库 PG 965 dbops_readonly 最小权限闭环 + AWX binding 4→12 | [[phase-3-6-c16-5-commit-6-completed-2026-07-08]] |
+| 8 | `237f4b5` | C16-5 Commit 6 实施记录 docs | dev 库 PG 965 dbops_readonly role + GRANT 验证实施记录收尾 | 同上 |
+| 9 | `5b5b8be` | C16-5+ commit 7 | `collector_service._build_item` AI dispatch 集成 bug fix + E2E-2/5 trigger AWX cred id=10 验证 | [[phase-3-6-c16-5-commit-7-completed-2026-07-08]] |
+| 10 | `a657e27` | C16-5+ commit 8 | E2E-7/8 三 root cause fix（`max_rows` 20000→1000 + AWX creds 透传 + Dify workflow 对齐）+ DDL seed + 8 unit tests | [[phase-3-6-c16-5-commit-8-completed-2026-07-08]] |
+| 11 | `e993d5c` | C16-5+ Commit 9 | E2E 三方言全覆盖收尾（PG 965 + Oracle 961 + MSSQL EE rebuild） | （无独立 memory） |
+| 12 | `eb6e653` | C16-5+ Bug Fixes | Oracle/MSSQL schema snapshot + callback/execute 四 bug fix；PG 965+Oracle 961 E2E verified；MSSQL EE rebuild pending | [[phase-3-6-c16-5-commit-fixes-2026-07-08]] |
+| 13 | `87acb48` | C16-F2c1 — Chat 顶部标题 | Chat 顶部标题 IP:端口 (db_type) + 409 错误文案可执行化 | [[phase-3-6-c16-f2c1-completed-2026-07-09]] |
+| 14 | `4948969` | C16-F2c1 — Chat 标题追加 | Chat 标题追加业务系统名 `system_name`（双层标题） | 同上 |
+| 15 | `0962447` | C16-F2d commit 1 | `ai_system_view_policy` DDL + ORM + schema tests | （无独立 memory；后续 Commit 2 合并） |
+
+> **C16-5 Binding Rollback（`git revert` 类修复）**：binding id=15 切回 `profile_id=4`，撤销 Commit 6 不必要的新建凭证链路。memory 记录见 [[phase-3-6-c16-5-binding-rollback-2026-07-08]]。
+
+##### 已落地但未 git commit（working tree 修改，2026-07-09）
+
+> 这 4 项改动已写入 working tree，memory 已记录，但尚未 git commit。需现场确认后单独 commit 闭环。
+
+| # | 改动范围 | 一句话核心改动 | 关联 memory |
+|---|---|---|---|
+| A | `backend/app/services/ai/ai_sql_preview_service.py` + `ai_object_metadata_*` 等 | C16-F2d Commit 2：`AiSystemViewPolicyService` + 3 集成点（callback/preview/context）+ 36 单元测试全 PASS | [[phase-3-6-c16-f2d-commit-2-completed-2026-07-09]] |
+| B | `frontend/src/views/ai/Chat.vue` + ChatMessageBubble | C16-F2c1 snapshot_expired UX 修复：`Chat.vue` reason-aware 错误文案 + vitest 6 cases + Oracle 961 实例 | [[c16-f2c1-snapshot-expired-ux-2026-07-09]] |
+| C | `backend/app/services/ai/ai_sql_preview_service.py` 等 | C16-F2d column_hints AST merge 修复：`preview()` 合并 `column_hints` 到 `allowed_columns` 避免 Oracle V$ 列被 AST 拒绝 | [[phase-3-6-ast-column-hints-fix-2026-07-09]] |
+| D | `backend/app/services/ai/ai_sql_callback_service.py` | Re-execute Callback Rollback 修复：callback INSERT IntegrityError rollback 回滚 audit status UPDATE → 永远 `running` | [[phase-3-6-re-execute-callback-rollback-fix-2026-07-09]] |
+
+**现场确认事项**：
+
+1. A/B/C/D 是否合并为 1 个 commit 或拆 4 个 commit？
+2. Commit message 风格是否延续 `fix(phase-3.6): C16-F2d column_hints AST merge` 模式？
+3. 是否同步 push 到 `feature/phase-3.6-ai-copilot` 分支？
+4. 是否需要先跑 `bash scripts/ai/verify.sh` 回归再 commit？
+
+---
+
 ### 21.4 通过标准
 
 C16 第二部分完成必须同时满足：

@@ -1565,7 +1565,9 @@ class CollectorService:
         # ``ai_sql_audit`` (and ``ai_chat_message`` sql_result). Wrapped
         # in try/except so an ai_sql save failure cannot break the
         # surrounding callback transaction.
-        if run_type == "ai_sql" or any(
+        # 2026-07-09 bug-fix: AiSqlExecuteService sends run_type='sql_verify';
+        # the callback dispatch must also match 'sql_verify'.
+        if run_type in ("ai_sql", "sql_verify") or any(
             (getattr(cb, "business_domain", None) or "") == "ai_sql"
             for cb in callback_items
         ):

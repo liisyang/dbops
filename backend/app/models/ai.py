@@ -872,8 +872,7 @@ class AiSystemViewPolicy(DbopsAssetBase):
     instance_id = Column(
         BigInteger,
         ForeignKey("dbops.db_instance.id", ondelete="CASCADE"),
-        nullable=False,
-        unique=True,
+        nullable=True,  # C16-F2d v2: NULL = db_type 默认行；非 NULL = instance 覆盖行
     )
     db_type_code = Column(String(32), nullable=False)
     policy_version = Column(String(32), nullable=False)
@@ -882,6 +881,13 @@ class AiSystemViewPolicy(DbopsAssetBase):
     # denylist JSONB：防御性黑名单，强于 allowlist
     denylist = Column(
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    # column_hints JSONB：为 policy-allowlisted 系统视图提供列元数据
+    # schema snapshot 无法采集系统视图的列信息，DBA 通过此字段显式提供。
+    # Format: {"v$lock": ["addr","sid","type",...], ...}
+    # build_schema_context 合并到 allowed_columns。
+    column_hints = Column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
     )
     # 灰度开关：默认 false；DBA 显式 enable 后才生效
     enabled = Column(

@@ -296,13 +296,22 @@ def _resolve_sqlglot_dialect(db_type_code: str) -> str | None:
     return _DIALECT_MAP.get(code)
 
 
-def _qualified_name(schema: str | None, table: str | None) -> str | None:
-    """Return ``schema.table`` lowercased, or None when table is empty."""
+def _qualified_name(
+    schema: str | None, table: str | None, catalog: str | None = None
+) -> str | None:
+    """Return ``catalog.schema.table`` lowercased, or None when table is empty.
+
+    2026-07-09: 新增 catalog 参数支持三部分名 (msdb.dbo.backupset)。
+    """
     if not table:
         return None
+    parts: list[str] = []
+    if catalog:
+        parts.append(catalog.lower())
     if schema:
-        return f"{schema.lower()}.{table.lower()}"
-    return table.lower()
+        parts.append(schema.lower())
+    parts.append(table.lower())
+    return ".".join(parts)
 
 
 def _extract_column_identifiers(
@@ -362,9 +371,15 @@ def _collect_star_descriptors(
     return out
 
 
-def _collect_from_sources(ast: Any) -> list[tuple[str | None, str, str | None]]:
-    """Return ``[(schema_or_None, table_name, alias_or_None), ...]`` for every
-    physical table referenced by the AST (FROM + JOIN + CTE).
+def _collect_from_sources(ast: Any) -> list[tuple[str | None, str | None, str, str | None]]:
+    """Return ``[(catalog_or_None, schema_or_None, table_name, alias_or_None), ...]``
+    for every physical table referenced by the AST (FROM + JOIN + CTE).
+
+    2026-07-09 bug-fix: 新增 catalog（三部分名: msdb.dbo.backupset）。
+    sqlglot 的 exp.Table 中：
+      - catalog = 数据库名（如 msdb）
+      - db      = schema 名（如 dbo）
+      - name    = 表名（如 backupset）
 
     Subqueries are excluded: the ``Subquery`` node is not an
     ``exp.Table``, so ``find_all(exp.Table)`` automatically skips them.
@@ -375,13 +390,13 @@ def _collect_from_sources(ast: Any) -> list[tuple[str | None, str, str | None]]:
     """
     from sqlglot import expressions as exp
 
-    out: list[tuple[str | None, str, str | None]] = []
+    out: list[tuple[str | None, str | None, str, str | None]] = []
     for src in ast.find_all(exp.Table):
+        catalog = src.args.get("catalog").name if src.args.get("catalog") else None
         schema = src.args.get("db").name if src.args.get("db") else None
         alias = src.alias if hasattr(src, "alias") else None
-        # alias may be empty string when absent — coerce to None for clarity.
         alias = alias or None
-        out.append((schema, src.name, alias))
+        out.append((catalog, schema, src.name, alias))
     return out
 
 
@@ -851,24 +866,28 @@ class SqlSafetyService:
         if not sources:
             errors.append("no FROM source found; SELECT must reference at least one table")
         cte_aliases = _collect_cte_aliases(ast)
-        for schema, table, _alias in sources:
+        for catalog, schema, table, _alias in sources:
             # CTE aliases are virtual tables — they are not in the schema
             # policy whitelist (the policy describes physical schema, not
             # query-local derived tables). Skip the whitelist check.
             if table.lower() in cte_aliases:
                 continue
-            qname = _qualified_name(schema, table)
+            qname = _qualified_name(schema, table, catalog)
             if qname is None:
                 errors.append("FROM source with empty table name")
                 continue
             if allowed_tables_lc and qname not in allowed_tables_lc:
-                # Be helpful: also try the bare table name (in case the
-                # policy was registered without a schema prefix).
+                # Fallback 1: without catalog (dbo.backupset vs msdb.dbo.backupset)
+                without_catalog = _qualified_name(schema, table)
+                if without_catalog is not None and without_catalog in allowed_tables_lc:
+                    continue
+                # Fallback 2: bare table name (backupset vs dbo.backupset)
                 bare = table.lower()
-                if bare not in allowed_tables_lc:
-                    errors.append(
-                        f"table {qname!r} is not in the schema policy whitelist"
-                    )
+                if bare in allowed_tables_lc:
+                    continue
+                errors.append(
+                    f"table {qname!r} is not in the schema policy whitelist"
+                )
 
         # Whitelist: every output column must resolve to allowed_columns.
         # We collect every physical column referenced by any projection,
@@ -944,7 +963,7 @@ class SqlSafetyService:
         *,
         col_name: str,
         qname: str | None,
-        sources: list[tuple[str | None, str, str | None]],
+        sources: list[tuple[str | None, str | None, str, str | None]],
         allowed_tables_lc: set[str],
         allowed_columns_lc: dict[str, set[str]],
         errors: list[str],
@@ -964,17 +983,19 @@ class SqlSafetyService:
         # Qualified column with explicit alias → resolve alias → table.
         if qname is not None:
             # First try: qname is an alias.
-            for schema, table, alias in sources:
+            for catalog, schema, table, alias in sources:
                 if alias and alias.lower() == qname.lower():
-                    return _qualified_name(schema, table)
-            # Second try: qname is already schema.table.
-            for schema, table, _alias in sources:
+                    return _qualified_name(schema, table, catalog)
+            # Second try: qname is already catalog.schema.table or schema.table.
+            for catalog, schema, table, _alias in sources:
+                if _qualified_name(schema, table, catalog) == qname.lower():
+                    return qname.lower()
                 if _qualified_name(schema, table) == qname.lower():
                     return qname.lower()
             # Third try: qname is a bare table name.
-            for schema, table, _alias in sources:
+            for catalog, schema, table, _alias in sources:
                 if table.lower() == qname.lower():
-                    return _qualified_name(schema, table)
+                    return _qualified_name(schema, table, catalog)
             # Could not resolve — treat as error.
             errors.append(
                 f"column {col_name!r} references unknown table/alias {qname!r}"
@@ -983,8 +1004,8 @@ class SqlSafetyService:
 
         # Unqualified column → must uniquely resolve.
         candidate_tables: list[str] = []
-        for schema, table, _alias in sources:
-            qn = _qualified_name(schema, table)
+        for catalog, schema, table, _alias in sources:
+            qn = _qualified_name(schema, table, catalog)
             if qn is None:
                 continue
             if not allowed_columns_lc:
@@ -993,8 +1014,17 @@ class SqlSafetyService:
                 continue
             cols_here = allowed_columns_lc.get(qn, set())
             if not cols_here:
-                # No column whitelist on this table — skip (we already
-                # validated that the table is in allowed_tables_lc).
+                # C16-F2d bug-fix (2026-07-09): when a table is explicitly
+                # in allowed_tables_lc but has NO column whitelist entries
+                # (typical for system views like V$SESSION added via
+                # ai_system_view_policy.allowlist), treat ALL its columns
+                # as allowed. The table-level allowlist is the security
+                # boundary for system views; requiring column_hints for
+                # 90+ views × dozens of columns is impractical.
+                if allowed_tables_lc and qn in allowed_tables_lc:
+                    # Table is in allowlist with no column restrictions →
+                    # implicit all-columns-allowed.
+                    candidate_tables.append(qn)
                 continue
             if col_name in cols_here:
                 candidate_tables.append(qn)
@@ -1004,8 +1034,8 @@ class SqlSafetyService:
         if len(candidate_tables) == 0:
             # If no whitelist applies, fall back to the single-source case.
             if not allowed_columns_lc and len(sources) == 1:
-                schema, table, _alias = sources[0]
-                qn = _qualified_name(schema, table)
+                catalog, schema, table, _alias = sources[0]
+                qn = _qualified_name(schema, table, catalog)
                 if qn is not None:
                     return qn
             errors.append(
@@ -1013,6 +1043,23 @@ class SqlSafetyService:
                 f"not present in any whitelisted column set"
             )
             return None
+
+        # C16-F2d bug-fix (2026-07-09): when ALL candidate tables are
+        # system views with implicit all-columns-allowed (no explicit
+        # column whitelist entries in allowed_columns_lc), allow the
+        # column through. This handles JOINs across multiple system
+        # views where computed aliases (e.g. size_mb) or ORDER BY
+        # references resolve ambiguously. The security model: table-level
+        # trust extends to all columns when no column restrictions exist.
+        implicit_tables: set[str] = set()
+        for ct in candidate_tables:
+            ct_cols = allowed_columns_lc.get(ct, set())
+            if not ct_cols and allowed_tables_lc and ct in allowed_tables_lc:
+                implicit_tables.add(ct)
+        if implicit_tables == set(candidate_tables):
+            # All candidates are table-level-trusted → return the first
+            # (all are equally valid; the DBA trusts all of them).
+            return candidate_tables[0]
 
         errors.append(
             f"unqualified column {col_name!r} is ambiguous across "

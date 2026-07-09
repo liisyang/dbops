@@ -30,7 +30,6 @@ from datetime import datetime, timezone
 from typing import Any, Iterable, Optional
 
 from sqlalchemy import update
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.models.ai import (
@@ -234,6 +233,11 @@ def _write_sql_result_chat_message(
 
     幂等键：UNIQUE(metadata->>'audit_id') WHERE message_type='sql_result'
     （DDL: uq_ai_chat_message_sql_result_audit）。
+
+    2026-07-09 bug-fix：同一 audit 重新执行时，旧 INSERT+catch IntegrityError
+    会触发 db.rollback() 回滚已完成的 audit status UPDATE，导致 audit 永远卡在
+    running。改为 query-first upsert：已有 → UPDATE content/metadata；
+    无 → INSERT。消除 rollback 破坏审计状态更新的根因。
     """
     if audit.session_id is None or audit.message_id is None:
         return
@@ -248,34 +252,53 @@ def _write_sql_result_chat_message(
         "executed_at": _now().isoformat(),
     }
 
-    chat_msg = AiChatMessage(
-        session_id=int(audit.session_id),
-        user_id=audit.user_id,
-        client_request_id=None,
-        role="assistant",
-        message_type="sql_result",
-        status="completed",
-        content=json.dumps(payload, ensure_ascii=False, default=str),
-        parent_message_id=int(audit.message_id),
-        metadata_json={
-            "audit_id": int(audit.id),
-            "execution_status": status,
-            "row_count": int(row_count),
-            "duration_ms": int(duration_ms),
-        },
-        attempt_count=0,
+    new_metadata: dict[str, Any] = {
+        "audit_id": int(audit.id),
+        "execution_status": status,
+        "row_count": int(row_count),
+        "duration_ms": int(duration_ms),
+    }
+
+    # 查已有 sql_result 消息（同一 audit 重新执行时会命中）
+    existing: Optional[AiChatMessage] = (
+        db.query(AiChatMessage)
+        .filter(
+            AiChatMessage.session_id == int(audit.session_id),
+            AiChatMessage.message_type == "sql_result",
+            AiChatMessage.metadata_json["audit_id"].astext == str(int(audit.id)),
+        )
+        .first()
     )
-    db.add(chat_msg)
-    try:
+
+    if existing is not None:
+        # 重新执行：UPDATE 已有消息的 content + metadata（不 INSERT 新行，
+        # 避免 uq_ai_chat_message_sql_result_audit 冲突导致 rollback）
+        existing.content = json.dumps(payload, ensure_ascii=False, default=str)
+        existing.metadata_json = new_metadata
+        existing.updated_at = _now()
+        audit.result_message_id = int(existing.id)
+        logger.info(
+            "ai_sql chat_message sql_result updated for re-execution "
+            "audit_id=%s msg_id=%s",
+            audit.id, existing.id,
+        )
+    else:
+        # 首次执行：INSERT 新消息
+        chat_msg = AiChatMessage(
+            session_id=int(audit.session_id),
+            user_id=audit.user_id,
+            client_request_id=None,
+            role="assistant",
+            message_type="sql_result",
+            status="completed",
+            content=json.dumps(payload, ensure_ascii=False, default=str),
+            parent_message_id=int(audit.message_id),
+            metadata_json=new_metadata,
+            attempt_count=0,
+        )
+        db.add(chat_msg)
         db.flush()
         audit.result_message_id = int(chat_msg.id)
-    except IntegrityError:
-        db.rollback()
-        logger.info(
-            "ai_sql chat_message sql_result already exists for audit_id=%s "
-            "(uq_ai_chat_message_sql_result_audit)",
-            audit.id,
-        )
 
 
 # ---------------------------------------------------------------------------

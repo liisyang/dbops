@@ -30,7 +30,11 @@ from typing import Any, Optional
 
 from app.config import get_settings
 from app.models.ai import AiSchemaSnapshot, AiSchemaSnapshotStatus
+# C16-F2d commit 2: system view policy 合并 (允许列表扩 + schema_context 追加段)
 from app.services.ai.ai_schema_snapshot_service import AiSchemaSnapshotService
+from app.services.ai.ai_system_view_policy_service import (
+    AiSystemViewPolicyService,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -92,11 +96,22 @@ class AiSchemaContextService:
         - 字符截断标记 "…(truncated)" 不进入 hash
         - available=False 时 **不要** 返回 schema_policy_hash（前端无意义）
         """
-        snapshot = AiSchemaSnapshotService.get_snapshot_status(
-            db,
-            instance_id=instance_id,
-            database_name=database_name,
+        # 2026-07-09 bug-fix: database_name=None 时，按 db_type 默认库名
+        # （postgres→postgres, mssql→master）fallback 查找 snapshot，
+        # 兼容旧 snapshot 的 '<default>' 占位符。
+        db_type_code = cls._infer_db_type_code(db, instance_id)
+        resolved_names = cls._resolve_snapshot_database_names(
+            database_name, db_type_code,
         )
+        snapshot = None
+        for candidate_name in resolved_names:
+            snapshot = AiSchemaSnapshotService.get_snapshot_status(
+                db,
+                instance_id=instance_id,
+                database_name=candidate_name,
+            )
+            if snapshot is not None:
+                break
 
         # 无任何 snapshot
         if snapshot is None:
@@ -104,9 +119,8 @@ class AiSchemaContextService:
             latest = AiSchemaSnapshotService.get_latest_any_status(
                 db,
                 instance_id=instance_id,
-                database_name=database_name,
+                database_name=resolved_names[0] if resolved_names else database_name,
             )
-            db_type_code = cls._infer_db_type_code(db, instance_id)
             return cls._build_unavailable(
                 instance_id=instance_id,
                 db_type_code=db_type_code,
@@ -152,10 +166,30 @@ class AiSchemaContextService:
         allowed_columns = cls._normalize_allowed_columns(snapshot.allowed_columns)
         denied_columns = list(snapshot.denied_columns or [])
 
+        # ---- C16-F2d commit 2: system view policy merge ----
+        # policy 启用时把 policy.allowlist 追加到 allowed_tables；denylist
+        # 由 sql_safety_service 单独维护（不在此处合并）。policy query 失败
+        # 不应阻塞 schema_context 主流程（与 callback 同款容错策略）。
+        policy_obj = AiSystemViewPolicyService.get_policy(
+            db, instance_id=instance_id,
+        )
+        policy_active = AiSystemViewPolicyService.is_active(policy_obj)
+        if policy_active:
+            allowed_tables = AiSystemViewPolicyService.merged_allowlist(
+                policy_obj, allowed_tables,
+            )
+            logger.info(
+                "AiSchemaContextService.build_schema_context policy merged "
+                "instance_id=%s policy_version=%s merged_size=%d",
+                instance_id,
+                AiSystemViewPolicyService.policy_version(policy_obj),
+                len(allowed_tables),
+            )
+
         policy_hash = cls._compute_schema_policy_hash(
             snapshot_hash=snapshot.snapshot_hash or "",
             allowed_schemas=allowed_schemas,
-            allowed_tables=allowed_tables,
+            allowed_tables=allowed_tables,  # 包含 policy 合并后的允许列表
             allowed_columns=allowed_columns,
             denied_columns=denied_columns,
             policy_version=cls.POLICY_VERSION,
@@ -164,9 +198,38 @@ class AiSchemaContextService:
         # 受 AI_SCHEMA_MAX_TABLES / AI_SCHEMA_MAX_COLUMNS_PER_TABLE 限制
         allowed_tables_limited = allowed_tables[: settings.AI_SCHEMA_MAX_TABLES]
         allowed_columns_limited: dict[str, list[str]] = {}
+        # C16-F2d bug-fix (2026-07-09): policy-only 系统视图在 snapshot 的
+        # allowed_columns 中没有列元数据。合并 policy.column_hints 提供
+        # 已知列名（DBA 显式录入），merge 到 allowed_columns 后 Dify LLM
+        # 可以安全生成 SQL。
+        column_hints: dict[str, list[str]] = {}
+        if policy_active:
+            column_hints = AiSystemViewPolicyService.get_column_hints(policy_obj)
+        merged_allowed_columns: dict[str, list[str]] = dict(allowed_columns)
+        for table_name, col_list in column_hints.items():
+            if table_name not in merged_allowed_columns:
+                merged_allowed_columns[table_name] = list(col_list)
+            else:
+                existing = merged_allowed_columns[table_name]
+                for c in col_list:
+                    if c not in existing:
+                        existing.append(c)
+
+        snapshot_column_tables = set(allowed_columns.keys())
         for qualified in allowed_tables_limited:
-            cols = allowed_columns.get(qualified, [])
+            cols = merged_allowed_columns.get(qualified, [])
+            # 跳过 policy-only 表（既不在 snapshot 列中也不在 column_hints 中）
+            if not cols and qualified not in snapshot_column_tables:
+                continue
             allowed_columns_limited[qualified] = cols[: settings.AI_SCHEMA_MAX_COLUMNS_PER_TABLE]
+
+        # 收集 policy.allowlist 用于 schema_context 末尾追加 "System Views" 段
+        # （policy inactive / allowlist 空 → 空 list）
+        policy_allowlist_for_text: list[str] = []
+        if policy_active:
+            for entry in getattr(policy_obj, "allowlist", None) or []:
+                if isinstance(entry, str) and entry.strip():
+                    policy_allowlist_for_text.append(entry.strip())
 
         schema_context = cls._render_schema_context(
             db_type_code=snapshot.db_type_code,
@@ -176,6 +239,7 @@ class AiSchemaContextService:
             allowed_columns=allowed_columns_limited,
             denied_columns=denied_columns,
             max_chars=settings.AI_SCHEMA_CONTEXT_MAX_CHARS,
+            system_views=policy_allowlist_for_text,
         )
 
         return {
@@ -206,6 +270,13 @@ class AiSchemaContextService:
                 instance_id=instance_id,
                 database_name=database_name or "<default>",
                 schema_name=allowed_schemas[0] if allowed_schemas else None,
+            ),
+            # Phase 3.6B2 C16-F2d commit 2: 系统视图策略合并元数据。
+            # 供 API 层 / 前端判断是否启用（DBA 显式 enabled 后才会出现）。
+            "system_view_policy_active": bool(policy_active),
+            "system_view_policy_version": (
+                AiSystemViewPolicyService.policy_version(policy_obj)
+                if policy_active else None
             ),
         }
 
@@ -258,6 +329,7 @@ class AiSchemaContextService:
         allowed_columns: dict[str, list[str]],
         denied_columns: list[str],
         max_chars: int,
+        system_views: Optional[list[str]] = None,
     ) -> str:
         """生成给 LLM 看的 schema 摘要文本。
 
@@ -268,6 +340,8 @@ class AiSchemaContextService:
             - schema.table(col1, col2, ...)
             - ...
           Denied columns (sensitive): [password_hash, ...]
+          [C16-F2d commit 2 — 可选]
+          System Views (per-policy, enabled=true): [v$lock, ...]
 
         不超 max_chars 时末尾追加 "…(truncated)" 标记 (但不参与 hash)。
         """
@@ -286,6 +360,12 @@ class AiSchemaContextService:
             lines.append("Allowed tables (0):")
         if denied_columns:
             lines.append(f"Denied columns (sensitive): {sorted(denied_columns)}")
+
+        # C16-F2d commit 2: system views append（仅在 policy 启用且 allowlist 非空时）
+        if system_views:
+            lines.append(
+                f"System Views (per-policy, enabled=true): {sorted(system_views)}"
+            )
 
         text = "\n".join(lines)
         if len(text) <= max_chars:
@@ -418,6 +498,40 @@ class AiSchemaContextService:
         except Exception:
             logger.exception("db_type_code inference failed for instance_id=%s", instance_id)
             return None
+
+    _DEFAULT_DATABASE: dict[str, str] = {
+        "POSTGRESQL": "postgres",
+        "MSSQL": "master",
+        "SQLSERVER": "master",
+        "ORACLE": "",
+        "MYSQL": "mysql",
+    }
+
+    @staticmethod
+    def _resolve_snapshot_database_names(
+        database_name: Optional[str],
+        db_type_code: Optional[str],
+    ) -> list[str]:
+        """返回候选 database_name 列表，按优先级排序。
+
+        2026-07-09 bug-fix: 当 database_name=None 时，前端不传库名 →
+        优先用 db_type 默认库名（postgres/master），再回退到 '<default>'
+        兼容历史 snapshot。
+        """
+        candidates: list[str] = []
+        if database_name:
+            candidates.append(database_name)
+        # 加入 db_type 默认库名（如 master / postgres）
+        if db_type_code:
+            default_db = AiSchemaContextService._DEFAULT_DATABASE.get(
+                db_type_code.upper(), ""
+            )
+            if default_db and default_db not in candidates:
+                candidates.append(default_db)
+        # 向后兼容：历史 snapshot 使用 '<default>' 占位符
+        if "<default>" not in candidates:
+            candidates.append("<default>")
+        return candidates
 
     @staticmethod
     def _utcnow() -> datetime:

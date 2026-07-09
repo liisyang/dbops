@@ -67,7 +67,22 @@ class AwxLaunchError(AiSchemaSnapshotError):
 class AiSchemaSnapshotService:
     """Schema Snapshot 触发 + 状态查询。"""
 
-    DEFAULT_DATABASE_PLACEHOLDER = "<default>"
+    DEFAULT_DATABASE_PLACEHOLDER = "<default>"  # 仅用于查询向后兼容
+
+    _DEFAULT_DATABASE: dict[str, str] = {
+        "POSTGRESQL": "postgres",
+        "MSSQL": "master",
+        "SQLSERVER": "master",
+        "ORACLE": "",
+        "MYSQL": "mysql",
+    }
+
+    @staticmethod
+    def _default_database_for(db_type_code: str) -> str:
+        """根据 db_type_code 返回默认数据库名（2026-07-09 bug-fix）。"""
+        return AiSchemaSnapshotService._DEFAULT_DATABASE.get(
+            db_type_code.upper(), ""
+        )
 
     # ------------------------------------------------------------------
     # 触发采集
@@ -114,10 +129,12 @@ class AiSchemaSnapshotService:
         from app.schemas.collector import CollectorRunCreateRequest
 
         # database_name 透传：request 阶段先尝试以 option 注入，C9 callback
-        # 阶段 fallback 到 extra_attrs.ai_schema_database_name / '<default>'。
+        # 阶段 fallback 到 extra_attrs.ai_schema_database_name。
+        # 2026-07-09 bug-fix: 空值 → 按 db_type_code 解析真实默认库名
+        # （postgres→postgres, mssql→master, oracle→""）
+        default_db = AiSchemaSnapshotService._default_database_for(db_type_code)
         options: dict[str, Any] = {
-            "ai_schema_database_name": (database_name or "").strip()
-            or AiSchemaSnapshotService.DEFAULT_DATABASE_PLACEHOLDER,
+            "ai_schema_database_name": (database_name or "").strip() or default_db,
         }
         payload = CollectorRunCreateRequest(
             run_type="ai_schema",

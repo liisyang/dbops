@@ -72,6 +72,10 @@ from app.services.ai.ai_schema_context_service import (
     AiSchemaContextService,
     ContextUnavailableReason,
 )
+# C16-F2d commit 2: system view policy gate (Layer 3 前置 / allowlist 合并)。
+from app.services.ai.ai_system_view_policy_service import (
+    AiSystemViewPolicyService,
+)
 from app.services.ai_chat_service import ChatInstanceNotAccessibleError
 from app.services.dify_service import (
     DifyConfigurationError,
@@ -226,6 +230,22 @@ class AiSqlPreviewService:
 
     # SQL Preview 时 max_rows 默认值（plan §5 + §10 — Executor 仍由 Collector EE 强制）
     DEFAULT_MAX_ROWS = 200
+
+    # 各 DB 类型的默认数据库名（2026-07-09 bug-fix）
+    _DEFAULT_DATABASE: dict[str, str] = {
+        "POSTGRESQL": "postgres",
+        "MSSQL": "master",
+        "SQLSERVER": "master",
+        "ORACLE": "",
+        "MYSQL": "mysql",
+    }
+
+    @staticmethod
+    def _default_database_for(db_type_code: str) -> str:
+        """根据 db_type_code 返回默认数据库名。"""
+        return AiSqlPreviewService._DEFAULT_DATABASE.get(
+            db_type_code.upper(), ""
+        )
 
     # Layer 1 正则预检开关（plan §5 Layer 1）
     # - True：调 Dify 之前先用 SqlSafetyService.layer1_precheck_question 拦截
@@ -460,7 +480,7 @@ class AiSqlPreviewService:
             "allowed_columns_json": json.dumps(allowed_columns, ensure_ascii=False),
             "denied_columns_json": json.dumps(denied_columns, ensure_ascii=False),
             "instance_id": str(instance_id),
-            "database_name": database_name or "<default>",
+            "database_name": database_name or cls._default_database_for(db_type_code),
             "max_rows": str(cls.DEFAULT_MAX_ROWS),
             "target_ip": target_ip,
             "target_port": str(target_port),
@@ -485,25 +505,65 @@ class AiSqlPreviewService:
             generated_sql = code_payload.get("generated_sql")
             code_node_warnings = list(code_payload.get("warnings") or [])
             code_node_parse_mode = code_payload.get("parse_mode")
+            code_need_execute = code_payload.get("need_execute")
+            code_dify_reason = code_payload.get("dify_reason")
+
+            # C16-5+ bug-fix: check Dify workflow run status before trusting outputs
+            dify_data = dify_response.get("data") if isinstance(dify_response, dict) else None
+            dify_status = (dify_data or {}).get("status") if isinstance(dify_data, dict) else None
+            dify_error = (dify_data or {}).get("error") if isinstance(dify_data, dict) else None
 
             logger.info(
                 "ai_sql preview Dify response parsed instance_id=%s run_id=%s "
-                "parse_mode=%s warnings=%d table_refs=%d",
+                "parse_mode=%s need_execute=%s dify_status=%s warnings=%d table_refs=%d",
                 instance_id, dify_run_id, code_node_parse_mode,
+                code_need_execute, dify_status,
                 len(code_node_warnings),
                 len(code_payload.get("table_refs") or []),
             )
 
             if not generated_sql:
-                dify_workflow_failed_reason = (
-                    "Dify workflow returned no generated_sql in response; "
-                    f"parse_mode={code_node_parse_mode} "
-                    f"keys={list(dify_response.keys())[:5]}"
-                )
+                # C16-5+ bug-fix: need_execute=false 是 Dify 合法的"无法生成 SQL"
+                # 响应，不应报告为 parse failure。优先使用 Dify 给出的 reason。
+                if code_need_execute is False:
+                    dify_workflow_failed_reason = (
+                        code_dify_reason
+                        or "Dify LLM 判断此问题无法在当前表权限范围内安全生成 SQL"
+                    )
+                    logger.info(
+                        "ai_sql preview Dify need_execute=false instance_id=%s "
+                        "run_id=%s reason=%s",
+                        instance_id, dify_run_id, code_dify_reason,
+                    )
+                elif dify_status == "failed":
+                    dify_workflow_failed_reason = (
+                        f"Dify workflow execution failed: {dify_error or 'unknown error'}"
+                    )
+                    logger.error(
+                        "ai_sql preview Dify workflow failed: instance_id=%s "
+                        "run_id=%s status=%s error=%s",
+                        instance_id, dify_run_id, dify_status, dify_error,
+                    )
+                elif dify_status == "stopped":
+                    dify_workflow_failed_reason = (
+                        "Dify workflow was stopped before completion"
+                    )
+                    logger.warning(
+                        "ai_sql preview Dify workflow stopped: instance_id=%s run_id=%s",
+                        instance_id, dify_run_id,
+                    )
+                else:
+                    dify_workflow_failed_reason = (
+                        "Dify workflow returned no generated_sql in response; "
+                        f"parse_mode={code_node_parse_mode} "
+                        f"keys={list(dify_response.keys())[:5]}"
+                    )
                 logger.warning(
                     "ai_sql preview Dify response missing generated_sql: "
-                    "instance_id=%s run_id=%s keys=%s",
-                    instance_id, dify_run_id, list(dify_response.keys())[:5],
+                    "instance_id=%s run_id=%s parse_mode=%s need_execute=%s "
+                    "dify_status=%s",
+                    instance_id, dify_run_id, code_node_parse_mode,
+                    code_need_execute, dify_status,
                 )
         except DifyTimeoutError as exc:
             # 504 — 单独映射到 HTTP 504
@@ -565,12 +625,102 @@ class AiSqlPreviewService:
         generated_sql_stripped = generated_sql.strip()
         generated_sql_hash = SqlSafetyService.compute_sql_hash(generated_sql_stripped)
 
+        # 6a.5 C16-F2d commit 2 — system view policy gate (denylist + allowlist 合并)
+        # (a) policy.activated + denylist hit → 立即构造 rejected audit，**不**进入
+        #     validate_with_ast（C12 Layer 3 防御性兜底；防御 denylist 表经前端
+        #     误操作进入 allowlist 的极端情况）。
+        # (b) merged allowlist = snapshot.allowed_tables ∪ policy.allowlist，
+        #     替代 base 传给 validate_with_ast 让 sqlglot 把 policy 表视为白名单。
+        policy_obj = AiSystemViewPolicyService.get_policy(
+            db, instance_id=instance_id,
+        )
+        if AiSystemViewPolicyService.is_active(policy_obj):
+            qnames = cls._extract_table_qnames(generated_sql_stripped, db_type_code)
+            denied_hits = AiSystemViewPolicyService.filter_denied_tables(
+                policy_obj, qnames,
+            )
+            if denied_hits:
+                logger.info(
+                    "ai_sql preview policy denylist rejected instance_id=%s qnames=%s",
+                    instance_id, sorted(denied_hits),
+                )
+                merged_warnings = list(code_node_warnings or [])
+                reason = (
+                    f"policy denylist hit: {', '.join(sorted(denied_hits))}; "
+                    "this system view is explicitly blocked by ai_system_view_policy"
+                )[:4000]
+                audit = cls._build_rejected_audit(
+                    instance_id=instance_id,
+                    db_type_code=db_type_code,
+                    user_question=user_question,
+                    session_id=session_id,
+                    message_id=None,
+                    user_id=getattr(requested_by, "id", None),
+                    schema_snapshot_id=schema_snapshot_id,
+                    schema_policy_hash=schema_policy_hash,
+                    dify_workflow_run_id=dify_run_id,
+                    generated_sql=generated_sql_stripped,
+                    generated_sql_hash=generated_sql_hash,
+                    reason=reason,
+                    errors=[f"denylist_hit:{q}" for q in sorted(denied_hits)],
+                    warnings=merged_warnings,
+                    sql_workflow_version=settings.DIFY_SQL_WORKFLOW_VERSION,
+                    safety_policy_version=cls.SAFETY_POLICY_VERSION,
+                    previewed_at=now,
+                )
+                return cls._finalize_preview_with_chat_messages(
+                    db,
+                    audit=audit,
+                    session_id=session_id,
+                    user_question=user_question,
+                    client_request_id=client_request_id,
+                    user_id=getattr(requested_by, "id", None),
+                    current_page=current_page,
+                )
+
+        effective_allowed_tables = AiSystemViewPolicyService.merged_allowlist(
+            policy_obj, allowed_tables,
+        )
+        if len(effective_allowed_tables) != len(allowed_tables):
+            logger.info(
+                "ai_sql preview policy allowlist merged instance_id=%s base=%d merged=%d",
+                instance_id, len(allowed_tables), len(effective_allowed_tables),
+            )
+
+        # C16-F2d bug-fix (2026-07-09): merge policy.column_hints into
+        # allowed_columns so AST validator can resolve system view columns
+        # (e.g. Oracle V$LOCK.sid / V$LOCK.type / V$LOCK.id1). The
+        # allowed_tables merge (above) adds system view tables, but without
+        # column hints the AST column-resolution step rejects every
+        # unqualified system-view column as "not present in any whitelisted
+        # column set". ai_schema_context_service already does this merge for
+        # the Dify context text; the preview service's AST path was missed.
+        effective_allowed_columns: dict[str, list[str]] = dict(allowed_columns)
+        column_hints_for_ast = AiSystemViewPolicyService.get_column_hints(policy_obj)
+        if column_hints_for_ast:
+            for table_name, col_list in column_hints_for_ast.items():
+                if table_name not in effective_allowed_columns:
+                    effective_allowed_columns[table_name] = list(col_list)
+                else:
+                    existing = effective_allowed_columns[table_name]
+                    for c in col_list:
+                        if c not in existing:
+                            existing.append(c)
+            logger.info(
+                "ai_sql preview policy column_hints merged instance_id=%s "
+                "tables=%d base_cols=%d merged_cols=%d",
+                instance_id,
+                len(column_hints_for_ast),
+                sum(len(v) for v in allowed_columns.values()),
+                sum(len(v) for v in effective_allowed_columns.values()),
+            )
+
         # 6b. AST 校验
         ast_result = SqlSafetyService.validate_with_ast(
             sql_text=generated_sql_stripped,
             db_type_code=db_type_code,
-            allowed_tables=allowed_tables,
-            allowed_columns=allowed_columns,
+            allowed_tables=effective_allowed_tables,
+            allowed_columns=effective_allowed_columns,
             denied_columns=denied_columns,
             max_rows=cls.DEFAULT_MAX_ROWS,
         )
@@ -663,6 +813,13 @@ class AiSqlPreviewService:
     # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
+    # db_type.type_code → ai_sql_audit CHECK 约束合法值的规范化映射
+    # db_type 表对 SQL Server 使用 'SQLSERVER'，但 DDL CHECK 约束和
+    # Dify Workflow 期望 'MSSQL'（与 capabilities.sql_supported_db_types 一致）
+    _DB_TYPE_NORMALIZE: dict[str, str] = {
+        "SQLSERVER": "MSSQL",
+    }
+
     @staticmethod
     def _resolve_instance(db: Session, instance_id: int) -> tuple[DbInstance, str]:
         """返回 (instance, db_type_code)；instance 不存在 → LookupError。"""
@@ -676,7 +833,8 @@ class AiSqlPreviewService:
             if db_type_id is not None:
                 db_type = db.query(DbType).filter(DbType.id == db_type_id).first()
                 if db_type is not None and getattr(db_type, "type_code", None):
-                    db_type_code = str(db_type.type_code).upper()
+                    raw_code = str(db_type.type_code).upper()
+                    db_type_code = AiSqlPreviewService._DB_TYPE_NORMALIZE.get(raw_code, raw_code)
         except Exception:
             logger.exception("db_type_code lookup failed for instance_id=%s", instance_id)
             db_type_code = "POSTGRESQL"
@@ -857,6 +1015,10 @@ class AiSqlPreviewService:
               - parse_mode (str)         — "structured" | "fallback_plain_text" |
                                             "missing"
               - raw_outputs (Any)        — 原始 outputs（debug 用；不写库）
+              - need_execute (bool|None) — C16-5+ bug-fix: Dify Code 节点判断
+                                           SQL 是否需要执行
+              - dify_reason (str|None)   — C16-5+ bug-fix: need_execute=false 时
+                                           Dify 给出的人类可读拒绝原因
 
         设计：
         - ``outputs`` 是 dict → 直接取字段
@@ -873,6 +1035,12 @@ class AiSqlPreviewService:
             "explanation": None,
             "parse_mode": "missing",
             "raw_outputs": None,
+            # C16-5+ bug-fix: Dify Code 节点输出的 need_execute / reason
+            # 原实现只提取 sql_text → 当 Dify 判断 need_execute=false 时返回
+            # sql_text=""，后端丢失了 need_execute/reason，构造泛泛错误。
+            # 现在提取这两个字段，preview() 可据此给用户有意义的拒绝原因。
+            "need_execute": None,
+            "dify_reason": None,
         }
 
         if not isinstance(dify_response, dict):
@@ -945,9 +1113,30 @@ class AiSqlPreviewService:
             if isinstance(expl_val, str) and expl_val.strip():
                 result["explanation"] = expl_val.strip()
 
+            # C16-5+ bug-fix: extract need_execute from Dify Code node outputs
+            # Dify Code 节点显式声明 need_execute=false 时，即使 sql_text 为空
+            # 也是合法的"无法生成 SQL"响应，不应被当作 parse failure。
+            ne_val = outputs_raw.get("need_execute")
+            if isinstance(ne_val, bool):
+                result["need_execute"] = ne_val
+            elif isinstance(ne_val, str):
+                result["need_execute"] = ne_val.strip().lower() in ("true", "1", "yes")
+
+            # C16-5+ bug-fix: extract reason from Dify Code node outputs
+            # need_execute=false 时 Dify 会给出人类可读的拒绝原因，
+            # 前端可直接展示给用户（替代后端构造的泛泛 "no generated_sql"）
+            reason_val = outputs_raw.get("reason")
+            if isinstance(reason_val, str) and reason_val.strip():
+                result["dify_reason"] = reason_val.strip()
+
             if result["generated_sql"]:
                 result["parse_mode"] = "structured"
                 return result
+
+            # need_execute=false 且 sql_text 为空 → 视为 structured rejection
+            # (不是 parse failure — Dify LLM 正确判断了无法安全生成 SQL)
+            if result["need_execute"] is False:
+                result["parse_mode"] = "structured"
 
         # 3. 降级到旧 plain text 提取
         fallback_sql = AiSqlPreviewService._extract_generated_sql(dify_response)
@@ -1084,10 +1273,12 @@ class AiSqlPreviewService:
              parent_message_id=user_msg.id，content 写拒绝原因或 audit_id JSON）
           4. flush 取 preview_message.id
           5. 更新 audit.message_id / audit.result_message_id
-          6. db.add(audit) + 提交（user_msg / preview_msg 已 add 但未 commit）
-          7. 更新 session.last_message_at + message_count += 2
-          8. db.commit + db.refresh(audit)
-          9. 返回 PreviewResult
+          6. **db.add(audit) + db.flush()** ← C16-5+ bug-fix: 必须在写回 preview
+             message content 之前 flush，否则 audit.id=None → 前端显示 audit #-1
+          7. 写回 preview_payload.audit_id + metadata.audit_id（现在 audit.id 有效）
+          8. 更新 session.last_message_at + message_count += 2
+          9. db.commit + db.refresh(audit)
+          10. 返回 PreviewResult
 
         Notes:
         - audit 此时可能尚未 add（调用方负责构造，未必 commit）。
@@ -1157,9 +1348,14 @@ class AiSqlPreviewService:
         db.flush()
         preview_msg_id = int(preview_msg.id)
 
-        # 3. 关联 audit + 更新 session
+        # 3. 关联 audit（先 add+flush 获取 audit.id，再写回 preview message content）
+        # C16-5+ bug-fix: db.add(audit) 必须在写回 preview_msg.content 之前，
+        # 否则 audit.id=None → 前端收到 audit_id:null → 显示 "audit #-1"
         audit.message_id = user_msg_id
         audit.result_message_id = preview_msg_id
+
+        db.add(audit)
+        db.flush()  # ← 必须先 flush 让 DB 分配 audit.id
 
         # 写回 preview_payload.audit_id（重新序列化 content）
         try:
@@ -1180,7 +1376,6 @@ class AiSqlPreviewService:
             session_obj.last_message_at = cls._utcnow()
             session_obj.message_count = (session_obj.message_count or 0) + 2
 
-        db.add(audit)
         db.commit()
         db.refresh(audit)
 
@@ -1208,6 +1403,82 @@ class AiSqlPreviewService:
             "MYSQL": "mysql",
         }
         return mapping.get(db_type_code.upper())
+
+    # ------------------------------------------------------------------
+    # C16-F2d commit 2 — table reference extraction for policy gate
+    # ------------------------------------------------------------------
+    # 复用 sqlglot 仅做 AST 表来源提取（不执行 AST 白名单校验），
+    # 给 AiSystemViewPolicyService.filter_denied_tables 提供输入。
+    # 与 SqlSafetyService.validate_with_ast 内部 _collect_from_sources 风格对齐，
+    # 但本 helper 为 public 给 preview 自定义扩展用（提交 denylist 检查必须在
+    # AST 校验之前执行，因此单独 parse 一次）。
+    @staticmethod
+    def _extract_table_qnames(sql_text: str, db_type_code: str) -> list[str]:
+        """提取 SQL 中所有 FROM / JOIN / CTE 来源的 qualified names（lowercased）。
+
+        Returns:
+            list[str]: 例如 ``["public.users", "pg_catalog.pg_stat_activity"]``；
+            CTE alias 会被过滤（虚拟表，不在 policy 灰度控制范围内）。
+
+        容错：sqlglot 不可用 / parse 失败 → 返回空 list（policy gate 跳过，
+        保持 AST 主流程正常）。
+        """
+        out: list[str] = []
+        if not sql_text or not sql_text.strip():
+            return out
+        try:
+            import sqlglot  # local import；与 SqlSafetyService 同款 lazy import
+            from sqlglot import expressions as exp
+            from sqlglot.errors import ParseError
+        except ImportError:
+            return out
+
+        dialect = SqlSafetyService.resolve_dialect(db_type_code)
+        if not dialect:
+            return out
+        try:
+            statements = sqlglot.parse(sql_text, read=dialect)
+        except (ParseError, Exception):  # noqa: BLE001 - sqlglot 多种异常类型
+            return out
+
+        for stmt in statements:
+            if stmt is None:
+                continue
+            # CTE aliases
+            cte_aliases: set[str] = set()
+            with_node = stmt.args.get("with") if hasattr(stmt, "args") else None
+            if with_node is not None:
+                for cte in with_node.expressions:
+                    alias = cte.alias
+                    if alias:
+                        cte_aliases.add(alias.lower())
+            try:
+                tbl_nodes = list(stmt.find_all(exp.Table))
+            except Exception:
+                continue
+            for tbl in tbl_nodes:
+                try:
+                    table_name = tbl.name
+                except Exception:
+                    continue
+                if not table_name:
+                    continue
+                if table_name.lower() in cte_aliases:
+                    continue
+                db_arg = tbl.args.get("db") if hasattr(tbl, "args") else None
+                schema = db_arg.name if db_arg else None
+                catalog_arg = tbl.args.get("catalog") if hasattr(tbl, "args") else None
+                catalog = catalog_arg.name if catalog_arg else None
+                parts: list[str] = []
+                if catalog:
+                    parts.append(catalog.lower())
+                if schema:
+                    parts.append(schema.lower())
+                if parts:
+                    out.append(".".join(parts + [table_name.lower()]))
+                else:
+                    out.append(table_name.lower())
+        return out
 
 
 def compute_sql_hash(sql_text: str) -> str:

@@ -237,6 +237,7 @@ import type {
 } from '@/types/ai'
 import type { InstanceDetail } from '@/types/api'
 import { safeUuid } from '@/utils/uuid'
+import { describePreviewError } from '@/utils/previewError'
 import {
   ChatMessageBubble,
   ChatInputBox,
@@ -575,45 +576,8 @@ function exitBoundMode() {
   router.replace({ name: 'AiChat', query: {} })
 }
 
-/** sqlPreview 错误映射（plan §11 + F2b 5 类新异常 + C16-F2c1 解析 detail.code）。 */
-function describePreviewError(err: unknown): string {
-  const ax = err as AxiosLikeError | null
-  const status = ax?.response?.status
-  const detail = ax?.response?.data?.detail
-  const detailStr =
-    typeof detail === 'string'
-      ? detail
-      : Array.isArray(detail) && detail.length
-        ? detail.map((d: { msg?: string; message?: string }) => d?.msg || d?.message || '').join('；')
-        : null
-  // C16-F2c1 NEW: 后端 detail 可能是对象 {code, message, ...}，提取更具体的提示
-  const detailObj = (detail && typeof detail === 'object' && !Array.isArray(detail)
-    ? (detail as { code?: string; message?: string; reason?: string; user_message_id?: number })
-    : null)
-  const codeMsg = detailObj?.message || null
-  const code = detailObj?.code || null
-  if (status === 403) return `会话无权访问（403）：${codeMsg || detailStr || 'session 不属于当前用户'}`
-  if (status === 404) return `会话或实例不存在（404）：${codeMsg || detailStr || '检查 session_id / instance_id'}`
-  if (status === 409) {
-    if (code === 'preview_incomplete_retry_required') {
-      // 旧请求事务中断 (user_message 落库但 audit 缺失)；前端 onSend
-      // 每次用新 UUID，新请求会走完整流程。所以这里直接告诉用户「重发即可」
-      const umid = detailObj?.user_message_id
-      return umid
-        ? `上次请求未完成（user_message #${umid} 已被记录但 audit 未落库）。请直接按 Enter 重发，前端会用新 client_request_id 走完整流程。`
-        : '上次请求未完成（事务中断）。请直接按 Enter 重发。'
-    }
-    if (code === 'snapshot_unavailable') {
-      return `Schema 快照不可用（409 ${detailObj?.reason || 'unknown'}）：请先在实例详情页触发 Schema 采集。`
-    }
-    return `请求冲突（409）：${codeMsg || detailStr || '稍后重试'}`
-  }
-  if (status === 422) return `参数校验失败（422）：${codeMsg || detailStr || '检查 mode / bound_instance_id / instance_id 一致性'}`
-  if (status === 502) return `Dify 服务不可达（502）：${codeMsg || detailStr || '稍后重试'}`
-  if (status === 503) return `AI SQL Preview 未启用（AI_SQL_PREVIEW_ENABLED=false）`
-  if (status === 504) return `Dify 调用超时（504）：${codeMsg || detailStr || '稍后重试或换更短的问题'}`
-  return extractDetail(err, 'SQL Preview 失败')
-}
+/** sqlPreview 错误映射（plan §11 + F2b 5 类新异常 + C16-F2c1 reason-aware）
+ *  实现移至 @/utils/previewError 便于单测；本组件直接 import 使用。 */
 
 /** P4 真实发送（C16-F2c 改：instance_sql 分流到 sqlPreview） */
 async function onSend(value: string) {

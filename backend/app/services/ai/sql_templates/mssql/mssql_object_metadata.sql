@@ -34,8 +34,8 @@ SELECT
     'table'                                                   AS object_type,
     SCHEMA_NAME(t.schema_id)                                  AS schema_name,
     t.name                                                    AS object_name,
-    'CREATE TABLE [' || SCHEMA_NAME(t.schema_id) || '].[' ||
-    t.name || '] (' ||
+    'CREATE TABLE [' + SCHEMA_NAME(t.schema_id) + '].[' +
+    t.name + '] (' +
     STRING_AGG(
         '[' + c.name + '] ' +
         CASE
@@ -91,14 +91,15 @@ WHERE SCHEMA_NAME(v.schema_id) NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
 UNION ALL
 
 -- 3. index DDL (reconstructed from sys.indexes + sys.index_columns)
+--    Note: sys.indexes has no schema_id column — join sys.objects to resolve schema
 SELECT
     'index'                                                   AS object_type,
-    SCHEMA_NAME(i.schema_id)                                  AS schema_name,
+    SCHEMA_NAME(obj.schema_id)                                AS schema_name,
     i.name                                                    AS object_name,
     'CREATE ' +
     CASE WHEN i.is_unique = 1 THEN 'UNIQUE ' ELSE '' END +
-    'INDEX [' + SCHEMA_NAME(i.schema_id) + '].[' + i.name + '] ON [' +
-    SCHEMA_NAME(i.schema_id) + '].[' + OBJECT_NAME(i.object_id) + '] (' +
+    'INDEX [' + SCHEMA_NAME(obj.schema_id) + '].[' + i.name + '] ON [' +
+    SCHEMA_NAME(obj.schema_id) + '].[' + OBJECT_NAME(i.object_id) + '] (' +
     STRING_AGG(
         '[' + c.name + ']' +
         CASE WHEN ic.is_descending_key = 1 THEN ' DESC' ELSE ' ASC' END,
@@ -109,16 +110,17 @@ SELECT
                                                               AS ddl_text,
     ''                                                        AS comment
 FROM sys.indexes i
+JOIN sys.objects obj ON obj.object_id = i.object_id
 JOIN sys.index_columns ic
     ON ic.object_id = i.object_id
    AND ic.index_id = i.index_id
 JOIN sys.columns c
     ON c.object_id = ic.object_id
    AND c.column_id = ic.column_id
-WHERE SCHEMA_NAME(i.schema_id) NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
+WHERE SCHEMA_NAME(obj.schema_id) NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
   AND i.is_hypothetical = 0
   AND i.type > 0  -- exclude heap (type=0)
-GROUP BY i.object_id, i.schema_id, i.name, i.is_unique, i.has_filter, i.filter_definition
+GROUP BY i.object_id, obj.schema_id, i.name, i.is_unique, i.has_filter, i.filter_definition
 
 UNION ALL
 

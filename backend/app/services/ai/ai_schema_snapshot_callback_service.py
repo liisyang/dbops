@@ -32,6 +32,13 @@ from app.config import get_settings
 from app.models.ai import AiSchemaSnapshot, AiSchemaSnapshotStatus
 from app.models.dbops_assets import DbInstance, DbType
 
+# C16-F2d commit 2: system view policy force-include。
+# 顶层 import 安全（policy service 只依赖 app.models.ai.AiSystemViewPolicy，
+# 与本模块无循环依赖）。
+from app.services.ai.ai_system_view_policy_service import (
+    AiSystemViewPolicyService,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -97,6 +104,7 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
     item_status = (getattr(cb, "status", "") or "").lower()
     message = (getattr(cb, "message", "") or "")[:4000]
     error_code = (raw.get("error_code") if isinstance(raw.get("error_code"), str) else "") or ""
+    error_code = error_code[:100]  # VARCHAR(100) — truncate to avoid StringDataRightTruncation
     truncated = bool(raw.get("truncated"))
     total_rows = _to_int(raw.get("total_rows"))
     returned_rows = _to_int(raw.get("returned_rows"))
@@ -144,6 +152,37 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
     # 需要用 columns 名映射为 dict 再传给 _aggregate_whitelist。
     dict_rows = _rows_to_dicts(rows, columns)
     allowed_schemas, allowed_tables, allowed_columns = _aggregate_whitelist(dict_rows)
+
+    # ---- C16-F2d commit 2: system view policy force-include ----
+    # 若该 instance 启用了 AiSystemViewPolicy，则把 policy.allowlist 追加到
+    # snapshot.allowed_tables，让 sqlglot AST 校验层把这些系统视图视为白名单内表。
+    # 容错：policy 查询/合并失败不应阻塞 snapshot 主流程（C9 callback 已有的 P1 容错策略）。
+    try:
+        policy = AiSystemViewPolicyService.get_policy(db, instance_id=asset_id)
+        if AiSystemViewPolicyService.is_active(policy):
+            merged = AiSystemViewPolicyService.merged_allowlist(
+                policy, allowed_tables,
+            )
+            added = len(merged) - len(allowed_tables)
+            if added > 0:
+                logger.info(
+                    "ai_schema callback policy force-include: run_id=%s item_key=%s "
+                    "instance_id=%s policy_version=%s base_size=%d merged_size=%d added=%d",
+                    getattr(run, "run_id", "?"),
+                    getattr(cb, "item_key", "?"),
+                    asset_id,
+                    AiSystemViewPolicyService.policy_version(policy),
+                    len(allowed_tables),
+                    len(merged),
+                    added,
+                )
+            allowed_tables = merged
+    except Exception:
+        logger.exception(
+            "ai_schema callback policy merge failed: run_id=%s instance_id=%s (non-fatal)",
+            getattr(run, "run_id", "?"),
+            asset_id,
+        )
 
     # ---- 解析 schema_name ----
     schema_name: Optional[str] = None

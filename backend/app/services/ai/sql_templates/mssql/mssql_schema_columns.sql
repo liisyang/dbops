@@ -26,13 +26,18 @@
 -- Plan 参考: .claude/plans/phase-3-6-ai-copilot-full-plan.md §4B（C16-F0）
 -- ============================================================================
 
+-- NOTE: CAST(… AS VARCHAR(256)) is intentional — avoids ODBC Driver 18
+-- "HY000 Unicode conversion failed (22) (SQLGetData)" when reading
+-- sysname (nvarchar(128)) columns from sys.columns / sys.objects / sys.types.
+-- The cast forces SQL Server to return 8-bit VARCHAR which pyodbc reads
+-- without triggering driver-level Unicode conversion.
 SELECT
-    SCHEMA_NAME(o.schema_id)                               AS table_schema,
-    o.name                                                  AS table_name,
-    c.name                                                  AS column_name,
-    ty.name                                                 AS data_type,
-    CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END   AS is_nullable,
-    c.column_id                                             AS ordinal_position
+    CAST(SCHEMA_NAME(o.schema_id) AS VARCHAR(256))              AS table_schema,
+    CAST(o.name AS VARCHAR(256))                                AS table_name,
+    CAST(c.name AS VARCHAR(256))                                AS column_name,
+    CAST(ty.name AS VARCHAR(256))                               AS data_type,
+    CASE WHEN c.is_nullable = 1 THEN 'YES' ELSE 'NO' END       AS is_nullable,
+    c.column_id                                                 AS ordinal_position
 FROM sys.columns c
 JOIN sys.objects o ON c.object_id = o.object_id
 JOIN sys.types ty ON c.user_type_id = ty.user_type_id

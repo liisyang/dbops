@@ -103,7 +103,7 @@ def test_table_columns(engine):
     enabled/updated_by/updated_at/created_at."""
     expected = {
         "id": ("bigint", "NO"),
-        "instance_id": ("bigint", "NO"),
+        "instance_id": ("bigint", "YES"),  # C16-F2d v2: nullable (NULL = db_type 默认)
         "db_type_code": ("character varying", "NO"),
         "policy_version": ("character varying", "NO"),
         "allowlist": ("jsonb", "NO"),
@@ -281,9 +281,16 @@ def test_orm_model_columns_present():
 
 
 def test_orm_model_unique_constraint_instance_id():
+    """C16-F2d v2: instance_id no longer has column-level unique=True;
+    uniqueness is enforced by partial unique index
+    (uq_ai_system_view_policy_instance WHERE instance_id IS NOT NULL)."""
     instance_id_col = AiSystemViewPolicy.__table__.columns["instance_id"]
-    assert instance_id_col.unique is True, (
-        "instance_id ORM 列缺 unique=True（与 DDL UNIQUE 约束对齐）"
+    assert instance_id_col.unique is not True, (
+        "C16-F2d v2: instance_id unique 改为 partial unique index，"
+        "column-level unique 不再设置"
+    )
+    assert instance_id_col.nullable is True, (
+        "C16-F2d v2: instance_id 改为 nullable（NULL = db_type 默认行）"
     )
 
 

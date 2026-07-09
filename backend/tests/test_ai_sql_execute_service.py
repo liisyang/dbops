@@ -350,6 +350,14 @@ def _patch_settings(monkeypatch, *, exec_enabled: bool = True):
         COLLECTOR_CALLBACK_URL="http://localhost:60801/api/v1/collector/callback/",
     )
     monkeypatch.setattr(svc_mod, "get_settings", lambda: fake)
+    # C16-5+ bug-fix: _compute_schema_policy_hash 会在 execute 时重新计算
+    # policy hash 并与 audit.schema_policy_hash 比较；测试中用 "a" * 64
+    # 作为 fake hash，需要同步 monkeypatch hash 计算函数以避免 mismatch
+    monkeypatch.setattr(
+        svc_mod.AiSchemaContextService,
+        "_compute_schema_policy_hash",
+        staticmethod(lambda **kwargs: "a" * 64),
+    )
 
 
 def _patch_awx_launch(monkeypatch, *, awx_job_id: int = 555, raise_exc: Optional[Exception] = None):
@@ -571,6 +579,13 @@ class TestSnapshotPolicyMismatch:
 
     def test_snapshot_hash_mismatch_raises_409(self, monkeypatch):
         _patch_settings(monkeypatch)
+        # Override _compute_schema_policy_hash to return a hash that mismatches
+        # audit.schema_policy_hash ("a" * 64) → trigger policy_hash_mismatch
+        monkeypatch.setattr(
+            svc_mod.AiSchemaContextService,
+            "_compute_schema_policy_hash",
+            staticmethod(lambda **kwargs: "b" * 64),
+        )
         _patch_awx_launch(monkeypatch)
         _patch_credential_resolver(monkeypatch)
         _patch_safety(monkeypatch)

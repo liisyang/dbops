@@ -103,11 +103,15 @@ def _save_one(db: Session, *, run: Any, cb: Any) -> None:
     item_status = (getattr(cb, "status", "") or "").lower()
     message = (getattr(cb, "message", "") or "")[:4000]
     error_code = (raw.get("error_code") if isinstance(raw.get("error_code"), str) else "") or ""
+    error_code = error_code[:100]  # VARCHAR(100) — truncate to avoid StringDataRightTruncation
     truncated = bool(raw.get("truncated"))
     total_rows = _to_int(raw.get("total_rows"))
     returned_rows = _to_int(raw.get("returned_rows"))
     rows = raw.get("rows") if isinstance(raw.get("rows"), list) else []
     columns = raw.get("columns") if isinstance(raw.get("columns"), list) else []
+    # Normalize rows from list[list] (collector_client DbReadonlySqlOutput schema)
+    # to list[dict] expected by _aggregate_ddl / _compute_snapshot_hash
+    rows = _normalize_rows(rows, columns)
     sql_hash = (raw.get("sql_hash") if isinstance(raw.get("sql_hash"), str) else "") or ""
     source = (raw.get("source") if isinstance(raw.get("source"), str) else "") or ""
     phase = (raw.get("phase") if isinstance(raw.get("phase"), str) else "") or ""
@@ -308,6 +312,29 @@ _CONSTRAINT_SUBTYPES: frozenset[str] = frozenset(
 )
 
 
+def _normalize_rows(rows: list[Any], columns: list[str]) -> list[dict[str, Any]]:
+    """Convert list[list] rows (collector_client DbReadonlySqlOutput format)
+    to list[dict] expected by _aggregate_ddl and _compute_snapshot_hash.
+
+    If rows are already list[dict], return as-is.
+    """
+    if not rows:
+        return []
+    # Already dict-format — pass through
+    if isinstance(rows[0], dict):
+        return [r for r in rows if isinstance(r, dict)]
+    # list-format — zip with column headers
+    if not columns:
+        return []
+    result: list[dict[str, Any]] = []
+    for row in rows:
+        if isinstance(row, (list, tuple)):
+            result.append(dict(zip(columns, row)))
+        elif isinstance(row, dict):
+            result.append(row)
+    return result
+
+
 def _aggregate_ddl(rows: list[Any], *, max_bytes: int) -> tuple[str, dict[str, int]]:
     """按 object_type 分段拼接 DDL，返回 (ddl_text, counts_by_type).
 
@@ -416,7 +443,12 @@ def _resolve_db_type_code(db: Session, instance_id: int) -> str:
         code = getattr(db_type, "type_code", None)
         if not code:
             return "POSTGRESQL"
-        return str(code).upper()
+        code_upper = str(code).upper()
+        # Normalize dialect variants to CHECK-compatible codes
+        # (db_type table uses 'SQLSERVER' but DDL CHECK expects 'MSSQL')
+        if code_upper in ("SQLSERVER", "SQL SERVER"):
+            return "MSSQL"
+        return code_upper
     except Exception:
         logger.exception("db_type_code lookup failed for instance_id=%s", instance_id)
         return "POSTGRESQL"

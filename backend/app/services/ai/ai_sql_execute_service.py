@@ -72,6 +72,11 @@ from app.models.dbops_assets import (
 from app.services.awx_service import AwxService, AwxServiceError
 from app.services.credential_resolver_service import CredentialResolverService
 from app.services.ai.ai_schema_context_service import AiSchemaContextService
+# C16-F2d bug-fix (2026-07-09): execute must merge policy allowlist
+# for schema_policy_hash recomputation to match preview.
+from app.services.ai.ai_system_view_policy_service import (
+    AiSystemViewPolicyService,
+)
 from app.services.sql_safety_service import SqlSafetyService
 
 logger = logging.getLogger(__name__)
@@ -168,6 +173,36 @@ class AiSqlExecuteService:
 
     # SQL Execute max_rows（plan §10）
     DEFAULT_MAX_ROWS = 200
+
+    # 各 DB 类型的默认数据库名（2026-07-09 bug-fix）
+    # 当 instance.database_name 和 snapshot.database_name 都为空时使用
+    _DEFAULT_DATABASE: dict[str, str] = {
+        "POSTGRESQL": "postgres",
+        "MSSQL": "master",
+        "SQLSERVER": "master",
+        "ORACLE": "",
+        "MYSQL": "mysql",
+    }
+
+    @staticmethod
+    def _default_database_for(db_type_code: str) -> str:
+        """根据 db_type_code 返回默认数据库名。"""
+        return AiSqlExecuteService._DEFAULT_DATABASE.get(
+            db_type_code.upper(), ""
+        )
+
+    @staticmethod
+    def _resolve_database_name(
+        snap: Any, db_type_code: str
+    ) -> str:
+        """从 snapshot.database_name 解析真实数据库名。
+
+        过滤 "<default>" 等占位符；回退到 db_type 默认值。
+        """
+        raw = (snap.database_name if snap else None) or ""
+        if raw and raw != "<default>":
+            return raw
+        return AiSqlExecuteService._default_database_for(db_type_code)
 
     # ------------------------------------------------------------------
     # execute — 核心端点
@@ -308,11 +343,21 @@ class AiSqlExecuteService:
         # （包含 snapshot_hash + allowed_schemas/tables/columns + policy_version），
         # 而不是 raw snapshot_hash。比较时必须重新计算当前 snapshot 的
         # schema_policy_hash 再与 audit.schema_policy_hash 比较。
+        #
+        # C16-F2d bug-fix (2026-07-09): 执行时必须合并 policy allowlist，
+        # 与 preview 时的 build_schema_context 保持一致；否则 policy 启用的
+        # instance 会出现 hash 不匹配 → 409 re-preview required。
         if snap.snapshot_hash:
+            policy_obj = AiSystemViewPolicyService.get_policy(
+                db, instance_id=audit.instance_id,
+            )
+            execute_allowed_tables = AiSystemViewPolicyService.merged_allowlist(
+                policy_obj, list(snap.allowed_tables or []),
+            )
             current_policy_hash = AiSchemaContextService._compute_schema_policy_hash(
                 snapshot_hash=str(snap.snapshot_hash or ""),
                 allowed_schemas=list(snap.allowed_schemas or []),
-                allowed_tables=list(snap.allowed_tables or []),
+                allowed_tables=execute_allowed_tables,
                 allowed_columns=dict(snap.allowed_columns or {}),
                 denied_columns=list(snap.denied_columns or []),
                 policy_version=cls.SAFETY_POLICY_VERSION,
@@ -327,10 +372,13 @@ class AiSqlExecuteService:
 
         # 4. AST 二次校验（防御 preview 后 audit 行被人工修改 / DB 触发器
         # 等场景；保证 Execute 时 SQL 仍满足只读约束）
+        # C16-F2d bug-fix: 使用合并了 policy allowlist 的 allowed_tables，
+        # 否则系统视图（V$LOCK / dba_waiters 等）会被 AST 误判为未授权表。
+        execute_allowed_tables_ast = execute_allowed_tables if snap.snapshot_hash else list(snap.allowed_tables or [])
         safety_check = SqlSafetyService.validate_with_ast(
             sql_text=str(audit.approved_sql),
             db_type_code=str(audit.db_type_code or "POSTGRESQL"),
-            allowed_tables=list(snap.allowed_tables or []),
+            allowed_tables=execute_allowed_tables_ast,
             allowed_columns=dict(snap.allowed_columns or {}),
             denied_columns=list(snap.denied_columns or []),
             max_rows=cls.DEFAULT_MAX_ROWS,
@@ -420,7 +468,10 @@ class AiSqlExecuteService:
             "target_host": target_host,
             "target_port": target_port,
             "db_type_code": str(audit.db_type_code or "POSTGRESQL").lower(),
-            "database_name": getattr(instance, "database_name", None) or (snap.database_name if snap else None) or "<default>",
+            "database_name": (
+                getattr(instance, "database_name", None)
+                or cls._resolve_database_name(snap, str(audit.db_type_code or ""))
+            ),
             "service_name": getattr(instance, "service_name", None),
             "timeout_seconds": int(cls.DEFAULT_TIMEOUT_SECONDS),
             "rule_config": {
